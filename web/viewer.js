@@ -277,16 +277,81 @@
     }
   }
 
-  // ---- pan and zoom -------------------------------------------------------
+  // ---- tools: pan, and brush stroke capture ------------------------------
+
+  // The canvas's pointer goes to the current tool: 'pan' drags the view;
+  // 'brush' records a stroke -- every sample, coalesced ones included, in
+  // document pixels with pressure and tilt -- and hands it to the stroke
+  // hooks.  Space held is pan whatever the tool, as in other editors.
+  // The brush engine is not built yet: S.onStrokeSamples(stroke, fresh)
+  // runs as samples arrive (for a live preview) and S.onStroke(stroke)
+  // when the pointer lifts (to commit); both are stubs that keep the
+  // stroke in S.lastStroke.
+  S.tool = 'pan';
+  S.activeLayer = null;
+  var spaceHeld = false;
+
+  function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
+
+  function setCursor(dragging) {
+    canvas.style.cursor = effectiveTool() === 'brush' ? 'crosshair' : (dragging ? 'grabbing' : 'grab');
+  }
+
+  S.setTool = function (tool) {
+    S.tool = tool === 'brush' ? 'brush' : 'pan';
+    document.querySelectorAll('#stratum-panel .st-tool').forEach(function (b) {
+      b.classList.toggle('st-on', b.getAttribute('data-tool') === S.tool);
+    });
+    setCursor(false);
+  };
+
+  // A pointer event as a stroke sample: document pixels (x right, y
+  // down), pressure 0..1 (a mouse reports 0.5 while pressed), tilt in
+  // degrees, and the event's time in milliseconds.
+  function strokeSample(e) {
+    var dpr = window.devicePixelRatio || 1;
+    var r = canvas.getBoundingClientRect();
+    return {
+      x: view.ox + (e.clientX - r.left) * dpr / view.scale,
+      y: view.oy + (e.clientY - r.top) * dpr / view.scale,
+      pressure: e.pressure,
+      tiltX: e.tiltX || 0,
+      tiltY: e.tiltY || 0,
+      t: e.timeStamp
+    };
+  }
+
+  function coalesced(e) {
+    var list = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    return list.length ? list : [e];
+  }
+
+  S.onStrokeSamples = function () {};
+  S.onStroke = function (stroke) {
+    S.lastStroke = stroke;
+    status('stroke: ' + stroke.samples.length + ' samples on layer ' + stroke.layer +
+           ' (' + stroke.pointerType + '); the brush engine is not built yet');
+  };
 
   function installNavigation() {
-    var drag = null;
+    var drag = null, stroke = null;
     canvas.addEventListener('pointerdown', function (e) {
-      drag = { x: e.clientX, y: e.clientY };
-      canvas.setPointerCapture(e.pointerId);
-      canvas.style.cursor = 'grabbing';
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      if (effectiveTool() === 'brush') {
+        stroke = { layer: S.activeLayer, pointerType: e.pointerType, samples: [strokeSample(e)] };
+        S.onStrokeSamples(stroke, stroke.samples.slice());
+      } else {
+        drag = { x: e.clientX, y: e.clientY };
+        setCursor(true);
+      }
     });
     canvas.addEventListener('pointermove', function (e) {
+      if (stroke) {
+        var fresh = coalesced(e).map(strokeSample);
+        Array.prototype.push.apply(stroke.samples, fresh);
+        S.onStrokeSamples(stroke, fresh);
+        return;
+      }
       if (!drag) return;
       var dpr = window.devicePixelRatio || 1;
       view.ox -= (e.clientX - drag.x) * dpr / view.scale;
@@ -294,9 +359,26 @@
       drag = { x: e.clientX, y: e.clientY };
       requestDraw();
     });
-    function end() { drag = null; canvas.style.cursor = ''; }
+    function end(e) {
+      if (stroke) {
+        var done = stroke;
+        stroke = null;
+        if (e.type === 'pointerup') S.onStroke(done);
+      }
+      drag = null;
+      setCursor(false);
+    }
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
+    window.addEventListener('keydown', function (e) {
+      if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
+      else if (e.key === 'b' || e.key === 'B') S.setTool('brush');
+      else if (e.key === 'h' || e.key === 'H') S.setTool('pan');
+    });
+    window.addEventListener('keyup', function (e) {
+      if (e.code === 'Space') { spaceHeld = false; setCursor(false); }
+    });
     canvas.addEventListener('wheel', function (e) {
       e.preventDefault();
       var dpr = window.devicePixelRatio || 1;
@@ -311,6 +393,24 @@
     }, { passive: false });
     canvas.addEventListener('dblclick', function () { fitView(); status(); requestDraw(); });
   }
+
+  // Re-upload one rectangle of raster layer I (its texture index) from
+  // the server, in document pixels -- what a committed stroke needs in
+  // place of a whole-layer upload -- then rebuild the mipmaps.  Mipmaps
+  // are rebuilt for the whole array: a per-region rebuild is the brush
+  // engine's to add if a stroke's commit shows it.
+  S.uploadRect = function (i, x, y, w, h) {
+    return fetchBytes(api('raster?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
+      .then(function (bytes) {
+        if (bytes.length !== w * h * 4) throw new Error('uploadRect: ' + bytes.length + ' bytes for ' + w + ' x ' + h);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, x, y, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+        requestDraw();
+        return bytes.length;
+      });
+  };
 
   // ---- edits --------------------------------------------------------------
 
@@ -356,7 +456,33 @@
 
   function buildPanel() {
     layersEl.textContent = '';
+    if (S.activeLayer === null) {
+      for (var t = doc.layers.length - 1; t >= 0 && S.activeLayer === null; t--) {
+        if (doc.layers[t].kind === 'raster') S.activeLayer = doc.layers[t].index;
+      }
+    }
     for (var n = doc.layers.length - 1; n >= 0; n--) layersEl.appendChild(layerRow(doc.layers[n]));
+  }
+
+  // The layer a brush stroke paints: clicking a layer's name picks it.
+  S.setActiveLayer = function (i) {
+    S.activeLayer = i;
+    document.querySelectorAll('#stratum-layers .st-layer').forEach(function (row) {
+      row.classList.toggle('st-active', Number(row.getAttribute('data-layer')) === i);
+    });
+  };
+
+  // Pan and Brush buttons, under the status lines (keys: H, B; Space
+  // held pans whatever the tool).
+  function installToolbar() {
+    var row = el('div', { 'class': 'st-row' });
+    [['pan', 'Pan (H)'], ['brush', 'Brush (B)']].forEach(function (pair) {
+      var b = el('button', { type: 'button', 'class': 'st-tool', 'data-tool': pair[0], text: pair[1] });
+      b.addEventListener('click', function () { S.setTool(pair[0]); });
+      row.appendChild(b);
+    });
+    statusEl.parentNode.insertBefore(row, statusEl.nextSibling);
+    S.setTool(S.tool);
   }
 
   function layerRow(L) {
@@ -382,7 +508,10 @@
       requestDraw();
       postSoon('opacity' + i, { layer: i, slot: 'opacity', value: L.opacity });
     });
-    var row = el('div', { 'class': 'st-layer' }, [head, el('div', { 'class': 'st-row' }, [range, val])]);
+    var row = el('div', { 'class': 'st-layer' + (i === S.activeLayer ? ' st-active' : ''),
+                          'data-layer': String(i) },
+                 [head, el('div', { 'class': 'st-row' }, [range, val])]);
+    head.querySelector('.st-name').addEventListener('click', function () { S.setActiveLayer(i); });
     if (L.kind === 'raster') {
       var sel = el('select', { 'class': 'st-blend' });
       ['normal', 'multiply', 'screen', 'add'].forEach(function (m) {
@@ -658,6 +787,46 @@
         check('parity after restore', p.maxDiff <= 1, p);
       });
     }).then(function () {
+      // A rectangle of the second raster layer back from the server into
+      // the same place: a wrong offset or a transposed copy would show
+      // as a parity failure.
+      var tex = Math.min(1, doc.rasterCount - 1), x = 37, y = 23, w = 101, h = 59;
+      return S.uploadRect(tex, x, y, w, h).then(function (n) {
+        check('uploadRect brings w*h*4 bytes', n === w * h * 4, { bytes: n });
+        return S.parity();
+      }).then(function (p) {
+        check('parity after uploadRect', p.maxDiff <= 1, p);
+      });
+    }).then(function () {
+      // A synthetic pen stroke through the brush tool: every sample
+      // recorded, in document pixels, with its pressure.
+      var saved = { tool: S.tool, onStroke: S.onStroke }, got = null;
+      S.setTool('brush');
+      S.onStroke = function (stroke) { got = stroke; };
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      var points = [[0.3, 0.4, 0.2], [0.35, 0.42, 0.4], [0.4, 0.45, 0.6], [0.45, 0.5, 0.8],
+                    [0.5, 0.52, 0.9], [0.55, 0.55, 1.0]];
+      function fire(type, pt) {
+        canvas.dispatchEvent(new PointerEvent(type, {
+          clientX: r.left + pt[0] * r.width, clientY: r.top + pt[1] * r.height,
+          pointerId: 41, pointerType: 'pen', pressure: pt[2], bubbles: true }));
+      }
+      fire('pointerdown', points[0]);
+      points.slice(1).forEach(function (pt) { fire('pointermove', pt); });
+      fire('pointerup', points[points.length - 1]);
+      S.onStroke = saved.onStroke;
+      S.setTool(saved.tool);
+      var want = points.map(function (pt) {
+        return [view.ox + pt[0] * r.width * dpr / view.scale, view.oy + pt[1] * r.height * dpr / view.scale, pt[2]];
+      });
+      var worst = got ? Math.max.apply(null, got.samples.map(function (s, k) {
+        return Math.max(Math.abs(s.x - want[k][0]), Math.abs(s.y - want[k][1]), Math.abs(s.pressure - want[k][2]));
+      })) : null;
+      check('a brush stroke records every sample in document pixels',
+            got && got.samples.length === points.length && got.layer === S.activeLayer &&
+            got.pointerType === 'pen' && worst < 1e-3,
+            { samples: got && got.samples.length, layer: got && got.layer, worst: worst });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -716,6 +885,7 @@
       status();
       draw();
       installBenchButton();
+      installToolbar();
       S.ready = true;
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
     }).catch(function (e) {

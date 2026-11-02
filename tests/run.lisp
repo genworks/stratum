@@ -164,6 +164,19 @@ to alter the pictures."
             (check (format nil "CPU render of ~a matches its golden checksum" name)
                    (eql want got) (list :want want :got got)))))))
 
+(defun test-rect ()
+  (let* ((w 7) (h 5)
+         (pixels (let ((p (make-rgba w h)))
+                   (dotimes (i (length p) p) (setf (aref p i) (mod i 251)))))
+         (rect (rgba-rect pixels w h 2 1 3 2)))
+    (check "rgba-rect copies the rectangle, rows from the top"
+           (equalp rect (concatenate '(vector (unsigned-byte 8))
+                                     (subseq pixels (* 4 (+ 2 (* 7 1))) (* 4 (+ 5 (* 7 1))))
+                                     (subseq pixels (* 4 (+ 2 (* 7 2))) (* 4 (+ 5 (* 7 2)))))))
+    (check "rgba-rect refuses a rectangle outside the image"
+           (handler-case (progn (rgba-rect pixels w h 5 0 3 1) nil)
+             (error () t)))))
+
 (defun test-threads ()
   (let* ((doc (make-sample-document "parity"))
          (threaded (let ((*render-threads* 8)) (the-object doc (render-cpu))))
@@ -173,8 +186,8 @@ to alter the pictures."
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
-  (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-threads
-                  test-golden))
+  (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
+                  test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

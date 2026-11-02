@@ -140,6 +140,9 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-name { flex: 1; font-weight: 600; }
 .st-kind { color: #8a9099; font-size: 11px; }
 .st-label { color: #8a9099; font-size: 11px; width: 62px; flex: none; }
+.st-name { cursor: pointer; }
+.st-layer.st-active { box-shadow: inset 3px 0 0 #6c9ce0; padding-left: 8px; }
+#stratum-panel button.st-tool.st-on { background: #3b5f93; border-color: #6c9ce0; }
 .st-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
 .st-row input[type=range] { flex: 1; }
 .st-row select { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; }
@@ -222,8 +225,15 @@ goes back as a 500 carrying the condition's text."
            (lambda (req) (json-string (document-json (request-doc req)))))
       (pub "/stratum/api/raster" "application/octet-stream"
            (lambda (req)
-             (the-object (nth (request-index req) (the-object (request-doc req) raster-layers))
-                         pixels)))
+             (let* ((doc (request-doc req))
+                    (pixels (the-object (nth (request-index req) (the-object doc raster-layers))
+                                        pixels)))
+               (flet ((q (name) (let ((v (net.aserve:request-query-value name req)))
+                                  (and v (parse-integer v)))))
+                 (if (q "w")
+                     (rgba-rect pixels (the-object doc doc-width) (the-object doc doc-height)
+                                (or (q "x") 0) (or (q "y") 0) (q "w") (q "h"))
+                     pixels)))))
       (pub "/stratum/api/mask" "application/octet-stream"
            (lambda (req)
              (the-object (nth (request-index req) (the-object (request-doc req) masked-layers))

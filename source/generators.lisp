@@ -28,6 +28,19 @@
 (defun make-gray (w h)
   (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element 0))
 
+(defun rgba-rect (pixels width height x y w h)
+  "The W x H rectangle of RGBA PIXELS (WIDTH x HEIGHT) at X, Y, rows from
+the top, as a fresh vector -- what the viewer re-uploads after an edit
+to part of a layer.  The rectangle must lie inside the image."
+  (unless (and (<= 0 x) (<= 0 y) (< 0 w) (< 0 h) (<= (+ x w) width) (<= (+ y h) height))
+    (error "Rectangle ~a,~a ~ax~a is not inside ~ax~a." x y w h width height))
+  (let ((out (make-rgba w h)))
+    (dotimes (row h out)
+      (replace out pixels
+               :start1 (* 4 w row)
+               :start2 (* 4 (+ x (* width (+ y row))))
+               :end2 (* 4 (+ x w (* width (+ y row))))))))
+
 (defun generate-pixels (spec w h)
   "RGBA8 pixels for the raster SPEC, (generator &key ...)."
   (let ((key (list :rgba spec w h)))

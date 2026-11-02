@@ -282,6 +282,28 @@ to alter the pictures."
                   (equalp (the-object doc (render-cpu)) render-before)))
       (check "nothing is left to undo" (null (undo-stroke! doc))))))
 
+(defun test-files ()
+  (let ((image (let ((p (make-rgba 4 3)))
+                 (dotimes (i (length p) p) (setf (aref p i) (+ 1 (mod i 251)))))))
+    (check "fit-rgba pads a smaller image, centered, with transparency"
+           (let ((out (fit-rgba image 4 3 8 5)))
+             (and (= (length out) (* 4 8 5))
+                  (every #'zerop (subseq out 0 (* 4 8)))
+                  (equalp (subseq out (* 4 (+ 2 (* 8 1))) (* 4 (+ 6 (* 8 1)))) (subseq image 0 16))
+                  (equalp (subseq out (* 4 (+ 2 (* 8 3))) (* 4 (+ 6 (* 8 3)))) (subseq image 32 48)))))
+    (check "fit-rgba crops a larger image, centered"
+           (let ((out (fit-rgba image 4 3 2 1)))
+             (equalp out (subseq image (* 4 (+ 1 (* 4 1))) (* 4 (+ 3 (* 4 1)))))))
+    (let* ((opaque (let ((p (copy-seq image)))
+                     (loop for i from 3 below (length p) by 4 do (setf (aref p i) 255))
+                     p))
+           (doc (make-file-document "test-file" 4 3 opaque)))
+      (check "an opened image is one Background layer, rendered as it came"
+             (and (= 1 (length (the-object doc layer-list)))
+                  (string= (the-object doc (layer 0) layer-name) "Background")
+                  (equalp (the-object doc (render-cpu)) opaque))
+             (list (the-object doc (render-cpu)) opaque)))))
+
 (defun layer-names (doc)
   (mapcar (lambda (l) (the-object l layer-name)) (the-object doc layer-list)))
 
@@ -346,7 +368,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-layers test-threads test-golden))
+                  test-brush test-layers test-files test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

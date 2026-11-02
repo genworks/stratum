@@ -97,8 +97,9 @@ empty space to add a point, or double-click a point to remove it.
 The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
-as unavailable commands do. Built so far: File ▸ Open Sample and
-Export As PNG; Edit ▸ Undo; Layer ▸ New ▸ Layer, Duplicate Layer,
+as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
+Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
+Undo; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation)
 and Arrange (Bring Forward, Send Backward); View ▸ Zoom In, Zoom Out,
 Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
@@ -123,6 +124,15 @@ and Ctrl+- are the views. Click a layer's name to make it the active
 one; the brush paints on it. The panel has the brush's size, hardness,
 flow, opacity and color.
 
+Files go in through the browser, which decodes every image format it
+knows, and exactly: an ImageBitmap with no premultiplication and no
+color conversion, read back through a texture, so the bytes the server
+gets are the file's. Open makes a new document of them, one Background
+layer; Place adds them as a layer of the current document, centered
+and cropped or padded to its size. Save As and Export write the
+flattened picture as a PNG on the server (`zpng`). A layered native
+file format is still to come.
+
 A change of the stack (a layer added, deleted, moved or duplicated)
 goes through the document's `layer-specs`, which makes every layer
 object anew; each layer first writes its current state back into its
@@ -144,6 +154,9 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 | `POST /stratum/api/stroke?doc=N` | `{layer, samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle, the layer's texture index and paint version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last stroke; answers the rectangle put back |
+| `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
+| `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
+| `POST /stratum/api/close?doc=N` | forgets the document |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}` or `{op: "duplicate", layer}`; answers the new plan version and the layer to work on |
 
 ## Tests
@@ -168,6 +181,8 @@ It checks:
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
   programs following;
+- files: an image fitted into another size is centered, padded or
+  cropped, and an opened image renders back as it came;
 - that a threaded render equals a single-threaded one;
 - the FNV-1a checksums of the CPU renders against `tests/golden.sexp`,
   the sample documents and the parity document with a test stroke
@@ -208,7 +223,11 @@ The self-test checks:
   stack as found;
 - the palette: a tool not built is refused, the eyedropper picks the
   color under the pointer, X swaps the swatches, and a layer's
-  thumbnail comes from the server.
+  thumbnail comes from the server;
+- files: an image drawn in the browser and encoded as a PNG decodes
+  back byte for byte, lands centered on its own layer when placed and
+  reads back from the server byte for byte, and makes a new document
+  of its size when opened.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports
@@ -243,9 +262,10 @@ rectangles until the tile store exists; and the dab is a round, soft
 disc, with no texture, tilt or scatter yet.
 
 Smaller items still to do: per-session documents (today one document is
-shared per sample name), loading real files (PNG through `png-read` or
-an equivalent), and premultiplying before mipmap generation to remove
-edge fringes when zoomed out.  The CPU render runs on
+shared per name), a layered native file format and a server-side PNG
+reader for files on disk (`chipz` is in the Gendl images), and
+premultiplying before mipmap generation to remove edge fringes when
+zoomed out.  The CPU render runs on
 `*render-threads*` threads (8 by default): 2 s for the 4K twenty-layer
 document, against 10 s on one thread.
 

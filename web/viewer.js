@@ -435,6 +435,8 @@
       var mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
+      else if (mod && key === 'o') { e.preventDefault(); chooseFile(S.openFile); }
+      else if (mod && e.shiftKey && key === 's') { e.preventDefault(); S.saveAs(); }
       else if (mod && e.shiftKey && key === 'n') { e.preventDefault(); S.layerOp({ op: 'add', kind: 'raster' }); }
       else if (mod && key === 'j') { e.preventDefault(); S.layerOp({ op: 'duplicate' }); }
       else if (mod && e.key === ']') { e.preventDefault(); S.layerOp({ op: 'move', delta: 1 }); }
@@ -1055,6 +1057,94 @@
     return '#' + c.map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2); }).join('');
   }
 
+  // ---- files --------------------------------------------------------------
+  //
+  // The browser decodes an image file, in every format it knows, and
+  // exactly: an ImageBitmap with no premultiplication and no color
+  // conversion, through a texture and readPixels, so the bytes the
+  // server gets are the file's.  Open makes a new document of them;
+  // Place adds them as a layer of this one; Save As is the flattened
+  // PNG the server writes.
+
+  S.decodeImage = function (file) {
+    return createImageBitmap(file, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+      .then(function (bmp) {
+        var w = bmp.width, h = bmp.height;
+        var tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+        var fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        var bytes = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(fbo);
+        gl.deleteTexture(tex);
+        bmp.close();
+        return { width: w, height: h, bytes: bytes };
+      });
+  };
+
+  function postBytes(path, bytes) {
+    return fetchJSON(api(path), { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes });
+  }
+
+  function baseName(file) { return (file.name || 'untitled').replace(/\.[^.]*$/, ''); }
+
+  S.openImage = function (img, name) {
+    return postBytes('open?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height, img.bytes);
+  };
+
+  S.openFile = function (file) {
+    status('opening ' + (file.name || 'image') + '...');
+    return S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); })
+      .then(function (res) { location.search = '?doc=' + encodeURIComponent(res.doc); })
+      .catch(function (e) { status('open failed: ' + e.message); });
+  };
+
+  S.placeImage = function (img, name) {
+    return S.strokesSettled().then(function () {
+      return postBytes('place?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height +
+                       (S.activeLayer !== null ? '&above=' + S.activeLayer : ''), img.bytes);
+    }).then(function (res) {
+      S.activeLayer = res.active;
+      S.undoDepth = 0;
+      return reloadStructure(true);
+    });
+  };
+
+  S.placeFile = function (file) {
+    status('placing ' + (file.name || 'image') + '...');
+    return S.decodeImage(file).then(function (img) { return S.placeImage(img, baseName(file)); })
+      .catch(function (e) { status('place failed: ' + e.message); });
+  };
+
+  S.saveAs = function () {
+    var a = el('a', { href: api('export.png'), download: doc.name + '.png' });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  S.closeDocument = function () {
+    return postJSON('close').then(function () { location.search = '?doc=demo'; });
+  };
+
+  function chooseFile(then) {
+    var input = el('input', { type: 'file', accept: 'image/*' });
+    input.style.display = 'none';
+    input.addEventListener('change', function () {
+      if (input.files[0]) then(input.files[0]);
+      input.remove();
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
+
   // ---- the menu bar -------------------------------------------------------
   //
   // The menus a classic image editor has, in their usual order with
@@ -1077,14 +1167,17 @@
     return [
       { title: 'File', items: [
         { label: 'New...', key: 'Ctrl+N' },
-        { label: 'Open...', key: 'Ctrl+O' },
+        { label: 'Open...', key: 'Ctrl+O', run: function () { chooseFile(S.openFile); } },
         { label: 'Open Sample', sub: ['demo', 'parity', 'stress'].map(function (n) {
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + n; } }; }) },
         '-',
+        { label: 'Place...', run: function () { chooseFile(S.placeFile); } },
+        '-',
         { label: 'Save', key: 'Ctrl+S' },
+        { label: 'Save As...', key: 'Ctrl+Shift+S', run: S.saveAs },
         { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(api('export.png')); } }] },
         '-',
-        { label: 'Close', key: 'Ctrl+W' }] },
+        { label: 'Close', run: S.closeDocument }] },
       { title: 'Edit', items: [
         { label: 'Undo', key: 'Ctrl+Z', run: function () { S.undo(); },
           enabled: function () { return S.undoDepth > 0; } },
@@ -1657,6 +1750,51 @@
       var tex = doc.layers[S.activeLayer] && doc.layers[S.activeLayer].texIndex;
       return S.refreshThumb(tex).then(function (n) {
         check('a layer thumbnail comes from the server', n === 40 * 24 * 4, { bytes: n });
+      });
+    }).then(function () {
+      // A file in and out: a small image drawn here and encoded as a PNG
+      // by the browser decodes back byte for byte; placed as a layer it
+      // lands centered and reads back from the server byte for byte;
+      // opened, it is a new document of its size; then both go.
+      var w = 50, h = 30, c2 = el('canvas', { width: String(w), height: String(h) });
+      var ctx = c2.getContext('2d'), img = ctx.createImageData(w, h), want = new Uint8Array(w * h * 4);
+      for (var i = 0; i < w * h; i++) {
+        var a = i % 5 === 0 ? 0 : 255;
+        want[4 * i] = a ? (i * 7) & 255 : 0;
+        want[4 * i + 1] = a ? (i * 13) & 255 : 0;
+        want[4 * i + 2] = a ? (i * 29) & 255 : 0;
+        want[4 * i + 3] = a;
+      }
+      img.data.set(want);
+      ctx.putImageData(img, 0, 0);
+      var active = S.activeLayer, n = doc.layers.length, decoded = null;
+      function same(a, b) { if (a.length !== b.length) return false; for (var k = 0; k < a.length; k++) if (a[k] !== b[k]) return false; return true; }
+      return new Promise(function (r) { c2.toBlob(r, 'image/png'); }).then(function (blob) {
+        return S.decodeImage(blob);
+      }).then(function (d) {
+        decoded = d;
+        check('an image file decodes back byte for byte',
+              d.width === w && d.height === h && same(d.bytes, want), { width: d.width, height: d.height });
+        return S.placeImage(d, 'placed');
+      }).then(function () {
+        var L = doc.layers[S.activeLayer];
+        var ox = Math.floor((doc.width - w) / 2), oy = Math.floor((doc.height - h) / 2);
+        return fetchBytes(api('raster?i=' + L.texIndex + '&x=' + ox + '&y=' + oy + '&w=' + w + '&h=' + h)).then(function (b) {
+          check('a placed image lands centered on its own layer, byte for byte',
+                doc.layers.length === n + 1 && L.kind === 'raster' && L.name === 'placed' && same(b, want),
+                { layers: doc.layers.length, name: L.name });
+          return S.layerOp({ op: 'delete' });
+        });
+      }).then(function () {
+        S.setActiveLayer(active);
+        return S.openImage(decoded, 'selftest');
+      }).then(function (res) {
+        return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(res.doc)).then(function (d) {
+          check('an opened image is a new document of its size with one Background layer',
+                d.width === w && d.height === h && d.layers.length === 1 && d.layers[0].name === 'Background',
+                { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
+          return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
+        });
       });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };

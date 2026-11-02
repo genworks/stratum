@@ -211,6 +211,66 @@ answering the new planVersion and the index of the layer to work on."
                                   "active" active
                                   "layerCount" (length (the-object doc layer-list))))))))
 
+;;; Files.  The browser decodes an image file (every format it knows,
+;;; exactly: an ImageBitmap with no premultiplication or color
+;;; conversion, read back through a texture) and sends the raw RGBA8
+;;; with its size, so the server needs no decoder; the PNG it writes
+;;; (export.png) is the flattened picture.
+
+(defun request-octets (req)
+  "The request body as octets.  aserve hands a binary body over as a
+string of one character per byte."
+  (let ((body (net.aserve:get-request-body req :external-format :octets)))
+    (if (stringp body)
+        (map '(simple-array (unsigned-byte 8) (*)) #'char-code body)
+        (coerce body '(simple-array (unsigned-byte 8) (*))))))
+
+(defun request-image (req)
+  "(values pixels w h): the raw RGBA8 image in the body, W x H from the query."
+  (let* ((w (parse-integer (net.aserve:request-query-value "w" req)))
+         (h (parse-integer (net.aserve:request-query-value "h" req)))
+         (pixels (request-octets req)))
+    (unless (and (< 0 w) (< 0 h) (= (length pixels) (* 4 w h)))
+      (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length pixels)))
+    (values pixels w h)))
+
+(defun unique-document-name (name)
+  "NAME, or NAME-2, NAME-3 ... when a document or a sample already has it."
+  (loop for n from 1
+        for candidate = (if (= n 1) name (format nil "~a-~d" name n))
+        unless (or (gethash candidate *documents*)
+                   (assoc candidate *recipes* :test #'string=))
+          return candidate))
+
+(defun handle-open (req)
+  "A new document from the raw RGBA8 image in the body (?name=&w=&h=),
+one Background layer; answers {doc, width, height}."
+  (multiple-value-bind (pixels w h) (request-image req)
+    (let ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled"))))
+      (setf (gethash name *documents*) (make-file-document name w h pixels))
+      (json-string (json-object "doc" name "width" w "height" h)))))
+
+(defun handle-place (req)
+  "The raw RGBA8 image in the body as a new layer of the document
+(?name=&w=&h=&above=), centered and cropped or padded to the document's
+size; answers as handle-layers does."
+  (let ((doc (request-doc req)))
+    (multiple-value-bind (pixels w h) (request-image req)
+      (let* ((fitted (fit-rgba pixels w h (the-object doc doc-width) (the-object doc doc-height)))
+             (above (let ((a (net.aserve:request-query-value "above" req)))
+                      (and a (plusp (length a)) (parse-integer a))))
+             (name (or (net.aserve:request-query-value "name" req) "Placed"))
+             (active (the-object doc (add-layer! (list :kind :raster :name name :pixels fitted) above))))
+        (json-string (json-object "planVersion" (the-object doc plan-version)
+                                  "active" active
+                                  "layerCount" (length (the-object doc layer-list))))))))
+
+(defun handle-close (req)
+  "Forget the named document; a sample is remade on its next request."
+  (let ((name (net.aserve:request-query-value "doc" req)))
+    (remhash name *documents*)
+    (json-string (json-object "closed" name))))
+
 (defparameter *page-css* "
 html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
@@ -403,4 +463,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/set" "application/json" #'handle-set)
       (pub "/stratum/api/stroke" "application/json" #'handle-stroke)
       (pub "/stratum/api/undo" "application/json" #'handle-undo)
-      (pub "/stratum/api/layers" "application/json" #'handle-layers))))
+      (pub "/stratum/api/layers" "application/json" #'handle-layers)
+      (pub "/stratum/api/open" "application/json" #'handle-open)
+      (pub "/stratum/api/place" "application/json" #'handle-place)
+      (pub "/stratum/api/close" "application/json" #'handle-close))))

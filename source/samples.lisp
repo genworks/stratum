@@ -70,6 +70,15 @@ on a third of them."
     ("parity" :width 320 :height 200 :layers :demo)
     ("stress" :width 3840 :height 2160 :layers :stress)))
 
+(defun make-file-document (name width height pixels)
+  "A document of one raster layer, Background, holding PIXELS (RGBA8,
+WIDTH x HEIGHT): what File > Open makes of an image."
+  (make-object 'image-document
+               :doc-name name
+               :doc-width width
+               :doc-height height
+               :layer-specs (list (list :kind :raster :name "Background" :pixels pixels))))
+
 (defun make-sample-document (name)
   (let ((recipe (rest (assoc name *recipes* :test #'string=))))
     (unless recipe (error "No sample document named ~s." name))

@@ -54,6 +54,25 @@ its center, as the layer panel shows a layer."
             (replace out pixels :start1 (* channels (+ tx (* ty tw)))
                                 :start2 from :end2 (+ from channels))))))))
 
+(defun fit-rgba (pixels w h dw dh)
+  "PIXELS (W x H RGBA) centered on a transparent DW x DH canvas, cropped
+where it is larger and padded where it is smaller: how an image placed
+into a document of another size lands."
+  (let ((out (make-rgba dw dh))
+        (ox (floor (- dw w) 2))
+        (oy (floor (- dh h) 2)))
+    (loop for row below h
+          for y = (+ oy row)
+          when (and (<= 0 y) (< y dh))
+            do (let ((x0 (max 0 ox))
+                     (x1 (min dw (+ ox w))))
+                 (when (< x0 x1)
+                   (replace out pixels
+                            :start1 (* 4 (+ x0 (* dw y)))
+                            :start2 (* 4 (+ (- x0 ox) (* w row)))
+                            :end2 (* 4 (+ (- x1 ox) (* w row)))))))
+    out))
+
 (defun replace-rect! (pixels width x y w h bytes)
   "Write BYTES, a W x H RGBA rectangle as rgba-rect returns it, back into
 PIXELS (WIDTH wide) at X, Y."

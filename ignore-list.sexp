@@ -1,1 +1,1 @@
-("dev" "tests")
+("dev" "tests" "ci")

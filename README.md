@@ -93,7 +93,10 @@ It checks:
 - the FNV-1a checksums of the CPU renders against `tests/golden.sexp`.
 
 The checksums must come out the same on every implementation (SBCL and
-CCL agree today). Run `(stratum::record-golden)` only for a change that
+CCL agree today). CI (`.gitlab-ci.yml`) runs this half on every push,
+in the published `genworks/gendl` images for CCL and SBCL, through
+`ci/run-tests.lisp`. That script loads Stratum on a cold image and fails
+the job on any warning while Stratum loads, or on any failed check. Run `(stratum::record-golden)` only for a change that
 is meant to alter the pictures, and say so in its commit message.
 
 The browser half runs `STRATUM.selfTest()` in headless Chromium

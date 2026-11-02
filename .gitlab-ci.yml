@@ -1,0 +1,53 @@
+# Copyright © 2026 Genworks International
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.  Distributed WITHOUT
+# ANY WARRANTY; see <https://www.gnu.org/licenses/agpl-3.0.html>.
+
+# GitLab CI for genworks/stratum: the Lisp half of the regression suite
+# (tests/run.lisp) on a COLD Gendl image, once per implementation.
+#
+# Each job runs inside a published Gendl image that has never seen this
+# repository: ci/run-tests.lisp loads Quicklisp from the image, loads
+# Stratum through ASDF from the checkout (a WARNING while it loads fails
+# the job), and runs every check -- which edits rebuild the programs,
+# layer-type dispatch, the curve, levels and hue/saturation properties,
+# rectangles, threaded against single-threaded renders, and the golden
+# checksums of the CPU renders, which must be the same on every
+# implementation.  Exit status 1 is a failed check, 2 anything else.
+#
+# The browser half (tests/browser.sh: GPU against CPU in headless
+# Chromium) needs a running image and a browser beside it; it runs
+# where the stack is, not here, for now.
+#
+# Runner: the amd64 DOCKER executor (tag "amd64-docker"); the job runs
+# in the Gendl image as the image's own user.
+
+stages:
+  - test
+
+.lisp-tests:
+  stage: test
+  tags:
+    - amd64-docker
+  variables:
+    GIT_DEPTH: "1"
+  before_script:
+    # A private copy: the build directory belongs to the runner's helper,
+    # not the image's user.
+    - rm -rf /tmp/stratum && cp -r "$CI_PROJECT_DIR" /tmp/stratum
+    - cd /opt/gendl
+
+tests-ccl:
+  extends: .lisp-tests
+  image: genworks/gendl:devo-ccl
+  script:
+    - STRATUM_DIR=/tmp/stratum ./gdl/program/gdl-ccl -n -b --load /tmp/stratum/ci/run-tests.lisp
+
+tests-sbcl:
+  extends: .lisp-tests
+  image: genworks/gendl:devo-sbcl
+  script:
+    - STRATUM_DIR=/tmp/stratum ./gdl/program/gdl-sbcl --non-interactive --load /tmp/stratum/ci/run-tests.lisp

@@ -13,4 +13,5 @@
              #:make-sample-document #:find-document
              #:png-octets #:publish-stratum!
              #:define-dual-function #:dual-functions-js
-             #:plan->glsl #:plan->lisp))
+             #:plan->glsl #:plan->lisp
+             #:place-dabs #:paint-dab #:apply-brush-stroke #:undo-stroke!))

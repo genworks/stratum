@@ -41,6 +41,15 @@ to part of a layer.  The rectangle must lie inside the image."
                :start2 (* 4 (+ x (* width (+ y row))))
                :end2 (* 4 (+ x w (* width (+ y row))))))))
 
+(defun replace-rect! (pixels width x y w h bytes)
+  "Write BYTES, a W x H RGBA rectangle as rgba-rect returns it, back into
+PIXELS (WIDTH wide) at X, Y."
+  (dotimes (row h pixels)
+    (replace pixels bytes
+             :start1 (* 4 (+ x (* width (+ y row))))
+             :start2 (* 4 w row)
+             :end2 (* 4 w (1+ row)))))
+
 (defun generate-pixels (spec w h)
   "RGBA8 pixels for the raster SPEC, (generator &key ...)."
   (let ((key (list :rgba spec w h)))

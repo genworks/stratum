@@ -24,6 +24,15 @@
 #
 # Runner: the amd64 DOCKER executor (tag "amd64-docker"); the job runs
 # in the Gendl image as the image's own user.
+#
+# The repository is push-mirrored to other GitLab servers that carry
+# this file too but have no such runner, where a pipeline would only
+# wait for one and fail; so the pipeline exists on the home server
+# alone, and the mirrors create none.
+
+workflow:
+  rules:
+    - if: $CI_SERVER_HOST == "gitlab.genworks.com"
 
 stages:
   - test

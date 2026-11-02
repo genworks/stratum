@@ -11,5 +11,5 @@
   (:file "source/dual") (:file "source/curves")
   (:file "source/generators") (:file "source/glsl")
   (:file "source/cpu") (:file "source/document")
-  (:file "source/samples") (:file "source/png") (:file "source/web")
-  (:file "source/stubs")))
+  (:file "source/brush") (:file "source/samples")
+  (:file "source/png") (:file "source/web") (:file "source/stubs")))

@@ -67,14 +67,36 @@ with :blend (:normal, :multiply, :screen or :add).")
 
   :input-slots
   ((blend-mode (getf (the spec) :blend :normal) :settable)
-   (source (getf (the spec) :source)))
+   (source (getf (the spec) :source))
+   ("Vector of (unsigned-byte 8), or nil.  This layer's own pixel buffer,
+a copy of the source made by its first stroke; nil until then, so an
+unpainted layer shares the pixel cache's copy and never paints into it."
+    own-pixels nil :settable)
+   ("Integer.  Counts the strokes and undos applied to own-pixels.  They
+change the buffer in place, so bumping this is the signal that the
+pixels moved: it feeds pixels (and so raster-vector and the CPU render)
+and never the plan.  A mutable buffer with a version counter, rather
+than a settable list of strokes replayed over the source, because a
+replay of many strokes on a 4K layer costs seconds; undo keeps the
+rectangles instead (see brush.lisp)."
+    paint-version 0 :settable))
 
   :computed-slots
   ((kind :raster)
-   (pixels (generate-pixels (the source) (the doc-width) (the doc-height)))
+   (source-pixels (generate-pixels (the source) (the doc-width) (the doc-height)))
+   (pixels (progn (the paint-version)
+                  (or (the own-pixels) (the source-pixels))))
    (texture-index (position self (the parent raster-layers)))
    (plan-entry (list :raster :tex (the texture-index) :blend (the blend-mode)
-                     :mask (the mask-index) :param (the index)))))
+                     :mask (the mask-index) :param (the index))))
+
+  :functions
+  ((ensure-own-pixels!
+    ()
+    "This layer's own pixel buffer, copied from the source on the first call."
+    (or (the own-pixels)
+        (progn (the (set-slot! :own-pixels (copy-seq (the source-pixels))))
+               (the own-pixels))))))
 
 (define-object curves-layer (lut-layer)
   :documentation
@@ -149,7 +171,11 @@ for the other keys.")
    (doc-width 1024)
    (doc-height 768)
    (layer-specs nil :settable)
-   (background-srgb (list 1.0 1.0 1.0) :settable))
+   (background-srgb (list 1.0 1.0 1.0) :settable)
+   ("List.  What the last strokes overwrote, newest first: (layer-index x
+y w h rgba-bytes) each, at most *undo-depth* of them.  undo-stroke! in
+brush.lisp pops one and puts the bytes back."
+    undo-entries nil :settable))
 
   :objects
   ((layers :type (:sequence (the layer-types))

@@ -40,6 +40,10 @@ uniform vec2 u_view_offset;
 uniform float u_view_scale;
 uniform float u_canvas_h;
 uniform int u_exact;
+uniform sampler2D u_stroke;
+uniform int u_stroke_layer;
+uniform vec4 u_stroke_color;
+uniform int u_stroke_erase;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -56,6 +60,9 @@ vec4 layer_px(int i, vec2 p) {
 float mask_px(int i, vec2 p) {
   if (u_exact == 1) return texelFetch(u_masks, ivec3(ivec2(p), i), 0).r;
   return texture(u_masks, vec3(p / u_doc_size, float(i))).r;
+}
+float stroke_px(vec2 p) {
+  return texelFetch(u_stroke, ivec2(p), 0).r;
 }
 float lut(int row, float x) {
   float q = clamp(x, 0.0, 1.0) * 255.0;
@@ -127,8 +134,24 @@ void main() {
   (destructuring-bind (kind &key tex blend mask param lut) entry
     (ecase kind
       (:raster
+       ;; The live stroke: a permanent stage of every raster block, idle
+       ;; (u_stroke_layer -1) except on the layer being painted, where
+       ;; the stroke texture's coverage composites the brush color over
+       ;; the layer's own pixel before the layer blends, exactly as
+       ;; composite-stroke! (brush.lisp) will commit it.
        (format nil "  // layer ~d: raster, ~(~a~)
   s = layer_px(~d, p);
+  if (u_stroke_layer == ~:*~d) {
+    float cv = stroke_px(p) * u_stroke_color.a;
+    if (cv > 0.0) {
+      if (u_stroke_erase == 1) s.a = s.a * (1.0 - cv);
+      else {
+        float na = cv + s.a * (1.0 - cv);
+        s.rgb = (u_stroke_color.rgb * cv + s.rgb * s.a * (1.0 - cv)) / na;
+        s.a = na;
+      }
+    }
+  }
   a = s.a * u_opacity[~d]~a;
   cb = ao > 0.0 ? co / ao : vec3(0.0);
   co = ((1.0 - ao) * s.rgb + ao * (~a)) * a + co * (1.0 - a);

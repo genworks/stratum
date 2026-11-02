@@ -64,6 +64,7 @@
      "maskIndex" (the-object layer mask-index)
      "blend" (when (eql kind :raster) (string-downcase (the-object layer blend-mode)))
      "texIndex" (when (eql kind :raster) (the-object layer texture-index))
+     "paintVersion" (when (eql kind :raster) (the-object layer paint-version))
      "lutRow" (when (typep layer 'lut-layer) (the-object layer lut-row))
      "settings" (let ((names (the-object layer setting-names)))
                   (when names
@@ -89,6 +90,7 @@
    "rasterCount" (length (the-object doc raster-layers))
    "maskCount" (length (the-object doc masked-layers))
    "lutRows" (the-object doc lut-rows)
+   "undoDepth" (length (the-object doc undo-entries))
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
 
@@ -124,6 +126,64 @@ document's planVersion."
           (t (error "Unknown slot ~s." slot)))
     (json-string (json-object "planVersion" (the-object doc plan-version)))))
 
+(defun parse-json-body (req)
+  "The request body as yason parses it, numbers read as double-floats:
+a stroke's coordinates must come back as the doubles the browser sent."
+  (let ((*read-default-float-format* 'double-float))
+    (yason:parse (net.aserve:get-request-body req))))
+
+(defun parse-stroke (body)
+  "The stroke plist apply-brush-stroke takes, from a POST body:
+samples [[x y pressure] ...] and brush {radius hardness spacing flow
+opacity color mode}; missing brush numbers take *default-brush*."
+  (let ((brush (gethash "brush" body)))
+    (flet ((num (name key)
+             (let ((v (and brush (gethash name brush))))
+               (if v (float v 1d0) (getf *default-brush* key)))))
+      (list :points (gethash "samples" body)
+            :radius (num "radius" :radius) :hardness (num "hardness" :hardness)
+            :spacing (num "spacing" :spacing) :flow (num "flow" :flow)
+            :opacity (num "opacity" :opacity)
+            :color (or (and brush (gethash "color" brush)) (getf *default-brush* :color))
+            :mode (if (and brush (equal (gethash "mode" brush) "erase")) :erase :paint)))))
+
+(defun rect-json (doc layer rect)
+  (json-object "layer" (the-object layer index)
+               "texIndex" (the-object layer texture-index)
+               "x" (first rect) "y" (second rect) "w" (third rect) "h" (fourth rect)
+               "paintVersion" (the-object layer paint-version)
+               "undoDepth" (length (the-object doc undo-entries))))
+
+(defun handle-stroke (req)
+  "Commit one stroke -- {layer, samples, brush} -- and answer the dirty
+rectangle with the layer's texture index and new paintVersion, or
+{empty: true} when it touched nothing.  With ?dry=1 nothing is painted:
+the answer is the server's coverage buffer and its rectangle, for the
+browser to compare with its own."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (stroke (parse-stroke body)))
+    (json-string
+     (if (net.aserve:request-query-value "dry" req)
+         (multiple-value-bind (coverage x y w h)
+             (stroke-coverage stroke (the-object doc doc-width) (the-object doc doc-height))
+           (if coverage
+               (json-object "x" x "y" y "w" w "h" h "coverage" (coerce coverage 'list))
+               (json-object "empty" 'yason:true)))
+         (let ((rect (apply-brush-stroke layer stroke)))
+           (if rect (rect-json doc layer rect) (json-object "empty" 'yason:true)))))))
+
+(defun handle-undo (req)
+  "Undo the document's last stroke and answer the rectangle put back, as
+handle-stroke does; {empty: true} when there was nothing to undo."
+  (let* ((doc (request-doc req))
+         (entry (undo-stroke! doc)))
+    (json-string
+     (if entry
+         (rect-json doc (the-object doc (layer (first entry))) (rest entry))
+         (json-object "empty" 'yason:true)))))
+
 (defparameter *page-css* "
 html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
@@ -143,6 +203,9 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-name { cursor: pointer; }
 .st-layer.st-active { box-shadow: inset 3px 0 0 #6c9ce0; padding-left: 8px; }
 #stratum-panel button.st-tool.st-on { background: #3b5f93; border-color: #6c9ce0; }
+.st-brush { margin-bottom: 10px; }
+.st-brush input[type=color] { width: 36px; height: 22px; padding: 0; border: 1px solid #3a3e45;
+  background: #2c2f35; }
 .st-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
 .st-row input[type=range] { flex: 1; }
 .st-row select { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; }
@@ -247,4 +310,6 @@ goes back as a 500 carrying the condition's text."
              (let ((doc (request-doc req)))
                (png-octets (the-object doc (render-cpu))
                            (the-object doc doc-width) (the-object doc doc-height)))))
-      (pub "/stratum/api/set" "application/json" #'handle-set))))
+      (pub "/stratum/api/set" "application/json" #'handle-set)
+      (pub "/stratum/api/stroke" "application/json" #'handle-stroke)
+      (pub "/stratum/api/undo" "application/json" #'handle-undo))))

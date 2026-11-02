@@ -15,7 +15,9 @@
 ;; a lambda form here, unrolled one block per layer and handed to
 ;; COMPILE.  It is the reference the GPU is checked against, and the
 ;; path for export.  Each block mirrors its GLSL counterpart operation
-;; for operation; change one and change the other.
+;; for operation; change one and change the other.  The shader's
+;; live-stroke stage has no block here: a stroke reaches the CPU as
+;; committed pixels, and its twin is composite-stroke! in brush.lisp.
 ;;
 
 (declaim (inline lut-lookup))

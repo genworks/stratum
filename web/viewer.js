@@ -13,16 +13,20 @@
 // they never recompile; a structural edit (a blend mode) comes back
 // with a new planVersion and the viewer fetches the new shader.  Curve
 // tables are computed by composedLut, the Lisp function the server
-// uses, translated by Parenscript into /stratum/dual.js.
+// uses, translated by Parenscript into /stratum/dual.js, and so are a
+// brush stroke's dabs (placeDabs, paintDab): the stroke is previewed
+// here with them, committed by the server with the same two, and only
+// the rectangle it changed comes back.
 //
 // window.STRATUM exposes the test hooks: parity() compares a GPU
-// render with the server's CPU render pixel for pixel, and bench()
-// measures frame times.
+// render with the server's CPU render pixel for pixel, strokeCheck()
+// compares the browser's stroke coverage with the server's, and
+// bench() measures frame times.
 
 (function () {
   'use strict';
 
-  var S = window.STRATUM = { stats: { draws: 0, programBuilds: 0, lutUploads: 0 } };
+  var S = window.STRATUM = { stats: { draws: 0, programBuilds: 0, lutUploads: 0, strokeUploads: 0 } };
   var qs = new URLSearchParams(location.search);
   var docName = qs.get('doc') || 'demo';
 
@@ -72,7 +76,8 @@
     prog = p;
     uni = {};
     ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
-     'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact'].forEach(function (n) {
+     'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
+     'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -208,6 +213,7 @@
   // ---- drawing ------------------------------------------------------------
 
   function bindAndSet(canvasH, v, exact) {
+    flushStroke();
     gl.useProgram(prog);
     gl.bindVertexArray(vao);
     gl.activeTexture(gl.TEXTURE0);
@@ -219,6 +225,12 @@
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, texLuts);
     gl.uniform1i(uni.u_luts, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, texStroke);
+    gl.uniform1i(uni.u_stroke, 3);
+    gl.uniform1i(uni.u_stroke_layer, preview.layer);
+    gl.uniform4fv(uni.u_stroke_color, preview.color);
+    gl.uniform1i(uni.u_stroke_erase, preview.erase);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -279,26 +291,26 @@
 
   // ---- tools: pan, and brush stroke capture ------------------------------
 
-  // The canvas's pointer goes to the current tool: 'pan' drags the view;
-  // 'brush' records a stroke -- every sample, coalesced ones included, in
-  // document pixels with pressure and tilt -- and hands it to the stroke
-  // hooks.  Space held is pan whatever the tool, as in other editors.
-  // The brush engine is not built yet: S.onStrokeSamples(stroke, fresh)
-  // runs as samples arrive (for a live preview) and S.onStroke(stroke)
-  // when the pointer lifts (to commit); both are stubs that keep the
-  // stroke in S.lastStroke.
+  // The canvas's pointer goes to the current tool: 'pan' drags the
+  // view; 'brush' and 'eraser' record a stroke -- every sample,
+  // coalesced ones included, in document pixels with pressure and tilt
+  // -- and hand it to the stroke hooks below: S.onStrokeSamples(stroke,
+  // fresh) as samples arrive (the live preview) and S.onStroke(stroke)
+  // when the pointer lifts (the commit).  Space held is pan whatever the
+  // tool, and the keys are the usual ones: B brush, E eraser, H hand.
   S.tool = 'pan';
   S.activeLayer = null;
   var spaceHeld = false;
 
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
+  function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
   function setCursor(dragging) {
-    canvas.style.cursor = effectiveTool() === 'brush' ? 'crosshair' : (dragging ? 'grabbing' : 'grab');
+    canvas.style.cursor = paints(effectiveTool()) ? 'crosshair' : (dragging ? 'grabbing' : 'grab');
   }
 
   S.setTool = function (tool) {
-    S.tool = tool === 'brush' ? 'brush' : 'pan';
+    S.tool = paints(tool) ? tool : 'pan';
     document.querySelectorAll('#stratum-panel .st-tool').forEach(function (b) {
       b.classList.toggle('st-on', b.getAttribute('data-tool') === S.tool);
     });
@@ -306,15 +318,15 @@
   };
 
   // A pointer event as a stroke sample: document pixels (x right, y
-  // down), pressure 0..1 (a mouse reports 0.5 while pressed), tilt in
-  // degrees, and the event's time in milliseconds.
+  // down), pressure 0..1 (a pen's; a mouse or finger paints at full
+  // pressure), tilt in degrees, and the event's time in milliseconds.
   function strokeSample(e) {
     var dpr = window.devicePixelRatio || 1;
     var r = canvas.getBoundingClientRect();
     return {
       x: view.ox + (e.clientX - r.left) * dpr / view.scale,
       y: view.oy + (e.clientY - r.top) * dpr / view.scale,
-      pressure: e.pressure,
+      pressure: e.pointerType === 'pen' ? e.pressure : 1,
       tiltX: e.tiltX || 0,
       tiltY: e.tiltY || 0,
       t: e.timeStamp
@@ -326,19 +338,13 @@
     return list.length ? list : [e];
   }
 
-  S.onStrokeSamples = function () {};
-  S.onStroke = function (stroke) {
-    S.lastStroke = stroke;
-    status('stroke: ' + stroke.samples.length + ' samples on layer ' + stroke.layer +
-           ' (' + stroke.pointerType + '); the brush engine is not built yet');
-  };
-
   function installNavigation() {
     var drag = null, stroke = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-      if (effectiveTool() === 'brush') {
-        stroke = { layer: S.activeLayer, pointerType: e.pointerType, samples: [strokeSample(e)] };
+      if (paints(effectiveTool())) {
+        stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: effectiveTool(),
+                   samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
       } else {
         drag = { x: e.clientX, y: e.clientY };
@@ -373,8 +379,13 @@
     window.addEventListener('keydown', function (e) {
       if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); S.undo(); }
+      else if (e.ctrlKey || e.metaKey || e.altKey) return;
       else if (e.key === 'b' || e.key === 'B') S.setTool('brush');
+      else if (e.key === 'e' || e.key === 'E') S.setTool('eraser');
       else if (e.key === 'h' || e.key === 'H') S.setTool('pan');
+      else if (e.key === '[') S.setBrush({ radius: Math.max(1, Math.round(S.brush.radius / 1.25)) });
+      else if (e.key === ']') S.setBrush({ radius: Math.min(300, Math.round(S.brush.radius * 1.25)) });
     });
     window.addEventListener('keyup', function (e) {
       if (e.code === 'Space') { spaceHeld = false; setCursor(false); }
@@ -410,6 +421,232 @@
         requestDraw();
         return bytes.length;
       });
+  };
+
+  // ---- the brush ----------------------------------------------------------
+  //
+  // A stroke is previewed here and committed by the server with the
+  // same two dual functions on both sides: placeDabs and paintDab in
+  // dual.js are place-dabs and paint-dab in brush.lisp.  As samples
+  // arrive, the dabs they add are painted into strokeBuf, a float64
+  // coverage buffer the size of the document; each frame uploads only
+  // the rectangle that changed into the R32F stroke texture, and the
+  // generated shader composites the brush color through that coverage
+  // onto the stroke's layer (u_stroke_layer), before the layer blends.
+  // When the pointer lifts the SAMPLES go to POST /stratum/api/stroke,
+  // the server paints them into the layer's pixels and answers the
+  // dirty rectangle, and the viewer re-uploads that rectangle alone and
+  // drops the preview.  Strokes and undos queue on one promise chain,
+  // so a stroke begun before the last commit has returned waits for it
+  // instead of painting into a buffer about to be cleared.
+
+  S.brush = { radius: 24, hardness: 0.8, spacing: 0.25, flow: 1, opacity: 1,
+              color: [230, 80, 70], mode: 'paint' };
+  S.undoDepth = 0;
+  var strokeBuf = null, texStroke = null, strokeDirty = null, frameDirty = null;
+  var preview = { layer: -1, color: [0, 0, 0, 0], erase: 0 };
+  var strokeChain = Promise.resolve();
+
+  function srgbToLinear(c) {
+    c = c / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  function unionRect(a, b) {
+    if (!a) return b;
+    var x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
+    var x1 = Math.max(a.x + a.w, b.x + b.w), y1 = Math.max(a.y + a.h, b.y + b.h);
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // The pixels a dab can touch, clipped to the document; null when none.
+  function dabRect(cx, cy, r) {
+    var x0 = Math.max(0, Math.floor(cx - r)), y0 = Math.max(0, Math.floor(cy - r));
+    var x1 = Math.min(doc.width - 1, Math.ceil(cx + r)), y1 = Math.min(doc.height - 1, Math.ceil(cy + r));
+    return x0 <= x1 && y0 <= y1 ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null;
+  }
+
+  // The stroke texture: one pixel until the first stroke, then the
+  // document's size, so a document that is only looked at pays nothing.
+  function strokeTexture(w, h) {
+    if (texStroke) gl.deleteTexture(texStroke);
+    texStroke = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texStroke);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+
+  function ensureStrokeBuffer() {
+    if (strokeBuf && strokeBuf.length === doc.width * doc.height) return;
+    strokeBuf = new Float64Array(doc.width * doc.height);
+    strokeTexture(doc.width, doc.height);
+  }
+
+  // Rectangle R of strokeBuf into the stroke texture (float32 there).
+  function uploadStrokeRect(r) {
+    var sub = new Float32Array(r.w * r.h);
+    for (var j = 0; j < r.h; j++) {
+      var src = (r.y + j) * doc.width + r.x, dst = j * r.w;
+      for (var i = 0; i < r.w; i++) sub[dst + i] = strokeBuf[src + i];
+    }
+    gl.bindTexture(gl.TEXTURE_2D, texStroke);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RED, gl.FLOAT, sub);
+    S.stats.strokeUploads++;
+  }
+
+  function flushStroke() {
+    if (frameDirty) { uploadStrokeRect(frameDirty); frameDirty = null; }
+  }
+
+  function texIndexOf(layerIndex) {
+    var L = doc.layers[layerIndex];
+    return L && L.kind === 'raster' ? L.texIndex : -1;
+  }
+
+  function sampleVectors(stroke) {
+    var n = stroke.samples.length;
+    var v = { n: n, xs: new Float64Array(n), ys: new Float64Array(n), ps: new Float64Array(n) };
+    for (var i = 0; i < n; i++) {
+      v.xs[i] = stroke.samples[i].x;
+      v.ys[i] = stroke.samples[i].y;
+      v.ps[i] = stroke.samples[i].pressure;
+    }
+    return v;
+  }
+
+  // The dabs of a stroke's samples so far, as the server will place
+  // them: placeDabs once to count, once to fill.
+  function strokeDabs(stroke) {
+    var v = sampleVectors(stroke), B = stroke.brush;
+    var count = placeDabs(v.xs, v.ys, v.ps, v.n, B.radius, B.spacing, new Float64Array(0));
+    var dabs = new Float64Array(3 * count);
+    placeDabs(v.xs, v.ys, v.ps, v.n, B.radius, B.spacing, dabs);
+    return dabs;
+  }
+
+  // Paint the dabs not yet painted into strokeBuf.  Earlier dabs never
+  // move when samples are added, so the count painted is all the state.
+  function rasterizeStroke(stroke) {
+    var dabs = strokeDabs(stroke), B = stroke.brush, count = dabs.length / 3;
+    for (var k = stroke.dabsDone || 0; k < count; k++) {
+      var cx = dabs[3 * k], cy = dabs[3 * k + 1], r = B.radius * dabs[3 * k + 2];
+      var rect = dabRect(cx, cy, r);
+      if (!rect) continue;
+      paintDab(strokeBuf, doc.width, doc.height, 0, 0, cx, cy, r, B.hardness, B.flow);
+      frameDirty = unionRect(frameDirty, rect);
+      strokeDirty = unionRect(strokeDirty, rect);
+    }
+    stroke.dabsDone = count;
+  }
+
+  function beginPreview(stroke) {
+    var c = stroke.brush.color;
+    preview.layer = stroke.texIndex;
+    preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
+    preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
+  }
+
+  function clearPreview() {
+    if (strokeDirty) {
+      for (var j = 0; j < strokeDirty.h; j++) {
+        var from = (strokeDirty.y + j) * doc.width + strokeDirty.x;
+        strokeBuf.fill(0, from, from + strokeDirty.w);
+      }
+      uploadStrokeRect(strokeDirty);
+      strokeDirty = null;
+    }
+    frameDirty = null;
+    preview.layer = -1;
+    requestDraw();
+  }
+
+  function strokeBody(stroke) {
+    return JSON.stringify({
+      layer: stroke.layer, brush: stroke.brush,
+      samples: stroke.samples.map(function (s) { return [s.x, s.y, s.pressure]; })
+    });
+  }
+
+  function postJSON(path, body) {
+    return fetchJSON(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body || '{}' });
+  }
+
+  function tookRect(res) {
+    S.undoDepth = res.undoDepth;
+    doc.layers[res.layer].paintVersion = res.paintVersion;
+    return S.uploadRect(res.texIndex, res.x, res.y, res.w, res.h);
+  }
+
+  function commitStroke(stroke) {
+    return postJSON('stroke', strokeBody(stroke)).then(function (res) {
+      return res.empty ? null : tookRect(res);
+    }).then(function () { clearPreview(); status(); },
+            function (e) { clearPreview(); status('stroke failed: ' + e.message); });
+  }
+
+  S.onStrokeSamples = function (stroke) {
+    if (stroke.texIndex === undefined) {
+      stroke.texIndex = texIndexOf(stroke.layer);
+      stroke.brush = JSON.parse(JSON.stringify(S.brush));
+      stroke.brush.mode = stroke.tool === 'eraser' ? 'erase' : 'paint';
+    }
+    if (stroke.texIndex < 0) return;
+    stroke.previewed = strokeChain = strokeChain.then(function () {
+      ensureStrokeBuffer();
+      if (preview.layer < 0) beginPreview(stroke);
+      rasterizeStroke(stroke);
+      requestDraw();
+    });
+  };
+
+  S.onStroke = function (stroke) {
+    S.lastStroke = stroke;
+    if (!(stroke.texIndex >= 0)) { status('pick a raster layer to paint on'); return; }
+    strokeChain = strokeChain.then(function () { return commitStroke(stroke); });
+  };
+
+  // Resolves once every stroke and undo queued so far has been committed.
+  S.strokesSettled = function () { return strokeChain.then(function () {}); };
+
+  S.undo = function () {
+    strokeChain = strokeChain.then(function () {
+      return postJSON('undo').then(function (res) {
+        if (res.empty) { status('nothing to undo'); return null; }
+        return tookRect(res).then(function () { status(); });
+      }).catch(function (e) { status('undo failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
+
+  S.setBrush = function (changes) {
+    Object.keys(changes).forEach(function (k) { S.brush[k] = changes[k]; });
+    if (S.brushInputs) S.brushInputs.refresh();
+  };
+
+  // The browser's coverage for STROKE against the server's (POST
+  // stroke?dry=1): painted here into a buffer the size of the server's
+  // rectangle, through the same two functions, it must be equal to the
+  // last bit, or the dual functions have drifted apart.
+  S.strokeCheck = function (stroke) {
+    stroke = stroke || S.lastStroke;
+    return postJSON('stroke?dry=1', strokeBody(stroke)).then(function (res) {
+      if (res.empty) return { empty: true };
+      var dabs = strokeDabs(stroke), B = stroke.brush, count = dabs.length / 3;
+      var buf = new Float64Array(res.w * res.h);
+      for (var k = 0; k < count; k++) {
+        paintDab(buf, res.w, res.h, res.x, res.y, dabs[3 * k], dabs[3 * k + 1],
+                 B.radius * dabs[3 * k + 2], B.hardness, B.flow);
+      }
+      var max = 0, unequal = 0;
+      for (var i = 0; i < buf.length; i++) {
+        var d = Math.abs(buf[i] - res.coverage[i]);
+        if (d > max) max = d;
+        if (d !== 0) unequal++;
+      }
+      return { rect: [res.x, res.y, res.w, res.h], entries: buf.length, dabs: count,
+               maxDiff: max, unequal: unequal };
+    });
   };
 
   // ---- edits --------------------------------------------------------------
@@ -472,17 +709,55 @@
     });
   };
 
-  // Pan and Brush buttons, under the status lines (keys: H, B; Space
-  // held pans whatever the tool).
+  // Hand, Brush and Eraser buttons under the status lines (keys: H, B,
+  // E; Space held pans whatever the tool), then the brush: size,
+  // hardness, flow, opacity, color, and Undo (Ctrl+Z).
+  var BRUSH_RANGES = { radius: ['size', 1, 300, 1], hardness: ['hardness', 0, 1, 0.01],
+                       flow: ['flow', 0.01, 1, 0.01], opacity: ['opacity', 0, 1, 0.01] };
+
   function installToolbar() {
-    var row = el('div', { 'class': 'st-row' });
-    [['pan', 'Pan (H)'], ['brush', 'Brush (B)']].forEach(function (pair) {
+    var tools = el('div', { 'class': 'st-row' });
+    [['pan', 'Hand (H)'], ['brush', 'Brush (B)'], ['eraser', 'Eraser (E)']].forEach(function (pair) {
       var b = el('button', { type: 'button', 'class': 'st-tool', 'data-tool': pair[0], text: pair[1] });
       b.addEventListener('click', function () { S.setTool(pair[0]); });
-      row.appendChild(b);
+      tools.appendChild(b);
     });
-    statusEl.parentNode.insertBefore(row, statusEl.nextSibling);
+    var box = el('div', { 'class': 'st-brush' }, [tools]);
+    var inputs = {};
+    Object.keys(BRUSH_RANGES).forEach(function (key) {
+      var r = BRUSH_RANGES[key];
+      var input = el('input', { type: 'range', min: String(r[1]), max: String(r[2]), step: String(r[3]),
+                                value: String(S.brush[key]) });
+      var val = el('span', { text: String(S.brush[key]) });
+      input.addEventListener('input', function () {
+        S.brush[key] = Number(input.value);
+        val.textContent = input.value;
+      });
+      inputs[key] = { input: input, val: val };
+      box.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: r[0] }), input, val]));
+    });
+    var color = el('input', { type: 'color', value: hexColor(S.brush.color) });
+    color.addEventListener('input', function () {
+      S.brush.color = [1, 3, 5].map(function (i) { return parseInt(color.value.substr(i, 2), 16); });
+    });
+    var undo = el('button', { type: 'button', text: 'Undo (Ctrl+Z)' });
+    undo.addEventListener('click', function () { S.undo(); });
+    box.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'color' }), color, undo]));
+    S.brushInputs = {
+      refresh: function () {
+        Object.keys(inputs).forEach(function (key) {
+          inputs[key].input.value = String(S.brush[key]);
+          inputs[key].val.textContent = String(S.brush[key]);
+        });
+        color.value = hexColor(S.brush.color);
+      }
+    };
+    statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
     S.setTool(S.tool);
+  }
+
+  function hexColor(c) {
+    return '#' + c.map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2); }).join('');
   }
 
   function layerRow(L) {
@@ -658,9 +933,10 @@
 
   // ---- test hooks ---------------------------------------------------------
 
-  // Render the whole document at 1:1 with texelFetch into an offscreen
-  // target, read it back, and compare with the server's CPU render.
-  S.parity = function () {
+  // The whole document rendered at 1:1 with texelFetch into an offscreen
+  // target and read back (rows from the bottom, as readPixels gives
+  // them), a live stroke preview included.
+  S.renderExact = function () {
     var w = doc.width, h = doc.height;
     var target = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, target);
@@ -676,6 +952,25 @@
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.deleteFramebuffer(fbo);
     gl.deleteTexture(target);
+    return gpu;
+  };
+
+  // Two renders compared byte for byte.
+  function renderDiff(a, b) {
+    var max = 0, over = 0, changed = 0;
+    for (var i = 0; i < a.length; i++) {
+      var d = Math.abs(a[i] - b[i]);
+      if (d > max) max = d;
+      if (d > 1) over++;
+      if (d > 0) changed++;
+    }
+    return { maxDiff: max, overOne: over, changed: changed };
+  }
+
+  // The exact render compared with the server's CPU render, pixel by pixel.
+  S.parity = function () {
+    var w = doc.width, h = doc.height;
+    var gpu = S.renderExact();
     return fetchBytes(api('cpu')).then(function (cpu) {
       var max = 0, over = 0, sum = 0, worst = null;
       for (var y = 0; y < h; y++) {
@@ -798,11 +1093,18 @@
         check('parity after uploadRect', p.maxDiff <= 1, p);
       });
     }).then(function () {
-      // A synthetic pen stroke through the brush tool: every sample
-      // recorded, in document pixels, with its pressure.
-      var saved = { tool: S.tool, onStroke: S.onStroke }, got = null;
+      // The stroke round trip (README "Open pieces", acceptance test 1).
+      // A synthetic pen stroke through the brush tool is previewed here,
+      // committed by the server and its rectangle re-uploaded.  Every
+      // sample must be recorded in document pixels; the browser's
+      // coverage must equal the server's to the last bit; the preview
+      // must match what came back; parity must hold on the committed
+      // pixels; and undo must give the picture back exactly.
+      var saved = { tool: S.tool, brush: S.brush };
+      var before = S.renderExact(), previewed = null, got = null;
+      S.brush = { radius: 18, hardness: 0.7, spacing: 0.25, flow: 0.8, opacity: 0.9,
+                  color: [230, 80, 70], mode: 'paint' };
       S.setTool('brush');
-      S.onStroke = function (stroke) { got = stroke; };
       var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
       var points = [[0.3, 0.4, 0.2], [0.35, 0.42, 0.4], [0.4, 0.45, 0.6], [0.45, 0.5, 0.8],
                     [0.5, 0.52, 0.9], [0.55, 0.55, 1.0]];
@@ -814,8 +1116,9 @@
       fire('pointerdown', points[0]);
       points.slice(1).forEach(function (pt) { fire('pointermove', pt); });
       fire('pointerup', points[points.length - 1]);
-      S.onStroke = saved.onStroke;
       S.setTool(saved.tool);
+      S.brush = saved.brush;
+      got = S.lastStroke;
       var want = points.map(function (pt) {
         return [view.ox + pt[0] * r.width * dpr / view.scale, view.oy + pt[1] * r.height * dpr / view.scale, pt[2]];
       });
@@ -826,6 +1129,34 @@
             got && got.samples.length === points.length && got.layer === S.activeLayer &&
             got.pointerType === 'pen' && worst < 1e-3,
             { samples: got && got.samples.length, layer: got && got.layer, worst: worst });
+      if (!got || !got.previewed) return null;
+      return got.previewed.then(function () {
+        // The commit's request is in flight; the preview is still up.
+        previewed = S.renderExact();
+        return S.strokeCheck(got);
+      }).then(function (c) {
+        check('the browser paints the coverage the server paints, to the last bit',
+              !c.empty && c.maxDiff === 0, c);
+        return S.strokesSettled();
+      }).then(function () {
+        var after = S.renderExact();
+        var moved = renderDiff(before, after), kept = renderDiff(previewed, after);
+        check('the committed stroke changed the picture', moved.maxDiff > 0, moved);
+        // The commit rounds the painted layer to 8 bits once, which the
+        // preview did not; through the stack above it that is up to one
+        // more level than the usual float32-against-double one.
+        check('the preview matches the committed stroke', kept.maxDiff <= 2, kept);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a committed stroke', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        var back = renderDiff(before, S.renderExact());
+        check('undo gives the picture back exactly', back.maxDiff === 0, back);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after undo', p.maxDiff <= 1, p);
+      });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
@@ -869,6 +1200,7 @@
     gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
     if (!gl) { status('WebGL 2 is not available in this browser.'); S.error = 'no webgl2'; return; }
     vao = gl.createVertexArray();
+    strokeTexture(1, 1);
     installNavigation();
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));

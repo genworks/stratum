@@ -28,7 +28,15 @@
 
 (defparameter *golden-file* (merge-pathnames "golden.sexp" *tests-dir*))
 
-(defparameter *golden-documents* '("parity" "demo"))
+;;; "parity+stroke" is the parity document with *test-stroke* painted on
+;;; its first layer and erased, wider, from its Discs layer: the brush's
+;;; own golden, so the sample pictures' checksums never move with it.
+(defparameter *golden-documents* '("parity" "demo" "parity+stroke"))
+
+(defparameter *test-stroke*
+  '(:points ((40 50 0.5) (120 90 1.0) (200 100 0.8) (260 60 0.3))
+    :radius 12 :hardness 0.7 :spacing 0.25 :flow 0.9 :opacity 0.85
+    :color (230 80 70) :mode :paint))
 
 (defvar *checks* nil)
 
@@ -46,7 +54,11 @@
     h))
 
 (defun render-checksum (name)
-  (fnv1a (the-object (make-sample-document name) (render-cpu))))
+  (let ((doc (make-sample-document (if (string= name "parity+stroke") "parity" name))))
+    (when (string= name "parity+stroke")
+      (apply-brush-stroke (the-object doc (layer 0)) *test-stroke*)
+      (apply-brush-stroke (the-object doc (layer 4)) (list* :mode :erase :radius 30 *test-stroke*)))
+    (fnv1a (the-object doc (render-cpu)))))
 
 (defun record-golden ()
   "Write golden.sexp from the current renders.  Only for a change meant
@@ -177,6 +189,93 @@ to alter the pictures."
            (handler-case (progn (rgba-rect pixels w h 5 0 3 1) nil)
              (error () t)))))
 
+(defun stroke-vectors-of (points)
+  (multiple-value-list (stroke-vectors points)))
+
+(defun test-brush ()
+  ;; Placement: a straight 100-pixel stroke at full pressure, radius 10,
+  ;; spacing a quarter: a dab every 2.5 pixels from the start, 41 of them.
+  (destructuring-bind (xs ys ps) (stroke-vectors-of '((0 0 1) (100 0 1)))
+    (let* ((count (place-dabs xs ys ps 2 10d0 0.25d0 (make-array 0 :element-type 'double-float)))
+           (out (make-array (* 3 count) :element-type 'double-float)))
+      (place-dabs xs ys ps 2 10d0 0.25d0 out)
+      (check "dabs fall every spacing * radius along a straight stroke, the first at its start"
+             (and (= count 41)
+                  (loop for k below count
+                        always (and (< (abs (- (aref out (* 3 k)) (* k 2.5d0))) 1d-9)
+                                    (= (aref out (+ 1 (* 3 k))) 0d0))))
+             count)))
+  ;; One dab: a hard dab of radius 2 on the center of a 5 x 5 buffer.
+  (let ((buf (make-array 25 :element-type 'double-float :initial-element 0d0)))
+    (paint-dab buf 5 5 0 0 2.5d0 2.5d0 2d0 1d0 1d0)
+    (check "a hard dab covers its center fully, the corners not at all, its edge in part, symmetrically"
+           (and (= (aref buf 12) 1d0) (= (aref buf 0) 0d0) (= (aref buf 24) 0d0)
+                (= 1d0 (aref buf 7) (aref buf 17) (aref buf 11) (aref buf 13))
+                (= (aref buf 6) (aref buf 8) (aref buf 16) (aref buf 18))
+                (< 0d0 (aref buf 6) 1d0))
+           (coerce buf 'list)))
+  (let ((buf (make-array 25 :element-type 'double-float :initial-element 0d0)))
+    (paint-dab buf 5 5 0 0 2.5d0 2.5d0 2d0 1d0 0.5d0)
+    (paint-dab buf 5 5 0 0 2.5d0 2.5d0 2d0 1d0 0.5d0)
+    (check "flow builds coverage toward full and never past it"
+           (and (= (aref buf 12) 0.75d0) (<= (reduce #'max buf) 1d0))
+           (aref buf 12)))
+  ;; The offset form the server uses (a buffer covering one rectangle)
+  ;; paints the same numbers as the browser's whole-document buffer.
+  (let ((whole (make-array 400 :element-type 'double-float :initial-element 0d0))
+        (part (make-array 64 :element-type 'double-float :initial-element 0d0)))
+    (paint-dab whole 20 20 0 0 9.3d0 7.1d0 3d0 0.6d0 1d0)
+    (paint-dab part 8 8 5 4 9.3d0 7.1d0 3d0 0.6d0 1d0)
+    (check "a dab painted into an offset rectangle equals those pixels of the whole"
+           (loop for row below 8
+                 always (loop for col below 8
+                              always (= (aref part (+ col (* 8 row)))
+                                        (aref whole (+ col 5 (* 20 (+ row 4)))))))))
+  ;; A stroke on the parity document, and its undo.
+  (let* ((doc (make-sample-document "parity"))
+         (w (the-object doc doc-width))
+         (layer (the-object doc (layer 0)))
+         (before (copy-seq (the-object layer pixels)))
+         (source (the-object layer source-pixels))
+         (render-before (the-object doc (render-cpu))))
+    (demand doc)
+    (let* ((rect (apply-brush-stroke layer *test-stroke*))
+           (after (copy-seq (the-object layer pixels))))
+      (destructuring-bind (x y rw rh) rect
+        (check "a stroke changes pixels inside its rectangle only"
+               (and (not (equalp before after))
+                    (loop for i below (length before)
+                          for px = (mod (floor i 4) w)
+                          for py = (floor (floor i 4) w)
+                          always (or (and (<= x px (+ x rw -1)) (<= y py (+ y rh -1)))
+                                     (= (aref before i) (aref after i)))))
+               rect))
+      (check "a stroke rebuilds nothing" (equal (demand doc) '(1 1)) (counts doc))
+      (check "the pixel cache's copy is never painted" (equalp source before))
+      (check "the CPU render sees the stroke"
+             (not (equalp render-before (the-object doc (render-cpu)))))
+      (check "a stroke on an adjustment layer is refused"
+             (handler-case (progn (apply-brush-stroke (the-object doc (layer 2)) *test-stroke*) nil)
+               (error () t)))
+      (check "the same stroke on a fresh document paints the same bytes"
+             (let* ((other (make-sample-document "parity"))
+                    (other-layer (the-object other (layer 0))))
+               (apply-brush-stroke other-layer *test-stroke*)
+               (equalp (the-object other-layer pixels) after)))
+      (let ((o (* 4 (+ 120 (* w 90)))))
+        (apply-brush-stroke layer (list* :mode :erase *test-stroke*))
+        (check "an erasing stroke lowers alpha and keeps the color"
+               (and (< (aref (the-object layer pixels) (+ o 3)) (aref after (+ o 3)))
+                    (= (aref (the-object layer pixels) o) (aref after o)))
+               (list :alpha (aref after (+ o 3)) (aref (the-object layer pixels) (+ o 3)))))
+      (check "undo reports the rectangle it put back"
+             (equal (undo-stroke! doc) (cons 0 rect)))
+      (check "undo gives the layer back exactly"
+             (and (equal (undo-stroke! doc) (cons 0 rect))
+                  (equalp (the-object layer pixels) before)
+                  (equalp (the-object doc (render-cpu)) render-before)))
+      (check "nothing is left to undo" (null (undo-stroke! doc))))))
+
 (defun test-threads ()
   (let* ((doc (make-sample-document "parity"))
          (threaded (let ((*render-threads* 8)) (the-object doc (render-cpu))))
@@ -187,7 +286,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-threads test-golden))
+                  test-brush test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

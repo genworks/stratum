@@ -13,30 +13,13 @@
 ;;
 ;; Open pieces.  Each stub states the contract its implementation must
 ;; meet and signals NOT-YET until then.  README.md lists them with
-;; their acceptance tests.
+;; their acceptance tests.  The brush engine was the first of these;
+;; it is brush.lisp now.
 ;;
 
 (define-condition not-yet (error)
   ((what :initarg :what :reader not-yet-what))
   (:report (lambda (c s) (format s "Not built yet: ~a." (not-yet-what c)))))
-
-(defun apply-brush-stroke (layer stroke)
-  "Paint STROKE into raster LAYER and return the dirty rectangle
-(x y w h).  STROKE is a plist: :points, a vector of (x y pressure tilt
-time) samples in document pixels; :radius, :hardness, :spacing (a
-fraction of the radius), :flow, :color (sRGB 0-255) and :mode (:paint
-or :erase).
-
-The contract: dabs are placed along the stroke at the given spacing and
-composited in linear light, as the shader composites layers; the result
-is the same whether the viewer painted the stroke locally first or not,
-because the viewer's preview runs the same dab code (a dual function or
-a generated shader) and the server's copy is the one kept.  Pixels move
-in tiles (see tile-store): the stroke returns only the tiles it
-touched, so the browser uploads those tiles alone, and undo keeps the
-tiles' previous versions."
-  (declare (ignore layer stroke))
-  (error 'not-yet :what "the brush engine (apply-brush-stroke)"))
 
 (defun make-tile-store (width height &key (tile-size 256))
   "Pixel storage for one layer as a grid of TILE-SIZE square tiles.

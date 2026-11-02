@@ -44,6 +44,7 @@ uniform sampler2D u_stroke;
 uniform int u_stroke_layer;
 uniform vec4 u_stroke_color;
 uniform int u_stroke_erase;
+uniform int u_stroke_mask;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -63,6 +64,17 @@ float mask_px(int i, vec2 p) {
 }
 float stroke_px(vec2 p) {
   return texelFetch(u_stroke, ivec2(p), 0).r;
+}
+// Mask i at p, with the live stroke painted on it when the stroke is on
+// that mask: the mask moves toward the stroke's gray (u_stroke_color.r)
+// by its coverage, as composite-mask-stroke! commits it.
+float masked(int i, vec2 p) {
+  float m = mask_px(i, p);
+  if (u_stroke_mask == i) {
+    float cv = stroke_px(p) * u_stroke_color.a;
+    m = m + (u_stroke_color.r - m) * cv;
+  }
+  return m;
 }
 float lut(int row, float x) {
   float q = clamp(x, 0.0, 1.0) * 255.0;
@@ -128,7 +140,7 @@ void main() {
     (:add "min(cb + s.rgb, vec3(1.0))")))
 
 (defun glsl-mask (mask)
-  (if mask (format nil " * mask_px(~d, p)" mask) ""))
+  (if mask (format nil " * masked(~d, p)" mask) ""))
 
 (defun glsl-entry (entry)
   (destructuring-bind (kind &key tex blend mask param lut) entry

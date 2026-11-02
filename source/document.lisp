@@ -43,12 +43,23 @@ spec).  raster-layer and curves-layer mix this in.")
    (layer-name (getf (the spec) :name (format nil "Layer ~a" (1+ (the index)))))
    (opacity (getf (the spec) :opacity 1.0) :settable)
    (visible? (getf (the spec) :visible? t) :settable)
-   (mask-spec (getf (the spec) :mask) :settable))
+   (mask-spec (getf (the spec) :mask) :settable)
+   ("Vector of (unsigned-byte 8), or nil.  This layer's own mask buffer,
+a copy of the generated mask made by the first stroke painted on the
+mask; nil until then.  The spec's :mask-pixels carries it across a
+change of the stack."
+    own-mask (getf (the spec) :mask-pixels) :settable)
+   ("Integer.  Counts the strokes and undos applied to own-mask in place;
+bumping it is the signal that the mask moved.  It feeds mask-pixels,
+never the plan."
+    mask-version 0 :settable))
 
   :computed-slots
   ((has-mask? (and (the mask-spec) t))
-   (mask-pixels (when (the has-mask?)
-                  (generate-mask (the mask-spec) (the doc-width) (the doc-height))))
+   (mask-pixels (progn (the mask-version)
+                       (when (the has-mask?)
+                         (or (the own-mask)
+                             (generate-mask (the mask-spec) (the doc-width) (the doc-height))))))
    (effective-opacity (if (the visible?) (coerce (the opacity) 'double-float) 0.0))
    (mask-index (position self (the parent masked-layers)))
    ("List of keywords. The numeric settings the page shows as sliders and
@@ -71,9 +82,28 @@ document's layer-specs makes every layer object anew, so this is what a
 layer carries across one."
     (plist-merge (list* :kind (the kind) :name (the layer-name)
                         :opacity (the opacity) :visible? (the visible?)
-                        :mask (the mask-spec)
+                        :mask (the mask-spec) :mask-pixels (the own-mask)
                         (the own-state))
-                 (the spec)))))
+                 (the spec)))
+
+   (ensure-own-mask!
+    ()
+    "This layer's own mask buffer, copied from the generated mask on the
+first call.  The layer must have a mask."
+    (unless (the has-mask?) (error "~a has no mask." (the layer-name)))
+    (or (the own-mask)
+        (progn (the (set-slot! :own-mask (copy-seq (generate-mask (the mask-spec)
+                                                                  (the doc-width) (the doc-height)))))
+               (the own-mask))))
+
+   (set-mask!
+    (spec)
+    "Give this layer the mask SPEC (a generator spec, or nil for none) in
+place of what it had, own buffer included.  Mask presence is part of
+the plan, so the programs follow."
+    (the (set-slot! :own-mask nil))
+    (the (set-slot! :mask-spec spec))
+    (the (set-slot! :mask-version (1+ (the mask-version)))))))
 
 (define-object lut-layer (image-layer)
   :documentation

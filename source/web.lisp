@@ -65,6 +65,7 @@
      "blend" (when (eql kind :raster) (string-downcase (the-object layer blend-mode)))
      "texIndex" (when (eql kind :raster) (the-object layer texture-index))
      "paintVersion" (when (eql kind :raster) (the-object layer paint-version))
+     "maskVersion" (the-object layer mask-version)
      "lutRow" (when (typep layer 'lut-layer) (the-object layer lut-row))
      "settings" (let ((names (the-object layer setting-names)))
                   (when names
@@ -147,22 +148,30 @@ opacity color mode}; missing brush numbers take *default-brush*."
             :color (or (and brush (gethash "color" brush)) (getf *default-brush* :color))
             :mode (if (and brush (equal (gethash "mode" brush) "erase")) :erase :paint)))))
 
-(defun rect-json (doc layer rect)
+(defun rect-json (doc layer target rect)
+  "The rectangle a stroke or an undo changed: on the layer's pixels
+(TARGET :layer, with its texture index) or its mask (:mask, with its
+mask index)."
   (json-object "layer" (the-object layer index)
-               "texIndex" (the-object layer texture-index)
+               "target" (string-downcase target)
+               "texIndex" (when (eql (the-object layer kind) :raster) (the-object layer texture-index))
+               "maskIndex" (the-object layer mask-index)
                "x" (first rect) "y" (second rect) "w" (third rect) "h" (fourth rect)
-               "paintVersion" (the-object layer paint-version)
+               "paintVersion" (if (eql (the-object layer kind) :raster) (the-object layer paint-version) 0)
+               "maskVersion" (the-object layer mask-version)
                "undoDepth" (length (the-object doc undo-entries))))
 
 (defun handle-stroke (req)
-  "Commit one stroke -- {layer, samples, brush} -- and answer the dirty
-rectangle with the layer's texture index and new paintVersion, or
-{empty: true} when it touched nothing.  With ?dry=1 nothing is painted:
-the answer is the server's coverage buffer and its rectangle, for the
-browser to compare with its own."
+  "Commit one stroke -- {layer, target, samples, brush}, target \"layer\"
+or \"mask\" -- and answer the dirty rectangle with the layer's texture
+or mask index and new version, or {empty: true} when it touched
+nothing.  With ?dry=1 nothing is painted: the answer is the server's
+coverage buffer and its rectangle, for the browser to compare with its
+own."
   (let* ((doc (request-doc req))
          (body (parse-json-body req))
          (layer (the-object doc (layer (gethash "layer" body))))
+         (target (if (equal (gethash "target" body) "mask") :mask :layer))
          (stroke (parse-stroke body)))
     (json-string
      (if (net.aserve:request-query-value "dry" req)
@@ -171,8 +180,8 @@ browser to compare with its own."
            (if coverage
                (json-object "x" x "y" y "w" w "h" h "coverage" (coerce coverage 'list))
                (json-object "empty" 'yason:true)))
-         (let ((rect (apply-brush-stroke layer stroke)))
-           (if rect (rect-json doc layer rect) (json-object "empty" 'yason:true)))))))
+         (let ((rect (apply-brush-stroke layer stroke :target target)))
+           (if rect (rect-json doc layer target rect) (json-object "empty" 'yason:true)))))))
 
 (defun handle-undo (req)
   "Undo the document's last stroke and answer the rectangle put back, as
@@ -181,7 +190,7 @@ handle-stroke does; {empty: true} when there was nothing to undo."
          (entry (undo-stroke! doc)))
     (json-string
      (if entry
-         (rect-json doc (the-object doc (layer (first entry))) (rest entry))
+         (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
          (json-object "empty" 'yason:true)))))
 
 (defun handle-layers (req)
@@ -206,6 +215,19 @@ answering the new planVersion and the index of the layer to work on."
                     ((equal op "move") (need-layer)
                      (the-object doc (move-layer! layer (or (gethash "delta" body) 1))))
                     ((equal op "duplicate") (need-layer) (the-object doc (duplicate-layer! layer)))
+                    ((equal op "mask")
+                     ;; {op: "mask", layer, value: "reveal" | "hide" | "delete"}: a
+                     ;; white or black mask in place of any the layer had, or none.
+                     ;; The undo list goes, since mask indices move with it.
+                     (need-layer)
+                     (let ((value (gethash "value" body)))
+                       (the-object doc (layer layer)
+                                   (set-mask! (cond ((equal value "reveal") '(:flat :value 255))
+                                                    ((equal value "hide") '(:flat :value 0))
+                                                    ((equal value "delete") nil)
+                                                    (t (error "Unknown mask operation ~s." value)))))
+                       (the-object doc (set-slot! :undo-entries nil))
+                       layer))
                     (t (error "Unknown layer operation ~s." op)))))
         (json-string (json-object "planVersion" (the-object doc plan-version)
                                   "active" active
@@ -334,6 +356,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   background: repeating-conic-gradient(#8a8f98 0 25%, #c9cdd3 0 50%) 0 0 / 8px 8px;
   display: flex; align-items: center; justify-content: center; color: #d8dbe0; }
 .st-thumb canvas { width: 40px; height: 24px; display: block; }
+.st-thumb.st-target { outline: 2px solid #d8dbe0; outline-offset: 1px; }
 .st-thumb.st-thumb-adj { background: #2c2f35; }
 .st-thumb svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .st-lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -449,8 +472,15 @@ goes back as a 500 carrying the condition's text."
                                  (the-object doc doc-width) (the-object doc doc-height) (q "w") (q "h") 4))))))
       (pub "/stratum/api/mask" "application/octet-stream"
            (lambda (req)
-             (the-object (nth (request-index req) (the-object (request-doc req) masked-layers))
-                         mask-pixels)))
+             (let* ((doc (request-doc req))
+                    (mask (the-object (nth (request-index req) (the-object doc masked-layers))
+                                      mask-pixels)))
+               (flet ((q (name) (let ((v (net.aserve:request-query-value name req)))
+                                  (and v (parse-integer v)))))
+                 (if (q "w")
+                     (rgba-rect mask (the-object doc doc-width) (the-object doc doc-height)
+                                (or (q "x") 0) (or (q "y") 0) (q "w") (q "h") 1)
+                     mask)))))
       (pub "/stratum/api/luts" "application/json"
            (lambda (req) (json-string (coerce (the-object (request-doc req) lut-vector) 'list))))
       (pub "/stratum/api/cpu" "application/octet-stream"

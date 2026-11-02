@@ -275,12 +275,60 @@ to alter the pictures."
                     (= (aref (the-object layer pixels) o) (aref after o)))
                (list :alpha (aref after (+ o 3)) (aref (the-object layer pixels) (+ o 3)))))
       (check "undo reports the rectangle it put back"
-             (equal (undo-stroke! doc) (cons 0 rect)))
+             (equal (undo-stroke! doc) (list* 0 :layer rect)))
       (check "undo gives the layer back exactly"
-             (and (equal (undo-stroke! doc) (cons 0 rect))
+             (and (equal (undo-stroke! doc) (list* 0 :layer rect))
                   (equalp (the-object layer pixels) before)
                   (equalp (the-object doc (render-cpu)) render-before)))
       (check "nothing is left to undo" (null (undo-stroke! doc))))))
+
+(defun test-masks ()
+  (let* ((doc (make-sample-document "parity"))
+         (w (the-object doc doc-width))
+         (discs (the-object doc (layer 4)))
+         (sky (the-object doc (layer 0)))
+         (render-before (the-object doc (render-cpu)))
+         (mask-before (copy-seq (the-object discs mask-pixels))))
+    (demand doc)
+    (check "a stroke on a mask is refused where there is none"
+           (handler-case (progn (apply-brush-stroke sky *test-stroke* :target :mask) nil)
+             (error () t)))
+    (let ((rect (apply-brush-stroke discs (list* :color '(0 0 0) *test-stroke*) :target :mask))
+          (o (+ 120 (* w 90))))
+      (check "a black stroke on a mask lowers it inside its rectangle only, and rebuilds nothing"
+             (and rect
+                  (< (aref (the-object discs mask-pixels) o) (aref mask-before o))
+                  (equal (demand doc) '(1 1))
+                  (loop for i below (length mask-before)
+                        for px = (mod i w) for py = (floor i w)
+                        always (or (and (<= (first rect) px (+ (first rect) (third rect) -1))
+                                        (<= (second rect) py (+ (second rect) (fourth rect) -1)))
+                                   (= (aref mask-before i) (aref (the-object discs mask-pixels) i)))))
+             rect)
+      (check "the CPU render sees the mask stroke"
+             (not (equalp render-before (the-object doc (render-cpu)))))
+      (check "undo gives the mask back exactly"
+             (and (equal (undo-stroke! doc) (list* 4 :mask rect))
+                  (equalp (the-object discs mask-pixels) mask-before)
+                  (equalp (the-object doc (render-cpu)) render-before))))
+    (check "Hide All on a layer without a mask makes a black one, and the programs follow"
+           (progn (the-object sky (set-mask! '(:flat :value 0)))
+                  (and (the-object sky has-mask?)
+                       (every #'zerop (the-object sky mask-pixels))
+                       (equal (demand doc) '(2 2)))))
+    (check "Reveal All replaces it with a white one"
+           (progn (the-object sky (set-mask! '(:flat :value 255)))
+                  (every (lambda (v) (= v 255)) (the-object sky mask-pixels))))
+    (check "a painted mask survives a change of the stack"
+           (progn (apply-brush-stroke sky (list* :color '(0 0 0) *test-stroke*) :target :mask)
+                  (let ((painted (copy-seq (the-object sky mask-pixels))))
+                    (the-object doc (add-layer! (the-object doc (new-layer-spec :curves))))
+                    (equalp (the-object doc (layer 0) mask-pixels) painted))))
+    (check "Delete takes the mask away and renders as before"
+           (progn (the-object doc (layer 0) (set-mask! nil))
+                  (the-object doc (delete-layer! (1- (length (the-object doc layer-list)))))
+                  (and (not (the-object doc (layer 0) has-mask?))
+                       (equalp (the-object doc (render-cpu)) render-before))))))
 
 (defun test-files ()
   (let ((image (let ((p (make-rgba 4 3)))
@@ -368,7 +416,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-layers test-files test-threads test-golden))
+                  test-brush test-masks test-layers test-files test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

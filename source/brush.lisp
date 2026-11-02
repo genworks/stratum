@@ -229,6 +229,32 @@ that much alpha.  The twin of the live-stroke block in glsl-entry."
     (mapcar (lambda (c) (srgb->linear (/ (max 0d0 (min 255d0 (float c 1d0))) 255d0)))
             (list (first color) (second color) (third color)))))
 
+(defun stroke-gray (stroke)
+  "The value a stroke paints on a mask, in [0,1] on the mask's encoded
+scale: the luminance of the stroke's color, so black hides, white
+reveals, and a color lands between."
+  (destructuring-bind (r g b) (stroke-color-linear stroke)
+    (linear->srgb (+ (* 0.2126d0 r) (* 0.7152d0 g) (* 0.0722d0 b)))))
+
+(defun composite-mask-stroke! (mask width coverage x y w h gray opacity)
+  "Paint a stroke into MASK, one byte a pixel, WIDTH wide: COVERAGE is
+W x H doubles at X, Y; each pixel moves toward GRAY by coverage *
+OPACITY.  The twin of the shader's masked()."
+  (declare (type (simple-array (unsigned-byte 8) (*)) mask)
+           (type (simple-array double-float (*)) coverage)
+           (type fixnum width x y w h)
+           (type double-float gray opacity)
+           (optimize (speed 3) (safety 1)))
+  (dotimes (row h mask)
+    (dotimes (col w)
+      (let ((a (* (aref coverage (+ col (* row w))) opacity)))
+        (declare (type double-float a))
+        (when (> a 0.0)
+          (let* ((o (+ x col (* width (+ y row))))
+                 (m (/ (float (aref mask o) 1.0) 255.0)))
+            (declare (type fixnum o) (type double-float m))
+            (setf (aref mask o) (unit->byte (+ m (* (- gray m) a))))))))))
+
 (defun push-undo! (doc entry)
   (let ((entries (cons entry (the-object doc undo-entries))))
     (the-object doc (set-slot! :undo-entries
@@ -236,47 +262,66 @@ that much alpha.  The twin of the live-stroke block in glsl-entry."
                                    (subseq entries 0 *undo-depth*)
                                    entries)))))
 
-(defun apply-brush-stroke (layer stroke)
-  "Paint STROKE into raster LAYER and return the dirty rectangle (x y w
-h), or nil when the stroke touched no pixel.  STROKE is a plist:
-:points, a sequence of (x y pressure ...) samples in document pixels;
-:radius; :hardness; :spacing (a fraction of the radius); :flow;
-:opacity; :color (sRGB 0-255); :mode (:paint or :erase).
+(defun apply-brush-stroke (layer stroke &key (target :layer))
+  "Paint STROKE into LAYER -- its pixels (TARGET :layer, a raster layer)
+or its mask (TARGET :mask, any layer with one) -- and return the dirty
+rectangle (x y w h), or nil when the stroke touched no pixel.  STROKE is
+a plist: :points, a sequence of (x y pressure ...) samples in document
+pixels; :radius; :hardness; :spacing (a fraction of the radius); :flow;
+:opacity; :color (sRGB 0-255); :mode (:paint or :erase, for the pixels;
+a mask takes the color's luminance either way).
 
 Dabs are placed and rasterized by the dual functions place-dabs and
-paint-dab, which the browser's preview also runs, and composited once in
-linear light by composite-stroke!, whose twin the generated shader
-carries for the preview; so the committed stroke is what the preview
-showed, and the server's copy is the one kept.  The layer gets its own
-pixel buffer on its first stroke (the pixel cache's copy is never
-painted), the rectangle's old pixels go on the document's undo list,
-and the layer's paint-version is bumped so pixels and the CPU render
-see the change; the plan is untouched."
-  (unless (eql (the-object layer kind) :raster)
-    (error "~a is not a raster layer." (the-object layer layer-name)))
+paint-dab, which the browser's preview also runs, and composited once by
+composite-stroke! (linear light) or composite-mask-stroke!, whose twins
+the generated shader carries for the preview; so the committed stroke
+is what the preview showed, and the server's copy is the one kept.  The
+layer gets its own buffer on its first stroke (the pixel cache's copy
+is never painted), the rectangle's old bytes go on the document's undo
+list, and the layer's paint-version or mask-version is bumped so the
+renders see the change; the plan is untouched."
+  (ecase target
+    (:layer (unless (eql (the-object layer kind) :raster)
+              (error "~a is not a raster layer." (the-object layer layer-name))))
+    (:mask (unless (the-object layer has-mask?)
+             (error "~a has no mask." (the-object layer layer-name)))))
   (let ((width (the-object layer doc-width))
         (height (the-object layer doc-height)))
     (multiple-value-bind (coverage x y w h) (stroke-coverage stroke width height)
       (when coverage
-        (let ((pixels (the-object layer (ensure-own-pixels!)))
-              (doc (the-object layer parent))
-              (erase? (eql (getf stroke :mode :paint) :erase)))
-          (push-undo! doc (list (the-object layer index) x y w h
-                                (rgba-rect pixels width height x y w h)))
-          (destructuring-bind (r g b) (stroke-color-linear stroke)
-            (composite-stroke! pixels width coverage x y w h r g b
-                               (max 0d0 (min 1d0 (stroke-number stroke :opacity))) erase?))
-          (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
+        (let ((doc (the-object layer parent))
+              (opacity (max 0d0 (min 1d0 (stroke-number stroke :opacity)))))
+          (ecase target
+            (:layer
+             (let ((pixels (the-object layer (ensure-own-pixels!)))
+                   (erase? (eql (getf stroke :mode :paint) :erase)))
+               (push-undo! doc (list (the-object layer index) :layer x y w h
+                                     (rgba-rect pixels width height x y w h 4)))
+               (destructuring-bind (r g b) (stroke-color-linear stroke)
+                 (composite-stroke! pixels width coverage x y w h r g b opacity erase?))
+               (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))))
+            (:mask
+             (let ((mask (the-object layer (ensure-own-mask!))))
+               (push-undo! doc (list (the-object layer index) :mask x y w h
+                                     (rgba-rect mask width height x y w h 1)))
+               (composite-mask-stroke! mask width coverage x y w h (stroke-gray stroke) opacity)
+               (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version)))))))
           (list x y w h))))))
 
 (defun undo-stroke! (doc)
-  "Put back the pixels the last stroke on DOC overwrote, exactly, and
-return (layer-index x y w h); nil when nothing is left to undo."
+  "Put back the bytes the last stroke on DOC overwrote, exactly, and
+return (layer-index target x y w h); nil when nothing is left to undo."
   (let ((entry (first (the-object doc undo-entries))))
     (when entry
       (the-object doc (set-slot! :undo-entries (rest (the-object doc undo-entries))))
-      (destructuring-bind (index x y w h bytes) entry
-        (let ((layer (the-object doc (layer index))))
-          (replace-rect! (the-object layer own-pixels) (the-object doc doc-width) x y w h bytes)
-          (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
-          (list index x y w h))))))
+      (destructuring-bind (index target x y w h bytes) entry
+        (let ((layer (the-object doc (layer index)))
+              (width (the-object doc doc-width)))
+          (ecase target
+            (:layer
+             (replace-rect! (the-object layer own-pixels) width x y w h bytes 4)
+             (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version)))))
+            (:mask
+             (replace-rect! (the-object layer own-mask) width x y w h bytes 1)
+             (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version))))))
+          (list index target x y w h))))))

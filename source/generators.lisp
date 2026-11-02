@@ -28,18 +28,19 @@
 (defun make-gray (w h)
   (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element 0))
 
-(defun rgba-rect (pixels width height x y w h)
-  "The W x H rectangle of RGBA PIXELS (WIDTH x HEIGHT) at X, Y, rows from
-the top, as a fresh vector -- what the viewer re-uploads after an edit
-to part of a layer.  The rectangle must lie inside the image."
+(defun rgba-rect (pixels width height x y w h &optional (channels 4))
+  "The W x H rectangle of PIXELS (WIDTH x HEIGHT, CHANNELS bytes a pixel:
+4 for a layer, 1 for a mask) at X, Y, rows from the top, as a fresh
+vector -- what the viewer re-uploads after an edit to part of a layer.
+The rectangle must lie inside the image."
   (unless (and (<= 0 x) (<= 0 y) (< 0 w) (< 0 h) (<= (+ x w) width) (<= (+ y h) height))
     (error "Rectangle ~a,~a ~ax~a is not inside ~ax~a." x y w h width height))
-  (let ((out (make-rgba w h)))
+  (let ((out (make-array (* w h channels) :element-type '(unsigned-byte 8))))
     (dotimes (row h out)
       (replace out pixels
-               :start1 (* 4 w row)
-               :start2 (* 4 (+ x (* width (+ y row))))
-               :end2 (* 4 (+ x w (* width (+ y row))))))))
+               :start1 (* channels w row)
+               :start2 (* channels (+ x (* width (+ y row))))
+               :end2 (* channels (+ x w (* width (+ y row))))))))
 
 (defun rgba-thumb (pixels width height tw th &optional (channels 4))
   "A TW x TH nearest-neighbor thumbnail of PIXELS (WIDTH x HEIGHT,
@@ -73,14 +74,14 @@ into a document of another size lands."
                             :end2 (* 4 (+ (- x1 ox) (* w row)))))))
     out))
 
-(defun replace-rect! (pixels width x y w h bytes)
-  "Write BYTES, a W x H RGBA rectangle as rgba-rect returns it, back into
-PIXELS (WIDTH wide) at X, Y."
+(defun replace-rect! (pixels width x y w h bytes &optional (channels 4))
+  "Write BYTES, a W x H rectangle as rgba-rect returns it, back into
+PIXELS (WIDTH wide, CHANNELS bytes a pixel) at X, Y."
   (dotimes (row h pixels)
     (replace pixels bytes
-             :start1 (* 4 (+ x (* width (+ y row))))
-             :start2 (* 4 w row)
-             :end2 (* 4 w (1+ row)))))
+             :start1 (* channels (+ x (* width (+ y row))))
+             :start2 (* channels w row)
+             :end2 (* channels w (1+ row)))))
 
 (defun generate-pixels (spec w h)
   "RGBA8 pixels for the raster SPEC, (generator &key ...)."
@@ -102,6 +103,7 @@ PIXELS (WIDTH wide) at X, Y."
         (setf (gethash key *pixel-cache*)
               (destructuring-bind (kind &rest args) spec
                 (ecase kind
+                  (:flat (apply #'mask-flat w h args))
                   (:radial (apply #'mask-radial w h args))
                   (:linear (apply #'mask-linear w h args))))))))
 
@@ -256,6 +258,11 @@ grid four pixels apart and interpolated, which a smooth field allows."
                   (aref px (+ o 1)) (second color)
                   (aref px (+ o 2)) (third color)
                   (aref px (+ o 3)) alpha)))))))
+
+(defun mask-flat (w h &key (value 255))
+  "One VALUE everywhere: 255 reveals all, 0 hides all, the masks a layer
+starts with before anything is painted on them."
+  (make-array (* w h) :element-type '(unsigned-byte 8) :initial-element value))
 
 (defun mask-radial (w h &key (cx 0.5) (cy 0.5) (inner 0.2) (outer 0.6) invert?)
   "White inside INNER, black beyond OUTER; radii as fractions of the

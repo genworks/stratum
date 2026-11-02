@@ -80,6 +80,15 @@ signals that the buffer changed: it feeds the layer's `pixels` and so
 the CPU render, and never the plan. Undo keeps the rectangle each
 stroke overwrote and puts the bytes back.
 
+Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
+Reveal All or Hide All makes a white or black one; Delete takes it
+away); clicking the mask's thumbnail in the Layers panel makes it the
+brush's target, and the layer's thumbnail the pixels again. A stroke
+on a mask moves it toward the brush color's luminance, so black hides,
+white reveals, and the eraser paints the background color. The shader
+has a second live-stroke stage for masks (`masked()`), the server's
+twin is `composite-mask-stroke!`, and undo covers mask strokes too.
+
 ## Running it
 
 In a Gendl image (an SBCL or CCL room):
@@ -100,8 +109,9 @@ Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
 Undo; Layer ▸ New ▸ Layer, Duplicate Layer,
-Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation)
-and Arrange (Bring Forward, Send Backward); View ▸ Zoom In, Zoom Out,
+Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
+Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
+Send Backward); View ▸ Zoom In, Zoom Out,
 Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
 
 The tool palette down the left keeps the order other editors use, with
@@ -146,18 +156,18 @@ change, and the plan, the programs and the layer panel follow.
 |---|---|
 | `/stratum/api/doc?doc=N` | JSON: size, plan version, shader source, layers |
 | `/stratum/api/raster?doc=N&i=K` | raw RGBA8 of raster layer K; with `&x=&y=&w=&h=`, that rectangle |
-| `/stratum/api/mask?doc=N&i=K` | raw R8 of mask K |
+| `/stratum/api/mask?doc=N&i=K` | raw R8 of mask K; with `&x=&y=&w=&h=`, that rectangle |
 | `/stratum/api/thumb?doc=N&i=K&w=&h=` | a w × h nearest-neighbor thumbnail of raster layer K (RGBA8), or with `&mask=1` of mask K (R8) |
 | `/stratum/api/cpu?doc=N` | raw RGBA8 of the CPU render |
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
-| `POST /stratum/api/stroke?doc=N` | `{layer, samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle, the layer's texture index and paint version; with `&dry=1` paints nothing and answers the coverage buffer |
+| `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last stroke; answers the rectangle put back |
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
-| `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}` or `{op: "duplicate", layer}`; answers the new plan version and the layer to work on |
+| `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
 ## Tests
 
@@ -177,6 +187,10 @@ It checks:
   `paint-dab` against the whole-buffer form, that a stroke changes its
   rectangle only and rebuilds nothing, that the shared pixels are never
   painted, erasing, and that undo gives the layer back exactly;
+- masks: a stroke on a mask is refused where there is none, lowers the
+  mask inside its rectangle only and rebuilds nothing, shows in the
+  CPU render, and undoes exactly; Hide All, Reveal All and Delete; a
+  painted mask surviving a change of the stack;
 - the stack: a layer added above another, deleted, moved and
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
@@ -227,7 +241,11 @@ The self-test checks:
 - files: an image drawn in the browser and encoded as a PNG decodes
   back byte for byte, lands centered on its own layer when placed and
   reads back from the server byte for byte, and makes a new document
-  of its size when opened.
+  of its size when opened;
+- masks: Hide All on the active layer makes a mask the target and
+  hides the layer with parity intact; a white stroke on the mask
+  reveals some of it, the preview matching the commit; undo; Delete
+  gives the picture back.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

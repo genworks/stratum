@@ -77,7 +77,7 @@
     uni = {};
     ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
-     'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase'].forEach(function (n) {
+     'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -231,6 +231,7 @@
     gl.uniform1i(uni.u_stroke_layer, preview.layer);
     gl.uniform4fv(uni.u_stroke_color, preview.color);
     gl.uniform1i(uni.u_stroke_erase, preview.erase);
+    gl.uniform1i(uni.u_stroke_mask, preview.mask);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -513,12 +514,27 @@
               color: [230, 80, 70], mode: 'paint' };
   S.undoDepth = 0;
   var strokeBuf = null, texStroke = null, strokeDirty = null, frameDirty = null;
-  var preview = { layer: -1, color: [0, 0, 0, 0], erase: 0 };
+  var preview = { layer: -1, mask: -1, color: [0, 0, 0, 0], erase: 0 };
   var strokeChain = Promise.resolve();
+
+  // Painting on the active layer's mask instead of its pixels: picked by
+  // clicking the mask thumbnail in the Layers panel, as in other editors.
+  S.maskTarget = false;
 
   function srgbToLinear(c) {
     c = c / 255;
     return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  function linearToSrgb(c) {
+    c = Math.min(1, Math.max(0, c));
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+  }
+
+  // The value a color paints on a mask, as stroke-gray computes it.
+  function maskGray(color) {
+    return linearToSrgb(0.2126 * srgbToLinear(color[0]) + 0.7152 * srgbToLinear(color[1]) +
+                        0.0722 * srgbToLinear(color[2]));
   }
 
   function unionRect(a, b) {
@@ -611,9 +627,18 @@
 
   function beginPreview(stroke) {
     var c = stroke.brush.color;
-    preview.layer = stroke.texIndex;
-    preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
-    preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
+    if (stroke.target === 'mask') {
+      var g = maskGray(c);
+      preview.layer = -1;
+      preview.mask = stroke.maskIndex;
+      preview.color = [g, g, g, stroke.brush.opacity];
+      preview.erase = 0;
+    } else {
+      preview.layer = stroke.texIndex;
+      preview.mask = -1;
+      preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
+      preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
+    }
   }
 
   function clearPreview() {
@@ -627,15 +652,30 @@
     }
     frameDirty = null;
     preview.layer = -1;
+    preview.mask = -1;
     requestDraw();
   }
 
   function strokeBody(stroke) {
     return JSON.stringify({
-      layer: stroke.layer, brush: stroke.brush,
+      layer: stroke.layer, target: stroke.target, brush: stroke.brush,
       samples: stroke.samples.map(function (s) { return [s.x, s.y, s.pressure]; })
     });
   }
+
+  // One rectangle of mask I back from the server into the mask array.
+  S.uploadMaskRect = function (i, x, y, w, h) {
+    return fetchBytes(api('mask?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
+      .then(function (bytes) {
+        if (bytes.length !== w * h) throw new Error('uploadMaskRect: ' + bytes.length + ' bytes for ' + w + ' x ' + h);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, x, y, i, w, h, 1, gl.RED, gl.UNSIGNED_BYTE, bytes);
+        gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+        requestDraw();
+        return bytes.length;
+      });
+  };
 
   function postJSON(path, body) {
     return fetchJSON(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body || '{}' });
@@ -643,6 +683,11 @@
 
   function tookRect(res) {
     S.undoDepth = res.undoDepth;
+    if (res.target === 'mask') {
+      doc.layers[res.layer].maskVersion = res.maskVersion;
+      S.refreshMaskThumb(res.maskIndex);
+      return S.uploadMaskRect(res.maskIndex, res.x, res.y, res.w, res.h);
+    }
     doc.layers[res.layer].paintVersion = res.paintVersion;
     S.refreshThumb(res.texIndex);
     return S.uploadRect(res.texIndex, res.x, res.y, res.w, res.h);
@@ -655,11 +700,23 @@
             function (e) { clearPreview(); status('stroke failed: ' + e.message); });
   }
 
+  // A stroke goes to the active layer's pixels, or to its mask when the
+  // mask is the target; on a mask the eraser paints the background color.
   S.onStrokeSamples = function (stroke) {
     if (stroke.texIndex === undefined) {
-      stroke.texIndex = texIndexOf(stroke.layer);
+      var L = doc.layers[stroke.layer];
       stroke.brush = JSON.parse(JSON.stringify(S.brush));
-      stroke.brush.mode = stroke.tool === 'eraser' ? 'erase' : 'paint';
+      if (S.maskTarget && L && L.mask) {
+        stroke.target = 'mask';
+        stroke.maskIndex = L.maskIndex;
+        stroke.texIndex = 0;
+        stroke.brush.mode = 'paint';
+        if (stroke.tool === 'eraser') stroke.brush.color = S.background.slice();
+      } else {
+        stroke.target = 'layer';
+        stroke.texIndex = texIndexOf(stroke.layer);
+        stroke.brush.mode = stroke.tool === 'eraser' ? 'erase' : 'paint';
+      }
     }
     if (stroke.texIndex < 0) return;
     stroke.previewed = strokeChain = strokeChain.then(function () {
@@ -672,7 +729,7 @@
 
   S.onStroke = function (stroke) {
     S.lastStroke = stroke;
-    if (!(stroke.texIndex >= 0)) { status('pick a raster layer to paint on'); return; }
+    if (!(stroke.texIndex >= 0)) { status('pick a raster layer, or a mask, to paint on'); return; }
     strokeChain = strokeChain.then(function () { return commitStroke(stroke); });
   };
 
@@ -765,6 +822,7 @@
     }).then(function (res) {
       S.activeLayer = res.active;
       S.undoDepth = 0;
+      if (body.op === 'mask') S.maskTarget = body.value !== 'delete';
       return reloadStructure(true);
     }).catch(function (e) { status('layer edit failed: ' + e.message); });
   };
@@ -834,7 +892,8 @@
       post({ layer: L.index, slot: 'visible', value: L.visible });
     });
     row.appendChild(eye);
-    var thumb = el('div', { 'class': 'st-thumb' });
+    var onLayer = L.index === S.activeLayer && !(S.maskTarget && L.mask);
+    var thumb = el('div', { 'class': 'st-thumb' + (onLayer ? ' st-target' : ''), title: 'Layer' });
     if (L.kind === 'raster') {
       var c = el('canvas', { width: '40', height: '24' });
       thumb.appendChild(c);
@@ -843,10 +902,14 @@
       thumb.classList.add('st-thumb-adj');
       thumb.innerHTML = ADJ_ICONS[L.kind] || '';
     }
+    thumb.addEventListener('click', function (e) { e.stopPropagation(); S.setActiveLayer(L.index, false); });
     row.appendChild(thumb);
     if (L.mask) {
       var m = el('canvas', { width: '40', height: '24' });
-      row.appendChild(el('div', { 'class': 'st-thumb' }, [m]));
+      var mt = el('div', { 'class': 'st-thumb' + (L.index === S.activeLayer && S.maskTarget ? ' st-target' : ''),
+                           title: 'Layer mask' }, [m]);
+      mt.addEventListener('click', function (e) { e.stopPropagation(); S.setActiveLayer(L.index, true); });
+      row.appendChild(mt);
       maskCanvases[L.maskIndex] = m;
     }
     row.appendChild(el('span', { 'class': 'st-lname', text: L.name }));
@@ -874,21 +937,32 @@
       .then(function (b) { drawThumb(c, b, 4); return b.length; });
   };
 
+  S.refreshMaskThumb = function (maskIndex) {
+    var c = maskCanvases[maskIndex];
+    if (!c) return Promise.resolve(null);
+    return fetchBytes(api('thumb?mask=1&i=' + maskIndex + '&w=' + c.width + '&h=' + c.height))
+      .then(function (b) { drawThumb(c, b, 1); return b.length; });
+  };
+
   function refreshThumbs() {
     Object.keys(thumbCanvases).forEach(function (k) { S.refreshThumb(Number(k)); });
-    Object.keys(maskCanvases).forEach(function (k) {
-      var c = maskCanvases[k];
-      fetchBytes(api('thumb?mask=1&i=' + k + '&w=' + c.width + '&h=' + c.height))
-        .then(function (b) { drawThumb(c, b, 1); });
-    });
+    Object.keys(maskCanvases).forEach(function (k) { S.refreshMaskThumb(Number(k)); });
   }
 
   // The active layer: what the brush paints and what the controls
-  // below the list show.  Clicking a row picks it.
-  S.setActiveLayer = function (i) {
+  // below the list show.  Clicking a row picks it; clicking its mask
+  // thumbnail makes the mask the target (MASK true), the layer
+  // thumbnail the pixels again.
+  S.setActiveLayer = function (i, mask) {
     S.activeLayer = i;
+    if (mask !== undefined) S.maskTarget = !!mask;
     document.querySelectorAll('#stratum-layers .st-lrow').forEach(function (row) {
-      row.classList.toggle('st-active', Number(row.getAttribute('data-layer')) === i);
+      var on = Number(row.getAttribute('data-layer')) === i;
+      row.classList.toggle('st-active', on);
+      var thumbs = row.querySelectorAll('.st-thumb');
+      thumbs.forEach(function (t, k) {
+        t.classList.toggle('st-target', on && (k === 1) === (S.maskTarget && thumbs.length > 1));
+      });
     });
     showProperties();
   };
@@ -1207,7 +1281,12 @@
           { label: 'Curves...', run: addLayer('curves') },
           { label: 'Hue/Saturation...', run: addLayer('hue-saturation') }] },
         '-',
-        { label: 'Layer Mask', sub: [{ label: 'Reveal All' }, { label: 'Hide All' }] },
+        { label: 'Layer Mask', sub: [
+          { label: 'Reveal All', enabled: activeL, run: function () { S.layerOp({ op: 'mask', value: 'reveal' }); } },
+          { label: 'Hide All', enabled: activeL, run: function () { S.layerOp({ op: 'mask', value: 'hide' }); } },
+          '-',
+          { label: 'Delete', enabled: function () { var L = activeL(); return L && L.mask; },
+            run: function () { S.layerOp({ op: 'mask', value: 'delete' }); } }] },
         '-',
         { label: 'Arrange', sub: [
           { label: 'Bring Forward', key: 'Ctrl+]', enabled: activeL,
@@ -1795,6 +1874,62 @@
                 { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
           return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
         });
+      });
+    }).then(function () {
+      // Masks: Layer > Layer Mask > Hide All on the active layer hides it
+      // (parity intact); a white stroke on the mask reveals some of it,
+      // previewed and committed through the mask's own live-stroke
+      // stage; undo; Delete gives the stack back.
+      // On the bottom layer, which has pixels everywhere, so a revealed
+      // patch is sure to show.
+      var active = S.activeLayer;
+      S.setActiveLayer(0, false);
+      var L0 = activeL(), n = doc.layers.length, before = S.renderExact(), hidden = null, previewed = null;
+      if (!L0 || L0.kind !== 'raster' || L0.mask) { S.setActiveLayer(active, false); return null; }
+      return S.layerOp({ op: 'mask', value: 'hide' }).then(function () {
+        var L = activeL();
+        check('Hide All gives the layer a mask and makes it the target',
+              L && L.mask && S.maskTarget && doc.layers.length === n, { mask: L && L.mask, target: S.maskTarget });
+        hidden = S.renderExact();
+        check('a hidden layer changes the picture', renderDiff(before, hidden).maxDiff > 0);
+        return S.parity();
+      }).then(function (p) {
+        check('parity with the new mask', p.maxDiff <= 1, p);
+        var saved = { tool: S.tool, brush: S.brush };
+        S.brush = { radius: 20, hardness: 0.8, spacing: 0.25, flow: 1, opacity: 1, color: [255, 255, 255], mode: 'paint' };
+        S.setTool('brush');
+        var r = canvas.getBoundingClientRect();
+        function fire(type, fx, fy) {
+          canvas.dispatchEvent(new PointerEvent(type, { clientX: r.left + fx * r.width, clientY: r.top + fy * r.height,
+                                                        pointerId: 44, pointerType: 'mouse', bubbles: true }));
+        }
+        fire('pointerdown', 0.4, 0.5); fire('pointermove', 0.5, 0.5); fire('pointermove', 0.6, 0.5); fire('pointerup', 0.6, 0.5);
+        S.setTool(saved.tool);
+        S.brush = saved.brush;
+        var got = S.lastStroke;
+        check('the stroke went to the mask', got && got.target === 'mask', { target: got && got.target });
+        return got.previewed.then(function () {
+          previewed = S.renderExact();
+          return S.strokesSettled();
+        });
+      }).then(function () {
+        var after = S.renderExact();
+        check('a white stroke on the mask reveals some of the layer', renderDiff(hidden, after).maxDiff > 0);
+        check('the mask preview matches the committed stroke', renderDiff(previewed, after).maxDiff <= 2,
+              renderDiff(previewed, after));
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a mask stroke', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the mask back exactly', renderDiff(hidden, S.renderExact()).maxDiff === 0);
+        return S.layerOp({ op: 'mask', value: 'delete' });
+      }).then(function () {
+        var L = activeL();
+        check('Delete takes the mask away and gives the picture back',
+              L && !L.mask && !S.maskTarget && renderDiff(before, S.renderExact()).maxDiff === 0,
+              { mask: L && L.mask });
+        S.setActiveLayer(active, false);
       });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };

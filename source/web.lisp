@@ -184,10 +184,57 @@ handle-stroke does; {empty: true} when there was nothing to undo."
          (rect-json doc (the-object doc (layer (first entry))) (rest entry))
          (json-object "empty" 'yason:true)))))
 
+(defun handle-layers (req)
+  "A change of the stack -- {op: \"add\", kind, above}, {op: \"delete\",
+layer}, {op: \"move\", layer, delta} or {op: \"duplicate\", layer} --
+answering the new planVersion and the index of the layer to work on."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (op (gethash "op" body))
+         (layer (gethash "layer" body)))
+    (flet ((need-layer ()
+             (unless (and (integerp layer) (<= 0 layer) (< layer (length (the-object doc layer-list))))
+               (error "No layer ~a to ~a." layer op))))
+      (let ((active
+              (cond ((equal op "add")
+                     (let ((kind (find (gethash "kind" body) '(:raster :curves :levels :hue-saturation)
+                                       :test #'string-equal)))
+                       (unless kind (error "Unknown layer kind ~s." (gethash "kind" body)))
+                       (the-object doc (add-layer! (the-object doc (new-layer-spec kind))
+                                                   (gethash "above" body)))))
+                    ((equal op "delete") (need-layer) (the-object doc (delete-layer! layer)))
+                    ((equal op "move") (need-layer)
+                     (the-object doc (move-layer! layer (or (gethash "delta" body) 1))))
+                    ((equal op "duplicate") (need-layer) (the-object doc (duplicate-layer! layer)))
+                    (t (error "Unknown layer operation ~s." op)))))
+        (json-string (json-object "planVersion" (the-object doc plan-version)
+                                  "active" active
+                                  "layerCount" (length (the-object doc layer-list))))))))
+
 (defparameter *page-css* "
 html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
-#stratum-app { display: flex; height: 100vh; }
+#stratum-app { display: flex; height: calc(100vh - 27px); }
+#stratum-menubar { height: 26px; display: flex; align-items: stretch; background: #2a2d33;
+  border-bottom: 1px solid #3a3e45; user-select: none; position: relative; z-index: 5; }
+.st-menu { position: relative; }
+.st-menu-title { padding: 0 11px; line-height: 26px; cursor: default; }
+.st-menu.st-open > .st-menu-title, .st-menu-title:hover { background: #3b5f93; }
+.st-menu-list { display: none; position: absolute; top: 100%; left: 0; min-width: 230px;
+  background: #2c2f35; border: 1px solid #3a3e45; box-shadow: 0 6px 18px rgba(0,0,0,.5);
+  padding: 4px 0; z-index: 10; }
+.st-menu.st-open > .st-menu-list { display: block; }
+.st-item { display: flex; justify-content: space-between; align-items: center; gap: 24px;
+  padding: 3px 14px 3px 24px; white-space: nowrap; cursor: default; position: relative; }
+.st-item:hover { background: #3b5f93; }
+.st-item.st-disabled { color: #6b7079; }
+.st-item.st-disabled:hover { background: none; }
+.st-item .st-key { color: #8a9099; font-size: 12px; }
+.st-item:hover .st-key { color: #c9cdd3; }
+.st-item .st-check { position: absolute; left: 8px; }
+.st-sep { border-top: 1px solid #3a3e45; margin: 4px 0; }
+.st-item.st-sub > .st-menu-list { top: -5px; left: 100%; }
+.st-item.st-sub:hover > .st-menu-list { display: block; }
 #stratum-canvas { flex: 1; min-width: 0; height: 100%; display: block;
   cursor: grab; touch-action: none; }
 #stratum-panel { width: 300px; flex: none; overflow-y: auto; box-sizing: border-box;
@@ -235,6 +282,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 
   :computed-slots
   ((body (with-lhtml-string ()
+           (:div :id "stratum-menubar" "")
            (:div :id "stratum-app"
              (:canvas :id "stratum-canvas" "")
              (:aside :id "stratum-panel"
@@ -312,4 +360,5 @@ goes back as a 500 carrying the condition's text."
                            (the-object doc doc-width) (the-object doc doc-height)))))
       (pub "/stratum/api/set" "application/json" #'handle-set)
       (pub "/stratum/api/stroke" "application/json" #'handle-stroke)
-      (pub "/stratum/api/undo" "application/json" #'handle-undo))))
+      (pub "/stratum/api/undo" "application/json" #'handle-undo)
+      (pub "/stratum/api/layers" "application/json" #'handle-layers))))

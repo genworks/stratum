@@ -274,6 +274,22 @@
     view.oy = doc.height / 2 - ch / (2 * view.scale);
   }
 
+  // Zoom about the canvas's center to SCALE (device pixels per document pixel).
+  function zoomTo(scale) {
+    var cx = canvas.width / 2, cy = canvas.height / 2;
+    var px = view.ox + cx / view.scale, py = view.oy + cy / view.scale;
+    view.scale = Math.min(64, Math.max(0.02, scale));
+    view.ox = px - cx / view.scale;
+    view.oy = py - cy / view.scale;
+    status();
+    requestDraw();
+  }
+
+  S.zoomIn = function () { zoomTo(view.scale * 1.25); };
+  S.zoomOut = function () { zoomTo(view.scale / 1.25); };
+  S.fitOnScreen = function () { fitView(); status(); requestDraw(); };
+  S.actualPixels = function () { zoomTo(1); };
+
   function resize() {
     var dpr = window.devicePixelRatio || 1;
     var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
@@ -378,9 +394,19 @@
     canvas.addEventListener('pointercancel', end);
     window.addEventListener('keydown', function (e) {
       if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      var mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
-      else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); S.undo(); }
-      else if (e.ctrlKey || e.metaKey || e.altKey) return;
+      else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
+      else if (mod && e.shiftKey && key === 'n') { e.preventDefault(); S.layerOp({ op: 'add', kind: 'raster' }); }
+      else if (mod && key === 'j') { e.preventDefault(); S.layerOp({ op: 'duplicate' }); }
+      else if (mod && e.key === ']') { e.preventDefault(); S.layerOp({ op: 'move', delta: 1 }); }
+      else if (mod && e.key === '[') { e.preventDefault(); S.layerOp({ op: 'move', delta: -1 }); }
+      else if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); S.zoomIn(); }
+      else if (mod && e.key === '-') { e.preventDefault(); S.zoomOut(); }
+      else if (mod && e.key === '0') { e.preventDefault(); S.fitOnScreen(); }
+      else if (mod && e.key === '1') { e.preventDefault(); S.actualPixels(); }
+      else if (mod || e.altKey) return;
+      else if (e.key === 'Escape') closeMenus();
       else if (e.key === 'b' || e.key === 'B') S.setTool('brush');
       else if (e.key === 'e' || e.key === 'E') S.setTool('eraser');
       else if (e.key === 'h' || e.key === 'H') S.setTool('pan');
@@ -668,17 +694,36 @@
     postTimers[key] = setTimeout(function () { post(body); }, 150);
   }
 
-  // A plan change brings a new shader; the pixels stay where they are.
-  function reloadStructure() {
+  // A plan change brings a new shader; the pixels stay where they are
+  // unless the raster or mask count moved.  A change of the stack
+  // itself (REBUILD_PANEL) also remakes the layer panel, whose rows
+  // would otherwise hold the old layers.
+  function reloadStructure(rebuildPanel) {
     return fetchJSON(api('doc')).then(function (d) {
       var repixel = d.rasterCount !== doc.rasterCount || d.maskCount !== doc.maskCount;
       doc = d;
       buildProgram(doc.shader);
       syncOpacity();
       uploadLuts();
+      if (rebuildPanel) buildPanel();
       return repixel ? uploadPixels() : null;
     }).then(function () { status(); requestDraw(); });
   }
+
+  // A change of the stack: {op: 'add', kind, above}, {op: 'delete',
+  // layer}, {op: 'move', layer, delta}, {op: 'duplicate', layer}.  The
+  // active layer stands in for a missing layer or above.
+  S.layerOp = function (body) {
+    if (body.op === 'add') { if (body.above === undefined) body.above = S.activeLayer; }
+    else if (body.layer === undefined) body.layer = S.activeLayer;
+    return S.strokesSettled().then(function () {
+      return postJSON('layers', JSON.stringify(body));
+    }).then(function (res) {
+      S.activeLayer = res.active;
+      S.undoDepth = 0;
+      return reloadStructure(true);
+    }).catch(function (e) { status('layer edit failed: ' + e.message); });
+  };
 
   // ---- the layer panel ----------------------------------------------------
 
@@ -759,6 +804,168 @@
   function hexColor(c) {
     return '#' + c.map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2); }).join('');
   }
+
+  // ---- the menu bar -------------------------------------------------------
+  //
+  // The menus a classic image editor has, in their usual order with
+  // their usual items and keys, so that someone who knows one finds
+  // things where they expect them.  An item without a `run' is not
+  // built yet and shows disabled, as unavailable commands do; the list
+  // is rebuilt each time its menu opens, so checks and enabling are
+  // current.
+
+  function activeL() { return doc && S.activeLayer !== null ? doc.layers[S.activeLayer] : null; }
+  function togglePanel(sel) {
+    var e = document.querySelector(sel);
+    e.style.display = e.style.display === 'none' ? '' : 'none';
+    resize();
+  }
+  function panelShown(sel) { var e = document.querySelector(sel); return e && e.style.display !== 'none'; }
+  function addLayer(kind) { return function () { S.layerOp({ op: 'add', kind: kind }); }; }
+
+  function menuSpec() {
+    return [
+      { title: 'File', items: [
+        { label: 'New...', key: 'Ctrl+N' },
+        { label: 'Open...', key: 'Ctrl+O' },
+        { label: 'Open Sample', sub: ['demo', 'parity', 'stress'].map(function (n) {
+          return { label: n, check: n === docName, run: function () { location.search = '?doc=' + n; } }; }) },
+        '-',
+        { label: 'Save', key: 'Ctrl+S' },
+        { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(api('export.png')); } }] },
+        '-',
+        { label: 'Close', key: 'Ctrl+W' }] },
+      { title: 'Edit', items: [
+        { label: 'Undo', key: 'Ctrl+Z', run: function () { S.undo(); },
+          enabled: function () { return S.undoDepth > 0; } },
+        { label: 'Redo', key: 'Ctrl+Shift+Z' },
+        '-',
+        { label: 'Cut', key: 'Ctrl+X' }, { label: 'Copy', key: 'Ctrl+C' }, { label: 'Paste', key: 'Ctrl+V' },
+        '-',
+        { label: 'Fill...', key: 'Shift+F5' },
+        { label: 'Free Transform', key: 'Ctrl+T' }] },
+      { title: 'Image', items: [
+        { label: 'Mode', sub: [{ label: 'RGB Color', check: true }, { label: 'Grayscale' }, { label: 'CMYK Color' }] },
+        '-',
+        { label: 'Adjustments', sub: [
+          { label: 'Levels...', key: 'Ctrl+L' }, { label: 'Curves...', key: 'Ctrl+M' },
+          { label: 'Hue/Saturation...', key: 'Ctrl+U' }] },
+        '-',
+        { label: 'Image Size...', key: 'Ctrl+Alt+I' },
+        { label: 'Canvas Size...', key: 'Ctrl+Alt+C' }] },
+      { title: 'Layer', items: [
+        { label: 'New', sub: [{ label: 'Layer...', key: 'Ctrl+Shift+N', run: addLayer('raster') }] },
+        { label: 'Duplicate Layer...', key: 'Ctrl+J', enabled: activeL,
+          run: function () { S.layerOp({ op: 'duplicate' }); } },
+        { label: 'Delete Layer', enabled: activeL, run: function () { S.layerOp({ op: 'delete' }); } },
+        '-',
+        { label: 'New Adjustment Layer', sub: [
+          { label: 'Levels...', run: addLayer('levels') },
+          { label: 'Curves...', run: addLayer('curves') },
+          { label: 'Hue/Saturation...', run: addLayer('hue-saturation') }] },
+        '-',
+        { label: 'Layer Mask', sub: [{ label: 'Reveal All' }, { label: 'Hide All' }] },
+        '-',
+        { label: 'Arrange', sub: [
+          { label: 'Bring Forward', key: 'Ctrl+]', enabled: activeL,
+            run: function () { S.layerOp({ op: 'move', delta: 1 }); } },
+          { label: 'Send Backward', key: 'Ctrl+[', enabled: activeL,
+            run: function () { S.layerOp({ op: 'move', delta: -1 }); } }] },
+        '-',
+        { label: 'Merge Down', key: 'Ctrl+E' },
+        { label: 'Flatten Image' }] },
+      { title: 'Select', items: [
+        { label: 'All', key: 'Ctrl+A' }, { label: 'Deselect', key: 'Ctrl+D' },
+        { label: 'Inverse', key: 'Ctrl+Shift+I' }] },
+      { title: 'Filter', items: [
+        { label: 'Blur', sub: [{ label: 'Gaussian Blur...' }] },
+        { label: 'Sharpen', sub: [{ label: 'Unsharp Mask...' }] },
+        { label: 'Noise', sub: [{ label: 'Add Noise...' }] }] },
+      { title: 'View', items: [
+        { label: 'Zoom In', key: 'Ctrl++', run: S.zoomIn },
+        { label: 'Zoom Out', key: 'Ctrl+-', run: S.zoomOut },
+        { label: 'Fit on Screen', key: 'Ctrl+0', run: S.fitOnScreen },
+        { label: 'Actual Pixels', key: 'Ctrl+1', run: S.actualPixels },
+        '-',
+        { label: 'Benchmark', run: function () { document.querySelector('#stratum-panel .st-bench-btn').click(); } }] },
+      { title: 'Window', items: [
+        { label: 'Layers', check: panelShown('#stratum-panel'), run: function () { togglePanel('#stratum-panel'); } },
+        { label: 'Brush Settings', check: panelShown('#stratum-panel .st-brush'),
+          run: function () { togglePanel('#stratum-panel .st-brush'); } }] },
+      { title: 'Help', items: [
+        { label: 'About Stratum', run: function () {
+          status('Stratum: a layered image editor in Common Lisp, on Gendl.  AGPL-3.0-or-later.'); } },
+        { label: 'Source Code', run: function () { window.open('https://github.com/genworks/stratum'); } }] }
+    ];
+  }
+
+  function closeMenus() {
+    document.querySelectorAll('#stratum-menubar .st-menu.st-open').forEach(function (m) {
+      m.classList.remove('st-open');
+    });
+  }
+
+  function menuList(items) {
+    var list = el('div', { 'class': 'st-menu-list' });
+    items.forEach(function (it) {
+      if (it === '-') { list.appendChild(el('div', { 'class': 'st-sep' })); return; }
+      var on = it.sub ? true : !!(it.run && (!it.enabled || it.enabled()));
+      var row = el('div', { 'class': 'st-item' + (on ? '' : ' st-disabled') + (it.sub ? ' st-sub' : '') });
+      if (it.check) row.appendChild(el('span', { 'class': 'st-check', text: '✓' }));
+      row.appendChild(el('span', { text: it.label }));
+      row.appendChild(el('span', { 'class': 'st-key', text: it.sub ? '▸' : (it.key || '') }));
+      if (it.sub) row.appendChild(menuList(it.sub));
+      else if (on) row.addEventListener('click', function (e) { e.stopPropagation(); closeMenus(); it.run(); });
+      else row.addEventListener('click', function (e) { e.stopPropagation(); });
+      list.appendChild(row);
+    });
+    return list;
+  }
+
+  function installMenubar() {
+    var bar = document.getElementById('stratum-menubar');
+    if (!bar) return;
+    bar.textContent = '';
+    menuSpec().forEach(function (m, k) {
+      var menu = el('div', { 'class': 'st-menu', 'data-menu': m.title },
+                    [el('div', { 'class': 'st-menu-title', text: m.title })]);
+      function open() {
+        closeMenus();
+        var old = menu.querySelector(':scope > .st-menu-list');
+        if (old) menu.removeChild(old);
+        menu.appendChild(menuList(menuSpec()[k].items));
+        menu.classList.add('st-open');
+      }
+      menu.firstChild.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (menu.classList.contains('st-open')) closeMenus(); else open();
+      });
+      menu.firstChild.addEventListener('mouseenter', function () {
+        if (document.querySelector('#stratum-menubar .st-menu.st-open')) open();
+      });
+      bar.appendChild(menu);
+    });
+    document.addEventListener('click', closeMenus);
+  }
+
+  // Open menu TITLE and run the item named LABEL (through a submenu
+  // with SUB), as a click would: the test hook for the menus.
+  S.menuRun = function (title, label, sub) {
+    var menu = document.querySelector('#stratum-menubar .st-menu[data-menu="' + title + '"]');
+    menu.firstChild.click();
+    var scope = menu;
+    if (sub) {
+      scope = Array.prototype.find.call(menu.querySelectorAll('.st-item.st-sub'), function (r) {
+        return r.children[0].textContent === sub || r.children[1].textContent === sub;
+      });
+    }
+    var item = Array.prototype.find.call(scope.querySelectorAll('.st-item'), function (r) {
+      return Array.prototype.some.call(r.children, function (c) { return c.textContent === label; });
+    });
+    var on = item && !item.classList.contains('st-disabled');
+    if (on) item.click(); else closeMenus();
+    return on;
+  };
 
   function layerRow(L) {
     var i = L.index;
@@ -1158,6 +1365,33 @@
         check('parity after undo', p.maxDiff <= 1, p);
       });
     }).then(function () {
+      // The stack through the menus: Layer > New Adjustment Layer >
+      // Curves above the active layer, then Layer > Delete Layer; each
+      // brings a new plan and keeps parity, and the stack ends as found.
+      var n = doc.layers.length, active = S.activeLayer, builds = S.stats.programBuilds;
+      var ran = S.menuRun('Layer', 'Curves...', 'New Adjustment Layer');
+      return S.strokesSettled().then(function () {
+        return new Promise(function (r) {
+          var tries = 0;
+          (function w() { if (doc.layers.length === n + 1 || !ran || tries++ > 500) r(); else setTimeout(w, 20); })();
+        });
+      }).then(function () {
+        check('a new adjustment layer joins the stack above the active one',
+              ran && doc.layers.length === n + 1 && S.activeLayer === active + 1 &&
+              doc.layers[S.activeLayer].kind === 'curves' && S.stats.programBuilds === builds + 1,
+              { ran: ran, layers: doc.layers.length, active: S.activeLayer, builds: S.stats.programBuilds - builds });
+        return S.parity();
+      }).then(function (p) {
+        check('parity with the new layer', p.maxDiff <= 1, p);
+        return S.layerOp({ op: 'delete' });
+      }).then(function () {
+        check('deleting it gives the stack back', doc.layers.length === n, { layers: doc.layers.length });
+        S.setActiveLayer(active);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after the delete', p.maxDiff <= 1, p);
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -1170,7 +1404,7 @@
   // console.
   function installBenchButton() {
     var out = el('div', { 'class': 'st-bench' });
-    var btn = el('button', { type: 'button', text: 'Benchmark (pan + curve drag)' });
+    var btn = el('button', { type: 'button', 'class': 'st-bench-btn', text: 'Benchmark (pan + curve drag)' });
     btn.addEventListener('click', function () {
       btn.disabled = true;
       out.textContent = 'running...';
@@ -1218,6 +1452,7 @@
       draw();
       installBenchButton();
       installToolbar();
+      installMenubar();
       S.ready = true;
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
     }).catch(function (e) {

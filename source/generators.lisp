@@ -57,6 +57,7 @@ PIXELS (WIDTH wide) at X, Y."
         (setf (gethash key *pixel-cache*)
               (destructuring-bind (kind &rest args) spec
                 (ecase kind
+                  (:solid (apply #'gen-solid w h args))
                   (:gradient (apply #'gen-gradient w h args))
                   (:discs (apply #'gen-discs w h args))
                   (:clouds (apply #'gen-clouds w h args))
@@ -94,6 +95,17 @@ same picture on every implementation."
          (span (max 1d-9 (- (reduce #'max corners) lo))))
     (lambda (x y)
       (/ (- (+ (* (+ x 0.5d0) dx) (* (+ y 0.5d0) dy)) lo) span))))
+
+(defun gen-solid (w h &key (color '(0 0 0)) (alpha 0))
+  "One COLOR at one ALPHA everywhere: transparent by default, the empty
+layer a stroke starts on."
+  (let ((px (make-rgba w h)))
+    (dotimes (i (* w h) px)
+      (let ((o (* 4 i)))
+        (setf (aref px o) (first color)
+              (aref px (+ o 1)) (second color)
+              (aref px (+ o 2)) (third color)
+              (aref px (+ o 3)) alpha)))))
 
 (defun gen-gradient (w h &key (from '(40 60 120 255)) (to '(250 170 90 255)) (angle 90))
   (let ((px (make-rgba w h))

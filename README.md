@@ -94,11 +94,29 @@ Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
 
+The menu bar is the one a classic image editor has, in its usual order
+with its usual items and keys: File, Edit, Image, Layer, Select,
+Filter, View, Window and Help. What is not built yet shows disabled,
+as unavailable commands do. Built so far: File ▸ Open Sample and
+Export As PNG; Edit ▸ Undo; Layer ▸ New ▸ Layer, Duplicate Layer,
+Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation)
+and Arrange (Bring Forward, Send Backward); View ▸ Zoom In, Zoom Out,
+Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
+
 The keys are the usual ones: H is the hand, B the brush, E the eraser,
 Space held pans whatever the tool, `[` and `]` change the brush size,
-and Ctrl+Z undoes the last stroke. Click a raster layer's name to paint
-on it; the panel has the brush's size, hardness, flow, opacity and
-color.
+Ctrl+Z undoes the last stroke, Ctrl+Shift+N makes a layer, Ctrl+J
+duplicates one, Ctrl+] and Ctrl+[ move it, and Ctrl+0, Ctrl+1, Ctrl++
+and Ctrl+- are the views. Click a layer's name to make it the active
+one; the brush paints on it. The panel has the brush's size, hardness,
+flow, opacity and color.
+
+A change of the stack (a layer added, deleted, moved or duplicated)
+goes through the document's `layer-specs`, which makes every layer
+object anew; each layer first writes its current state back into its
+spec (`spec-now`: name, opacity, visibility, mask, blend mode, curve
+points, settings and painted pixels), so nothing is lost across the
+change, and the plan, the programs and the layer panel follow.
 
 ## API
 
@@ -113,6 +131,7 @@ color.
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 | `POST /stratum/api/stroke?doc=N` | `{layer, samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle, the layer's texture index and paint version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last stroke; answers the rectangle put back |
+| `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}` or `{op: "duplicate", layer}`; answers the new plan version and the layer to work on |
 
 ## Tests
 
@@ -132,6 +151,10 @@ It checks:
   `paint-dab` against the whole-buffer form, that a stroke changes its
   rectangle only and rebuilds nothing, that the shared pixels are never
   painted, erasing, and that undo gives the layer back exactly;
+- the stack: a layer added above another, deleted, moved and
+  duplicated, with painted pixels and edits surviving each change, a
+  duplicate's pixels its own, a new layer transparent, and the
+  programs following;
 - that a threaded render equals a single-threaded one;
 - the FNV-1a checksums of the CPU renders against `tests/golden.sexp`,
   the sample documents and the parity document with a test stroke
@@ -166,7 +189,10 @@ The self-test checks:
   last bit; the preview must match the committed picture within two
   levels (the commit rounds the layer to 8 bits once, which the
   preview did not); parity must hold afterwards; and undo must give
-  the picture back byte for byte.
+  the picture back byte for byte;
+- the stack through the menus: Layer ▸ New Adjustment Layer ▸ Curves
+  and then Delete Layer, each a new plan with parity intact, and the
+  stack as found.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

@@ -276,6 +276,60 @@ to alter the pictures."
                   (equalp (the-object doc (render-cpu)) render-before)))
       (check "nothing is left to undo" (null (undo-stroke! doc))))))
 
+(defun layer-names (doc)
+  (mapcar (lambda (l) (the-object l layer-name)) (the-object doc layer-list)))
+
+(defun test-layers ()
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0))))
+    (the-object doc (layer 1) (set-slot! :opacity 0.3d0))
+    (apply-brush-stroke sky *test-stroke*)
+    (let ((painted (copy-seq (the-object sky pixels)))
+          (names (layer-names doc)))
+      (check "a new adjustment layer goes in above the given layer, named in sequence"
+             (and (= 1 (the-object doc (add-layer! (the-object doc (new-layer-spec :levels)) 0)))
+                  (eql (the-object doc (layer 1) kind) :levels)
+                  (string= (the-object doc (layer 1) layer-name) "Levels 2")
+                  (= (length (the-object doc layer-list)) (1+ (length names))))
+             (layer-names doc))
+      (check "painted pixels and edits survive a change of the stack"
+             (and (equalp (the-object doc (layer 0) pixels) painted)
+                  (= (the-object doc (layer 2) opacity) 0.3d0)))
+      (check "a change of the stack forgets the undo list"
+             (null (the-object doc undo-entries)))
+      (check "deleting the layer gives the stack back"
+             (and (= 1 (the-object doc (delete-layer! 1)))
+                  (equal (layer-names doc) names))
+             (layer-names doc))
+      (check "moving a layer up swaps it with the one above, pixels and all"
+             (and (= 1 (the-object doc (move-layer! 0 1)))
+                  (string= (the-object doc (layer 1) layer-name) "Sky")
+                  (equalp (the-object doc (layer 1) pixels) painted)
+                  (= 0 (the-object doc (move-layer! 1 -1)))
+                  (equal (layer-names doc) names))
+             (layer-names doc))
+      (check "a duplicate sits above the original with its own copy of the pixels"
+             (and (= 1 (the-object doc (duplicate-layer! 0)))
+                  (string= (the-object doc (layer 1) layer-name) "Sky copy")
+                  (equalp (the-object doc (layer 1) pixels) painted)
+                  (not (eq (the-object doc (layer 1) pixels) (the-object doc (layer 0) pixels))))
+             (layer-names doc))
+      (check "a new layer on top is transparent"
+             (let ((j (the-object doc (add-layer! (the-object doc (new-layer-spec :raster))))))
+               (and (= j (1- (length (the-object doc layer-list))))
+                    (string= (the-object doc (layer j) layer-name)
+                             (format nil "Layer ~d" (1+ j)))
+                    (every #'zerop (the-object doc (layer j) pixels))))
+             (layer-names doc))
+      (check "the programs follow the stack"
+             (let ((shader (the-object doc shader-source)))
+               (and (= (length (the-object doc layer-list))
+                       (loop for start = 0 then (1+ pos)
+                             for pos = (search "// layer " shader :start2 start)
+                             while pos count t))
+                    (= (length (the-object doc (render-cpu)))
+                       (* 4 (the-object doc doc-width) (the-object doc doc-height)))))))))
+
 (defun test-threads ()
   (let* ((doc (make-sample-document "parity"))
          (threaded (let ((*render-threads* 8)) (the-object doc (render-cpu))))
@@ -286,7 +340,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-threads test-golden))
+                  test-brush test-layers test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

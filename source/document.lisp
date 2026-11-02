@@ -24,6 +24,14 @@
 
 (defparameter *blend-modes* '(:normal :multiply :screen :add))
 
+(defun plist-merge (new old)
+  "A plist with NEW's keys and values first and OLD's remaining ones after."
+  (let ((result (copy-list new)))
+    (loop for (k v) on old by #'cddr
+          unless (loop for (key) on new by #'cddr thereis (eq key k))
+            do (setf result (append result (list k v))))
+    result))
+
 (define-object image-layer ()
   :documentation
   (:description "What every layer of an image-document has, from its
@@ -47,7 +55,25 @@ spec).  raster-layer and curves-layer mix this in.")
 may set; each is a settable slot of this layer."
     setting-names nil)
    ("List of four numbers. This layer's entry in the shader's u_params."
-    params (list 0 0 0 0))))
+    params (list 0 0 0 0))
+   ("Plist.  The state this class keeps beyond the common keys, for
+spec-now; by default its numeric settings.  A subclass with more
+overrides it."
+    own-state (loop for name in (the setting-names)
+                    append (list name (the (evaluate name))))))
+
+  :functions
+  ((spec-now
+    ()
+    "This layer's spec with its current state written back into it:
+name, opacity, visibility, mask, and own-state.  A change of the
+document's layer-specs makes every layer object anew, so this is what a
+layer carries across one."
+    (plist-merge (list* :kind (the kind) :name (the layer-name)
+                        :opacity (the opacity) :visible? (the visible?)
+                        :mask (the mask-spec)
+                        (the own-state))
+                 (the spec)))))
 
 (define-object lut-layer (image-layer)
   :documentation
@@ -67,11 +93,14 @@ with :blend (:normal, :multiply, :screen or :add).")
 
   :input-slots
   ((blend-mode (getf (the spec) :blend :normal) :settable)
-   (source (getf (the spec) :source))
+   ("Generator spec.  Where the pixels come from before any stroke; a
+layer made without one is transparent."
+    source (getf (the spec) :source '(:solid)))
    ("Vector of (unsigned-byte 8), or nil.  This layer's own pixel buffer,
 a copy of the source made by its first stroke; nil until then, so an
-unpainted layer shares the pixel cache's copy and never paints into it."
-    own-pixels nil :settable)
+unpainted layer shares the pixel cache's copy and never paints into it.
+The spec's :pixels carries it across a change of the stack."
+    own-pixels (getf (the spec) :pixels) :settable)
    ("Integer.  Counts the strokes and undos applied to own-pixels.  They
 change the buffer in place, so bumping this is the signal that the
 pixels moved: it feeds pixels (and so raster-vector and the CPU render)
@@ -88,7 +117,8 @@ rectangles instead (see brush.lisp)."
                   (or (the own-pixels) (the source-pixels))))
    (texture-index (position self (the parent raster-layers)))
    (plan-entry (list :raster :tex (the texture-index) :blend (the blend-mode)
-                     :mask (the mask-index) :param (the index))))
+                     :mask (the mask-index) :param (the index)))
+   (own-state (list :blend (the blend-mode) :pixels (the own-pixels))))
 
   :functions
   ((ensure-own-pixels!
@@ -114,7 +144,9 @@ points in [0,1].")
   ((kind :curves)
    (luts (list (channel-lut (the master) (the red))
                (channel-lut (the master) (the green))
-               (channel-lut (the master) (the blue))))))
+               (channel-lut (the master) (the blue))))
+   (own-state (list :master (the master) :red (the red)
+                    :green (the green) :blue (the blue)))))
 
 (define-object levels-layer (lut-layer)
   :documentation
@@ -234,6 +266,69 @@ brush.lisp pops one and puts the bytes back."
 
   :functions
   ((layer (i) (nth i (the layer-list)))
+
+   ;; The stack's structure: each operation writes every layer's current
+   ;; state back into its spec (spec-now) and sets layer-specs, which
+   ;; makes the layer objects anew from the new list; the plan changes
+   ;; and the programs follow.  The undo list goes with it, since its
+   ;; layer indices would be stale.
+   (specs-now () (mapcar (lambda (l) (the-object l spec-now)) (the layer-list)))
+
+   (replace-specs!
+    (specs)
+    (the (set-slot! :undo-entries nil))
+    (the (set-slot! :layer-specs specs)))
+
+   (new-layer-spec
+    (kind)
+    "A fresh spec of KIND (:raster, :curves, :levels or :hue-saturation),
+named in sequence as other editors do: Layer 3, Curves 1."
+    (let ((count (count kind (the layer-list) :key (lambda (l) (the-object l kind)))))
+      (ecase kind
+        (:raster (list :kind :raster :name (format nil "Layer ~d" (1+ (length (the layer-list))))
+                       :source '(:solid)))
+        (:curves (list :kind :curves :name (format nil "Curves ~d" (1+ count))))
+        (:levels (list :kind :levels :name (format nil "Levels ~d" (1+ count))))
+        (:hue-saturation (list :kind :hue-saturation
+                               :name (format nil "Hue/Saturation ~d" (1+ count)))))))
+
+   (add-layer!
+    (spec &optional above)
+    "Insert SPEC above layer ABOVE, or on top; the new layer's index."
+    (let* ((specs (the specs-now))
+           (at (if above (1+ above) (length specs))))
+      (the (replace-specs! (append (subseq specs 0 at) (list spec) (subseq specs at))))
+      at))
+
+   (delete-layer!
+    (i)
+    "Remove layer I; the index of the layer to work on next, or nil when
+none is left."
+    (let ((specs (the specs-now)))
+      (the (replace-specs! (append (subseq specs 0 i) (subseq specs (1+ i)))))
+      (let ((n (length (the layer-list))))
+        (when (> n 0) (min i (1- n))))))
+
+   (move-layer!
+    (i delta)
+    "Move layer I up the stack by DELTA (down when negative), no further
+than the ends; its new index."
+    (let* ((specs (the specs-now))
+           (j (max 0 (min (1- (length specs)) (+ i delta))))
+           (spec (nth i specs))
+           (rest (append (subseq specs 0 i) (subseq specs (1+ i)))))
+      (the (replace-specs! (append (subseq rest 0 j) (list spec) (subseq rest j))))
+      j))
+
+   (duplicate-layer!
+    (i)
+    "A copy of layer I just above it, with its own copy of any painted
+pixels; the copy's index."
+    (let* ((spec (the (layer i) spec-now))
+           (copy (plist-merge (list :name (format nil "~a copy" (getf spec :name))
+                                    :pixels (and (getf spec :pixels) (copy-seq (getf spec :pixels))))
+                              spec)))
+      (the (add-layer! copy i))))
 
    (render-cpu
     ()

@@ -545,6 +545,95 @@
              curves: !!point, canvas: [canvas.width, canvas.height], scale: view.scale };
   };
 
+  // The curve tables as the browser computes them (composedLut from
+  // dual.js, in float64) against the server's (the same Lisp source),
+  // row for row.
+  S.lutCheck = function () {
+    return fetchJSON(api('luts')).then(function (server) {
+      var max = 0, count = 0;
+      doc.layers.forEach(function (L) {
+        if (L.kind !== 'curves') return;
+        var m = L.curves.master;
+        ['red', 'green', 'blue'].forEach(function (ch, k) {
+          var c = L.curves[ch];
+          var lut = composedLut(column(m, 0), column(m, 1), column(c, 0), column(c, 1), 256);
+          for (var i = 0; i < 256; i++) {
+            max = Math.max(max, Math.abs(lut[i] - server[(L.lutRow + k) * 256 + i]));
+            count++;
+          }
+        });
+      });
+      return { entries: count, maxDiff: max };
+    });
+  };
+
+  // The browser half of the regression suite (tests/browser.sh): GPU
+  // against CPU, browser curve tables against the server's, and a
+  // blend-mode round trip that must rebuild the program exactly once
+  // each way and leave parity intact.  The document is left as found.
+  S.selfTest = function () {
+    var steps = [], ok = true;
+    function check(name, pass, detail) {
+      steps.push({ name: name, pass: !!pass, detail: detail });
+      if (!pass) ok = false;
+    }
+    var L = null, original = null, builds = 0;
+    return S.parity().then(function (p) {
+      check('parity', p.maxDiff <= 1, p);
+      return S.lutCheck();
+    }).then(function (l) {
+      check('curve tables', l.entries === 0 || l.maxDiff < 1e-9, l);
+      doc.layers.forEach(function (x) { if (!L && x.kind === 'raster' && x.index > 0) L = x; });
+      if (!L) return null;
+      original = L.blend;
+      builds = S.stats.programBuilds;
+      var other = original === 'screen' ? 'multiply' : 'screen';
+      L.blend = other;
+      return post({ layer: L.index, slot: 'blend', value: other }).then(function () {
+        check('blend edit rebuilds once', S.stats.programBuilds === builds + 1,
+              { before: builds, after: S.stats.programBuilds });
+        return S.parity();
+      }).then(function (p) {
+        check('parity after blend edit', p.maxDiff <= 1, p);
+        L.blend = original;
+        return post({ layer: L.index, slot: 'blend', value: original });
+      }).then(function () {
+        check('blend restored', S.stats.programBuilds === builds + 2,
+              { before: builds, after: S.stats.programBuilds });
+        return S.parity();
+      }).then(function (p) {
+        check('parity after restore', p.maxDiff <= 1, p);
+      });
+    }).then(function () {
+      return { ok: ok, doc: doc.name, steps: steps };
+    }, function (e) {
+      check('no exception', false, String(e && e.message || e));
+      return { ok: false, doc: doc && doc.name, steps: steps };
+    });
+  };
+
+  // The panel's Benchmark button: 120 frames of pan plus curve drag,
+  // the result in the status lines, so a real GPU's number needs no
+  // console.
+  function installBenchButton() {
+    var out = el('div', { 'class': 'st-bench' });
+    var btn = el('button', { type: 'button', text: 'Benchmark (pan + curve drag)' });
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      out.textContent = 'running...';
+      setTimeout(function () {
+        var r = S.bench(120, true);
+        out.textContent = r.frames + ' frames at ' + r.canvas[0] + ' x ' + r.canvas[1] + ': ' +
+          r.msPerFrame.toFixed(2) + ' ms a frame (' + Math.round(r.fps) + ' fps), worst ' +
+          r.worstMs.toFixed(1) + ' ms';
+        S.lastBench = r;
+        btn.disabled = false;
+      }, 50);
+    });
+    statusEl.parentNode.insertBefore(el('div', { 'class': 'st-row' }, [btn]), statusEl.nextSibling);
+    statusEl.parentNode.insertBefore(out, btn.parentNode.nextSibling);
+  }
+
   S.view = view;
   S.redraw = requestDraw;
   S.doc = function () { return doc; };
@@ -573,6 +662,7 @@
     }).then(function () {
       status();
       draw();
+      installBenchButton();
       S.ready = true;
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
     }).catch(function (e) {

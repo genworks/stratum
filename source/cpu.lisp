@@ -84,21 +84,23 @@ shader's lut() does it."
                 kb (+ (* kb (- 1.0 a)) (* nb ao a))))))))
 
 (defun plan->lisp (plan)
-  "A lambda form compositing PLAN into OUT, sRGB RGBA8 straight alpha.
-Called with the raster and mask pixel vectors, the curve tables, the
-per-layer opacities and the linear background."
+  "A lambda form compositing PLAN into OUT, sRGB RGBA8 straight alpha,
+for the pixels from START below END.  Called with the raster and mask
+pixel vectors, the curve tables, the per-layer opacities and the linear
+background.  Pixels are independent, so disjoint ranges may run at once
+(run-kernel)."
   (let ((tex-ids (remove-duplicates
                   (loop for e in plan when (eql (first e) :raster)
                         collect (getf (rest e) :tex))))
         (mask-ids (remove nil (remove-duplicates
                                (loop for e in plan collect (getf (rest e) :mask))))))
-    `(lambda (rasters masks luts opacity bg-r bg-g bg-b out width height)
+    `(lambda (rasters masks luts opacity bg-r bg-g bg-b out start end)
        (declare (optimize (speed 3) (safety 0) (debug 0))
                 (type simple-vector rasters masks)
                 (type (simple-array double-float (*)) luts opacity)
                 (type double-float bg-r bg-g bg-b)
                 (type (simple-array (unsigned-byte 8) (*)) out)
-                (type fixnum width height)
+                (type fixnum start end)
                 (ignorable rasters masks luts opacity))
        (let ((decode *srgb-decode*)
              ,@(loop for i in tex-ids collect `(,(tex-var i) (svref rasters ,i)))
@@ -109,7 +111,7 @@ per-layer opacities and the linear background."
                       `((type (simple-array (unsigned-byte 8) (*))
                               ,@(mapcar #'tex-var tex-ids)
                               ,@(mapcar #'mask-var mask-ids)))))
-         (dotimes (idx (cl:the fixnum (* width height)) out)
+         (loop for idx of-type fixnum from start below end do
            (let ((kr bg-r) (kg bg-g) (kb bg-b) (ao 1.0))
              (declare (type double-float kr kg kb ao))
              ,@(mapcar #'lisp-entry plan)
@@ -118,4 +120,27 @@ per-layer opacities and the linear background."
                (setf (aref out o) (unit->byte (linear->srgb (if (> ao 0.0) (/ kr ao) 0.0)))
                      (aref out (+ o 1)) (unit->byte (linear->srgb (if (> ao 0.0) (/ kg ao) 0.0)))
                      (aref out (+ o 2)) (unit->byte (linear->srgb (if (> ao 0.0) (/ kb ao) 0.0)))
-                     (aref out (+ o 3)) (unit->byte ao)))))))))
+                     (aref out (+ o 3)) (unit->byte ao)))))
+         out))))
+
+(defparameter *render-threads* 8
+  "Integer. How many threads a CPU render splits its pixels across; 1
+renders in the calling thread.")
+
+(defun run-kernel (kernel pixel-count &rest args)
+  "Call KERNEL with ARGS and a START and END, over [0, PIXEL-COUNT) in up
+to *render-threads* contiguous slices, each in its own thread, and wait
+for them all.  The kernel reads only its inputs and writes only its own
+slice of the output, so the slices need no locking."
+  (let* ((slices (max 1 (min *render-threads* (ceiling pixel-count 65536))))
+         (step (ceiling pixel-count slices))
+         (ranges (loop for start from 0 below pixel-count by step
+                       collect (list start (min pixel-count (+ start step))))))
+    (if (rest ranges)
+        (mapc #'bt:join-thread
+              (mapcar (lambda (range)
+                        (bt:make-thread (lambda () (apply kernel (append args range)))
+                                        :name "stratum render"))
+                      ranges))
+        (apply kernel (append args (first ranges))))
+    (values)))

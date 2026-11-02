@@ -61,14 +61,46 @@ empty space to add a point, or double-click a point to remove it.
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "curve", channel, points}` |
 
-## Checks
+## Tests
 
-`window.STRATUM.parity()` renders the document at 1:1 with `texelFetch`
-into an offscreen target, reads it back and compares it with
-`/stratum/api/cpu` pixel by pixel. `window.STRATUM.bench(n, curves?)`
-draws `n` frames back to back with a pan step (and, with `curves?`, a
-curve point moved and its table re-uploaded), finishing each frame on
-the GPU.
+The Lisp half, in any Gendl image with Stratum loaded:
+
+```lisp
+(load "/projects/gw/stratum/tests/run.lisp")
+(stratum::run-tests)   ; => T when every check passed
+```
+
+It checks:
+- which edits rebuild the programs (an opacity, curve or visibility
+  edit rebuilds nothing; a blend edit rebuilds each program once);
+- that each spec's kind picks its layer type;
+- the properties of the curve tables;
+- that a threaded render equals a single-threaded one;
+- the FNV-1a checksums of the CPU renders against `tests/golden.sexp`.
+
+The checksums must come out the same on every implementation (SBCL and
+CCL agree today). Run `(stratum::record-golden)` only for a change that
+is meant to alter the pictures, and say so in its commit message.
+
+The browser half runs `STRATUM.selfTest()` in headless Chromium
+(SwiftShader) against a published image, for each document named:
+
+```sh
+BASE=http://engine-room:9090 tests/browser.sh parity demo
+```
+
+The self-test checks three things:
+- `parity()`: the document rendered at 1:1 with `texelFetch`, read back
+  and compared pixel by pixel with `/stratum/api/cpu`, within one level;
+- `lutCheck()`: the curve tables built in the browser equal the
+  server's;
+- a blend-mode edit and its undo, each of which must rebuild the
+  program exactly once and leave parity intact.
+
+The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
+frames back to back with a pan step and a curve-point drag, and reports
+the time per frame. Headless SwiftShader numbers only prove the code
+path; real frame rates come from a real GPU.
 
 ## Open pieces
 
@@ -93,8 +125,10 @@ docstring:
 
 Smaller items still to do: per-session documents (today one document is
 shared per sample name), loading real files (PNG through `png-read` or
-an equivalent), multithreaded CPU rendering, and premultiplying before
-mipmap generation to remove edge fringes when zoomed out.
+an equivalent), and premultiplying before mipmap generation to remove
+edge fringes when zoomed out.  The CPU render runs on
+`*render-threads*` threads (8 by default): 2 s for the 4K twenty-layer
+document, against 10 s on one thread.
 
 ## License
 

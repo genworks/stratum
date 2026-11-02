@@ -128,6 +128,10 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
 .st-row input[type=range] { flex: 1; }
 .st-row select { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; }
+.st-bench { font: 11px/1.5 ui-monospace, Menlo, monospace; color: #c9cdd3;
+  margin: 4px 0 10px; white-space: pre-wrap; }
+#stratum-panel button { background: #2c2f35; color: inherit; border: 1px solid #3a3e45;
+  padding: 3px 8px; border-radius: 3px; cursor: pointer; }
 .st-curve { display: block; margin-top: 6px; background: #17181b;
   border: 1px solid #3a3e45; cursor: crosshair; touch-action: none; }
 @media (max-width: 700px) {
@@ -209,6 +213,8 @@ goes back as a 500 carrying the condition's text."
            (lambda (req)
              (the-object (nth (request-index req) (the-object (request-doc req) masked-layers))
                          mask-pixels)))
+      (pub "/stratum/api/luts" "application/json"
+           (lambda (req) (json-string (coerce (the-object (request-doc req) lut-vector) 'list))))
       (pub "/stratum/api/cpu" "application/octet-stream"
            (lambda (req) (the-object (request-doc req) (render-cpu))))
       (pub "/stratum/api/export.png" "image/png"

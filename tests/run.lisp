@@ -352,6 +352,38 @@ to alter the pictures."
                   (equalp (the-object doc (render-cpu)) opaque))
              (list (the-object doc (render-cpu)) opaque)))))
 
+(defun test-adjust ()
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0)))
+         (before (copy-seq (the-object sky pixels))))
+    (demand doc)
+    (check "identity curves bake nothing, and rebuild nothing"
+           (and (equal (adjust-layer! sky :curves) (list 0 0 320 200))
+                (equalp (the-object sky pixels) before)
+                (equal (demand doc) '(1 1))))
+    (check "levels with a gamma change the pixels and leave alpha alone"
+           (progn (adjust-layer! sky :levels :settings '(:gamma 1.6d0))
+                  (let ((after (the-object sky pixels)))
+                    (and (not (equalp after before))
+                         (loop for i from 3 below (length before) by 4
+                               always (= (aref after i) (aref before i)))))))
+    (check "undo gives the layer back exactly, through both adjustments"
+           (and (undo-stroke! doc) (undo-stroke! doc)
+                (equalp (the-object sky pixels) before)))
+    (check "saturation -1 bakes gray"
+           (progn (adjust-layer! sky :hue-saturation :settings '(:saturation -1d0))
+                  (let ((p (the-object sky pixels)))
+                    (loop for o from 0 below (length p) by 4
+                          always (= (aref p o) (aref p (+ o 1)) (aref p (+ o 2)))))))
+    (check "an adjustment layer cannot be baked into"
+           (handler-case (progn (adjust-layer! (the-object doc (layer 2)) :levels) nil)
+             (error () t)))
+    (check "the undo list keeps within its byte budget"
+           (let ((*undo-bytes* (* 3 (length before))))
+             (dotimes (i 6) (adjust-layer! sky :levels :settings '(:gamma 1.1d0)))
+             (<= (length (the-object doc undo-entries)) 3))
+           (length (the-object doc undo-entries)))))
+
 (defun layer-names (doc)
   (mapcar (lambda (l) (the-object l layer-name)) (the-object doc layer-list)))
 
@@ -416,7 +448,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-layers test-files test-threads test-golden))
+                  test-brush test-masks test-adjust test-layers test-files test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

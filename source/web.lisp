@@ -193,6 +193,27 @@ handle-stroke does; {empty: true} when there was nothing to undo."
          (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
          (json-object "empty" 'yason:true)))))
 
+(defun handle-adjust (req)
+  "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
+\"hue-saturation\", settings: {name: value}, curves: {channel: points}}
+baked into the layer's pixels; answers the rectangle (the whole layer)
+as handle-stroke does."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (kind (find (gethash "kind" body) '(:levels :curves :hue-saturation) :test #'string-equal))
+         (settings (let ((h (gethash "settings" body)))
+                     (when h (loop for k being the hash-keys of h using (hash-value v)
+                                   collect (intern (string-upcase k) :keyword)
+                                   collect (float v 1d0)))))
+         (curves (let ((h (gethash "curves" body)))
+                   (when h (loop for k being the hash-keys of h using (hash-value v)
+                                 collect (intern (string-upcase k) :keyword)
+                                 collect (normalize-points v))))))
+    (unless kind (error "Unknown adjustment ~s." (gethash "kind" body)))
+    (json-string (rect-json doc layer :layer
+                            (adjust-layer! layer kind :settings settings :curves curves)))))
+
 (defun handle-layers (req)
   "A change of the stack -- {op: \"add\", kind, above}, {op: \"delete\",
 layer}, {op: \"move\", layer, delta} or {op: \"duplicate\", layer} --
@@ -296,7 +317,12 @@ size; answers as handle-layers does."
 (defparameter *page-css* "
 html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
-#stratum-app { display: flex; height: calc(100vh - 27px); }
+#stratum-app { display: flex; height: calc(100vh - 27px); position: relative; }
+.st-dialog { position: absolute; top: 24px; left: 60px; width: 300px; background: #2c2f35;
+  border: 1px solid #3a3e45; box-shadow: 0 8px 24px rgba(0,0,0,.6); padding: 10px 14px 12px;
+  z-index: 20; }
+.st-dialog h2 { font-size: 13px; margin: 0 0 8px; }
+.st-dialog-buttons { justify-content: flex-end; margin-top: 10px; }
 #stratum-menubar { height: 26px; display: flex; align-items: stretch; background: #2a2d33;
   border-bottom: 1px solid #3a3e45; user-select: none; position: relative; z-index: 5; }
 .st-menu { position: relative; }
@@ -494,6 +520,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/stroke" "application/json" #'handle-stroke)
       (pub "/stratum/api/undo" "application/json" #'handle-undo)
       (pub "/stratum/api/layers" "application/json" #'handle-layers)
+      (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
       (pub "/stratum/api/close" "application/json" #'handle-close))))

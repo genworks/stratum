@@ -45,6 +45,10 @@ uniform int u_stroke_layer;
 uniform vec4 u_stroke_color;
 uniform int u_stroke_erase;
 uniform int u_stroke_mask;
+uniform int u_adjust_layer;
+uniform int u_adjust_kind;
+uniform int u_adjust_row;
+uniform vec4 u_adjust_params;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -150,7 +154,11 @@ void main() {
        ;; (u_stroke_layer -1) except on the layer being painted, where
        ;; the stroke texture's coverage composites the brush color over
        ;; the layer's own pixel before the layer blends, exactly as
-       ;; composite-stroke! (brush.lisp) will commit it.
+       ;; composite-stroke! (brush.lisp) will commit it.  Then the
+       ;; adjustment preview (u_adjust_layer, idle at -1): Image >
+       ;; Adjustments shown on one layer's pixels, a table (kind 1, three
+       ;; rows of u_luts from u_adjust_row) or hue/saturation (kind 2),
+       ;; on the encoded scale, as adjust-layer! will bake it.
        (format nil "  // layer ~d: raster, ~(~a~)
   s = layer_px(~d, p);
   if (u_stroke_layer == ~:*~d) {
@@ -163,6 +171,12 @@ void main() {
         s.a = na;
       }
     }
+  }
+  if (u_adjust_layer == ~:*~d) {
+    adj = srgb_encode(s.rgb);
+    if (u_adjust_kind == 1) adj = vec3(lut(u_adjust_row, adj.r), lut(u_adjust_row + 1, adj.g), lut(u_adjust_row + 2, adj.b));
+    else adj = hue_saturation(adj, u_adjust_params);
+    s.rgb = srgb_decode(adj);
   }
   a = s.a * u_opacity[~d]~a;
   cb = ao > 0.0 ? co / ao : vec3(0.0);

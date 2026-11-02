@@ -80,6 +80,15 @@ signals that the buffer changed: it feeds the layer's `pixels` and so
 the CPU render, and never the plan. Undo keeps the rectangle each
 stroke overwrote and puts the bytes back.
 
+Image ▸ Adjustments are the destructive versions of the three
+adjustment layers: the same arithmetic, done once to one raster
+layer's own pixels on the encoded scale, alpha untouched. While the
+dialog is open the shader applies the adjustment to that layer alone,
+through a third live stage (three spare rows of the table texture, or
+hue/saturation parameters), and OK sends the settings to the server,
+which bakes them into the bytes (`adjust-layer!`), puts the whole
+layer on the undo list and answers it for re-upload.
+
 Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
 Reveal All or Hide All makes a white or black one; Delete takes it
 away); clicking the mask's thumbnail in the Layers panel makes it the
@@ -108,7 +117,9 @@ with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
-Undo; Layer ▸ New ▸ Layer, Duplicate Layer,
+Undo; Image ▸ Adjustments ▸ Levels (Ctrl+L), Curves (Ctrl+M) and
+Hue/Saturation (Ctrl+U), each a dialog with a live preview that bakes
+the adjustment into the active raster layer's pixels on OK; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
 Send Backward); View ▸ Zoom In, Zoom Out,
@@ -167,6 +178,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
+| `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
 ## Tests
@@ -191,6 +203,10 @@ It checks:
   mask inside its rectangle only and rebuilds nothing, shows in the
   CPU render, and undoes exactly; Hide All, Reveal All and Delete; a
   painted mask surviving a change of the stack;
+- adjustments baked in: identity curves change nothing, levels change
+  the pixels and leave alpha alone, saturation -1 makes gray, an
+  adjustment layer is refused, undo is exact, and the undo list keeps
+  within its byte budget;
 - the stack: a layer added above another, deleted, moved and
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
@@ -245,7 +261,10 @@ The self-test checks:
 - masks: Hide All on the active layer makes a mask the target and
   hides the layer with parity intact; a white stroke on the mask
   reveals some of it, the preview matching the commit; undo; Delete
-  gives the picture back.
+  gives the picture back;
+- adjustments: Levels on the bottom layer previews on that layer
+  alone, OK bakes what the preview showed, parity holds, and undo is
+  exact.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

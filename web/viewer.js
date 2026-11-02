@@ -77,7 +77,8 @@
     uni = {};
     ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
-     'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask'].forEach(function (n) {
+     'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
+     'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -193,8 +194,10 @@
     layerLuts(L).forEach(function (lut, k) { lutData.set(lut, (L.lutRow + k) * 256); });
   }
 
+  // The table texture: one row per channel of each table layer, then
+  // three rows for an adjustment dialog's preview (Image > Adjustments).
   function uploadLuts() {
-    var rows = Math.max(1, doc.lutRows);
+    var rows = Math.max(1, doc.lutRows) + 3;
     if (!lutData || lutData.length !== rows * 256) {
       lutData = new Float32Array(rows * 256);
       if (texLuts) gl.deleteTexture(texLuts);
@@ -205,6 +208,7 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     }
     doc.layers.forEach(function (L) { if (L.lutRow !== null && L.lutRow !== undefined) fillLutRows(L); });
+    if (adjust.luts) adjust.luts.forEach(function (lut, k) { lutData.set(lut, (rows - 3 + k) * 256); });
     gl.bindTexture(gl.TEXTURE_2D, texLuts);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, rows, gl.RED, gl.FLOAT, lutData);
     S.stats.lutUploads++;
@@ -232,6 +236,10 @@
     gl.uniform4fv(uni.u_stroke_color, preview.color);
     gl.uniform1i(uni.u_stroke_erase, preview.erase);
     gl.uniform1i(uni.u_stroke_mask, preview.mask);
+    gl.uniform1i(uni.u_adjust_layer, adjust.layer);
+    gl.uniform1i(uni.u_adjust_kind, adjust.kind);
+    gl.uniform1i(uni.u_adjust_row, Math.max(1, doc.lutRows));
+    gl.uniform4fv(uni.u_adjust_params, adjust.params);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -437,6 +445,11 @@
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
       else if (mod && key === 'o') { e.preventDefault(); chooseFile(S.openFile); }
+      else if (mod && key === 'l') { e.preventDefault(); S.openAdjust('levels'); }
+      else if (mod && key === 'm') { e.preventDefault(); S.openAdjust('curves'); }
+      else if (mod && key === 'u') { e.preventDefault(); S.openAdjust('hue-saturation'); }
+      else if (e.key === 'Escape' && S.adjustDialog) S.adjustDialog.cancel();
+      else if (e.key === 'Enter' && S.adjustDialog) S.adjustDialog.ok();
       else if (mod && e.shiftKey && key === 's') { e.preventDefault(); S.saveAs(); }
       else if (mod && e.shiftKey && key === 'n') { e.preventDefault(); S.layerOp({ op: 'add', kind: 'raster' }); }
       else if (mod && key === 'j') { e.preventDefault(); S.layerOp({ op: 'duplicate' }); }
@@ -1265,8 +1278,10 @@
         { label: 'Mode', sub: [{ label: 'RGB Color', check: true }, { label: 'Grayscale' }, { label: 'CMYK Color' }] },
         '-',
         { label: 'Adjustments', sub: [
-          { label: 'Levels...', key: 'Ctrl+L' }, { label: 'Curves...', key: 'Ctrl+M' },
-          { label: 'Hue/Saturation...', key: 'Ctrl+U' }] },
+          { label: 'Levels...', key: 'Ctrl+L', enabled: rasterActive, run: function () { S.openAdjust('levels'); } },
+          { label: 'Curves...', key: 'Ctrl+M', enabled: rasterActive, run: function () { S.openAdjust('curves'); } },
+          { label: 'Hue/Saturation...', key: 'Ctrl+U', enabled: rasterActive,
+            run: function () { S.openAdjust('hue-saturation'); } }] },
         '-',
         { label: 'Image Size...', key: 'Ctrl+Alt+I' },
         { label: 'Canvas Size...', key: 'Ctrl+Alt+C' }] },
@@ -1420,10 +1435,21 @@
       });
       row.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'blend' }), sel]));
     } else if (L.kind === 'curves') {
-      row.appendChild(curveEditor(L));
+      row.appendChild(curveEditor(L.curves, function (channel, points) {
+        uploadLuts();
+        requestDraw();
+        postSoon('curve' + L.index + channel, { layer: L.index, slot: 'curve', channel: channel, points: points });
+      }));
     } else if (L.settings) {
       Object.keys(SETTING_RANGES).forEach(function (name) {
-        if (name in L.settings) row.appendChild(settingSlider(L, name));
+        if (name in L.settings) {
+          row.appendChild(settingSlider(L.settings, name, function (n, v) {
+            if (L.lutRow !== null && L.lutRow !== undefined) uploadLuts();
+            syncOpacity();
+            requestDraw();
+            postSoon('setting' + L.index + n, { layer: L.index, slot: 'setting', name: n, value: v });
+          }));
+        }
       });
     }
     return row;
@@ -1439,27 +1465,25 @@
   // One slider for a levels or hue/saturation setting.  A move changes
   // the tables or the params uniform and redraws; the server hears
   // when the slider rests.
-  function settingSlider(L, name) {
+  function settingSlider(settings, name, onChange) {
     var r = SETTING_RANGES[name] || [0, 1, 0.01];
     var input = el('input', { type: 'range', min: String(r[0]), max: String(r[1]), step: String(r[2]),
-                              value: String(L.settings[name]) });
-    var val = el('span', { text: String(Math.round(L.settings[name] * 1000) / 1000) });
+                              value: String(settings[name]) });
+    var val = el('span', { text: String(Math.round(settings[name] * 1000) / 1000) });
     input.addEventListener('input', function () {
       var v = Number(input.value);
-      L.settings[name] = v;
+      settings[name] = v;
       val.textContent = String(v);
-      if (L.lutRow !== null && L.lutRow !== undefined) uploadLuts();
-      syncOpacity();
-      requestDraw();
-      postSoon('setting' + L.index + name, { layer: L.index, slot: 'setting', name: name, value: v });
+      onChange(name, v);
     });
     return el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: name }), input, val]);
   }
 
-  // A small curves editor: drag a point; click empty space to add one;
-  // double-click a point to remove it.  The table is rebuilt in the
-  // browser on every move; the server hears about it when the drag rests.
-  function curveEditor(L) {
+  // A small curves editor over CURVES ({master, red, green, blue}, each
+  // a list of points, edited in place): drag a point; click empty space
+  // to add one; double-click a point to remove it.  ONCHANGE(channel,
+  // points) hears every move.
+  function curveEditor(curves, onChange) {
     var size = 180, pad = 8;
     var wrap = el('div');
     var chan = el('select', { 'class': 'st-chan' });
@@ -1467,7 +1491,7 @@
     var cv = el('canvas', { 'class': 'st-curve', width: String(size), height: String(size) });
     var ctx = cv.getContext('2d');
     var active = -1;
-    function pts() { return L.curves[chan.value]; }
+    function pts() { return curves[chan.value]; }
     function toPx(p) { return [pad + p[0] * (size - 2 * pad), size - pad - p[1] * (size - 2 * pad)]; }
     function fromPx(x, y) {
       return [Math.min(1, Math.max(0, (x - pad) / (size - 2 * pad))),
@@ -1499,11 +1523,8 @@
       });
     }
     function changed() {
-      uploadLuts();
-      requestDraw();
       paint();
-      postSoon('curve' + L.index + chan.value,
-               { layer: L.index, slot: 'curve', channel: chan.value, points: pts().slice() });
+      onChange(chan.value, pts().slice());
     }
     function nearest(x, y) {
       var best = -1, bd = 64;
@@ -1546,10 +1567,110 @@
     wrap.appendChild(el('div', { 'class': 'st-row' }, [el('span', { text: 'curve' }), chan]));
     wrap.appendChild(cv);
     paint();
-    S.curveEditors = S.curveEditors || {};
-    S.curveEditors[L.index] = { layer: L, changed: changed };
     return wrap;
   }
+
+  // ---- Image > Adjustments ------------------------------------------------
+  //
+  // Levels, Curves and Hue/Saturation baked into the active raster
+  // layer's pixels, each in a dialog with a live preview: while it is
+  // open the shader applies the adjustment to that one layer alone (the
+  // adjustment stage: three rows at the end of the table texture, or
+  // hue/saturation parameters), and OK sends the settings to the
+  // server, which bakes the same arithmetic into the bytes and answers
+  // the whole layer to re-upload.  Cancel drops the preview.
+
+  var adjust = { layer: -1, kind: 0, params: [0, 0, 0, 0], luts: null };
+  var ADJUST_DEFAULTS = {
+    levels: { 'in-black': 0, 'in-white': 1, gamma: 1, 'out-black': 0, 'out-white': 1 },
+    'hue-saturation': { hue: 0, saturation: 0, lightness: 0 }
+  };
+  var ADJUST_TITLES = { levels: 'Levels', curves: 'Curves', 'hue-saturation': 'Hue/Saturation' };
+
+  function identityCurves() {
+    return { master: [[0, 0], [1, 1]], red: [[0, 0], [1, 1]], green: [[0, 0], [1, 1]], blue: [[0, 0], [1, 1]] };
+  }
+
+  function adjustLuts(kind, state) {
+    if (kind === 'levels') {
+      var s = state.settings;
+      var t = levelsLut(s['in-black'], s['in-white'], s.gamma, s['out-black'], s['out-white'], 256);
+      return [t, t, t];
+    }
+    var m = state.curves.master;
+    return ['red', 'green', 'blue'].map(function (ch) {
+      var c = state.curves[ch];
+      return composedLut(column(m, 0), column(m, 1), column(c, 0), column(c, 1), 256);
+    });
+  }
+
+  function previewAdjust(kind, state, L) {
+    adjust.layer = L.texIndex;
+    if (kind === 'hue-saturation') {
+      adjust.kind = 2;
+      adjust.params = [state.settings.hue / 360, state.settings.saturation, state.settings.lightness, 0];
+    } else {
+      adjust.kind = 1;
+      adjust.luts = adjustLuts(kind, state);
+      uploadLuts();
+    }
+    requestDraw();
+  }
+
+  function clearAdjust() {
+    adjust.layer = -1;
+    adjust.luts = null;
+    requestDraw();
+  }
+
+  function rasterActive() { var L = activeL(); return !!(L && L.kind === 'raster'); }
+
+  // Open the KIND dialog on the active raster layer; the dialog object
+  // (set, ok, cancel) is also the test hook.
+  S.openAdjust = function (kind) {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer to adjust'); return null; }
+    if (S.adjustDialog) S.adjustDialog.cancel();
+    var state = { settings: Object.assign({}, ADJUST_DEFAULTS[kind] || {}), curves: identityCurves() };
+    var controls = el('div');
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: ADJUST_TITLES[kind] + ': ' + L.name }), controls]);
+    function refresh() { previewAdjust(kind, state, L); }
+    function buildControls() {
+      controls.textContent = '';
+      if (kind === 'curves') controls.appendChild(curveEditor(state.curves, refresh));
+      else Object.keys(state.settings).forEach(function (name) {
+        controls.appendChild(settingSlider(state.settings, name, refresh));
+      });
+    }
+    buildControls();
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.adjustDialog = {
+      kind: kind, state: state, layer: L.index,
+      set: function (changes) {
+        Object.assign(kind === 'curves' ? state.curves : state.settings, changes);
+        buildControls();
+        refresh();
+      },
+      cancel: function () { box.remove(); S.adjustDialog = null; clearAdjust(); },
+      ok: function () {
+        box.remove();
+        S.adjustDialog = null;
+        var body = { layer: L.index, kind: kind };
+        if (kind === 'curves') body.curves = state.curves; else body.settings = state.settings;
+        return S.strokesSettled().then(function () { return postJSON('adjust', JSON.stringify(body)); })
+          .then(tookRect)
+          .then(function () { clearAdjust(); status(); },
+                function (e) { clearAdjust(); status('adjustment failed: ' + e.message); });
+      }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    refresh();
+    return dialog;
+  };
 
   // ---- test hooks ---------------------------------------------------------
 
@@ -1929,6 +2050,30 @@
         check('Delete takes the mask away and gives the picture back',
               L && !L.mask && !S.maskTarget && renderDiff(before, S.renderExact()).maxDiff === 0,
               { mask: L && L.mask });
+        S.setActiveLayer(active, false);
+      });
+    }).then(function () {
+      // Image > Adjustments > Levels on the bottom layer: previewed on
+      // that layer alone, then baked by the server; the baked picture is
+      // what the preview showed, parity holds, undo is exact.
+      var active = S.activeLayer;
+      S.setActiveLayer(0, false);
+      var before = S.renderExact();
+      var dialog = S.openAdjust('levels');
+      if (!dialog) { S.setActiveLayer(active, false); return null; }
+      dialog.set({ gamma: 1.6, 'in-black': 0.05 });
+      var previewed = S.renderExact();
+      check('an adjustment previews on its layer', renderDiff(before, previewed).maxDiff > 0);
+      return dialog.ok().then(function () {
+        var after = S.renderExact(), d = renderDiff(previewed, after);
+        check('OK bakes what the preview showed', d.maxDiff <= 2, d);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a baked adjustment', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the layer back exactly after an adjustment',
+              renderDiff(before, S.renderExact()).maxDiff === 0);
         S.setActiveLayer(active, false);
       });
     }).then(function () {

@@ -255,12 +255,96 @@ OPACITY.  The twin of the shader's masked()."
             (declare (type fixnum o) (type double-float m))
             (setf (aref mask o) (unit->byte (+ m (* (- gray m) a))))))))))
 
+(defparameter *undo-bytes* (* 512 1024 1024)
+  "Integer. The most bytes a document's undo list keeps; the oldest
+entries go first.  A whole 4K layer is 33 MB.")
+
 (defun push-undo! (doc entry)
-  (let ((entries (cons entry (the-object doc undo-entries))))
-    (the-object doc (set-slot! :undo-entries
-                               (if (> (length entries) *undo-depth*)
-                                   (subseq entries 0 *undo-depth*)
-                                   entries)))))
+  "ENTRY, (layer-index target x y w h bytes), onto DOC's undo list, which
+keeps at most *undo-depth* entries and *undo-bytes* bytes."
+  (let ((entries (cons entry (the-object doc undo-entries)))
+        (bytes 0)
+        (kept '()))
+    (loop for e in entries
+          for n from 1
+          do (incf bytes (length (seventh e)))
+             (when (or (> n *undo-depth*) (and (> n 1) (> bytes *undo-bytes*)))
+               (return))
+             (push e kept))
+    (the-object doc (set-slot! :undo-entries (nreverse kept)))))
+
+;;; ---- adjustments baked into a layer ---------------------------------------
+;;;
+;;; Image > Adjustments: the same arithmetic the adjustment layers do on
+;;; the composited picture, done once to one raster layer's own pixels,
+;;; on the encoded scale, alpha untouched.  A table adjustment on 8-bit
+;;; pixels is a 256-entry byte table, which is what the shader's lut()
+;;; gives at the integer positions.  The viewer previews through the
+;;; shader's adjustment stage (glsl-entry); this is its twin.
+
+(defun byte-table (lut)
+  (let ((table (make-array 256 :element-type '(unsigned-byte 8))))
+    (dotimes (i 256 table)
+      (setf (aref table i) (unit->byte (float (aref lut i) 1d0))))))
+
+(defun apply-tables! (pixels red green blue)
+  (declare (type (simple-array (unsigned-byte 8) (*)) pixels red green blue)
+           (optimize (speed 3) (safety 1)))
+  (loop for o of-type fixnum from 0 below (length pixels) by 4
+        do (setf (aref pixels o) (aref red (aref pixels o))
+                 (aref pixels (+ o 1)) (aref green (aref pixels (+ o 1)))
+                 (aref pixels (+ o 2)) (aref blue (aref pixels (+ o 2)))))
+  pixels)
+
+(defun apply-hue-saturation! (pixels k0 k1 k2)
+  (declare (type (simple-array (unsigned-byte 8) (*)) pixels)
+           (type double-float k0 k1 k2)
+           (optimize (speed 3) (safety 1)))
+  (loop for o of-type fixnum from 0 below (length pixels) by 4
+        do (multiple-value-bind (r g b)
+               (hue-saturation (/ (float (aref pixels o) 1.0) 255.0)
+                               (/ (float (aref pixels (+ o 1)) 1.0) 255.0)
+                               (/ (float (aref pixels (+ o 2)) 1.0) 255.0)
+                               k0 k1 k2)
+             (declare (type double-float r g b))
+             (setf (aref pixels o) (unit->byte r)
+                   (aref pixels (+ o 1)) (unit->byte g)
+                   (aref pixels (+ o 2)) (unit->byte b))))
+  pixels)
+
+(defun adjust-layer! (layer kind &key settings curves)
+  "Bake an adjustment into raster LAYER's pixels and return the
+rectangle it changed, the whole layer.  KIND is :levels (SETTINGS a
+plist of :in-black :in-white :gamma :out-black :out-white), :curves
+(CURVES a plist of :master :red :green :blue point lists) or
+:hue-saturation (SETTINGS :hue in degrees, :saturation, :lightness).
+The layer's pixels before go on the undo list."
+  (unless (eql (the-object layer kind) :raster)
+    (error "~a is not a raster layer." (the-object layer layer-name)))
+  (let* ((pixels (the-object layer (ensure-own-pixels!)))
+         (doc (the-object layer parent))
+         (w (the-object layer doc-width))
+         (h (the-object layer doc-height)))
+    (flet ((setting (key default) (float (getf settings key default) 1d0)))
+      (push-undo! doc (list (the-object layer index) :layer 0 0 w h (copy-seq pixels)))
+      (ecase kind
+        (:levels
+         (let ((table (byte-table (levels-lut (setting :in-black 0) (setting :in-white 1)
+                                              (setting :gamma 1)
+                                              (setting :out-black 0) (setting :out-white 1)
+                                              256))))
+           (apply-tables! pixels table table table)))
+        (:curves
+         (let ((master (getf curves :master *identity-curve*)))
+           (apply-tables! pixels
+                          (byte-table (channel-lut master (getf curves :red *identity-curve*)))
+                          (byte-table (channel-lut master (getf curves :green *identity-curve*)))
+                          (byte-table (channel-lut master (getf curves :blue *identity-curve*))))))
+        (:hue-saturation
+         (apply-hue-saturation! pixels (/ (setting :hue 0) 360) (setting :saturation 0)
+                                (setting :lightness 0))))
+      (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
+      (list 0 0 w h))))
 
 (defun apply-brush-stroke (layer stroke &key (target :layer))
   "Paint STROKE into LAYER -- its pixels (TARGET :layer, a raster layer)

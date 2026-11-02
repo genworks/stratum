@@ -9,7 +9,7 @@
 ;; ANY WARRANTY; see <https://www.gnu.org/licenses/agpl-3.0.html>.
 
 (gwl:define-package :stratum
-    (:export #:image-document #:image-layer
+    (:export #:image-document #:image-layer #:raster-layer #:curves-layer
              #:make-sample-document #:find-document
              #:png-octets #:publish-stratum!
              #:define-dual-function #:dual-functions-js

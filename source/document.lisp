@@ -26,52 +26,67 @@
 
 (define-object image-layer ()
   :documentation
-  (:description "One layer of an image-document, described by a spec
-plist.  :kind :raster takes :source (a generator spec) and :blend;
-:kind :curves takes :master, :red, :green and :blue point lists.
-Either kind takes :name, :opacity, :visible? and :mask (a mask
-generator spec).")
+  (:description "What every layer of an image-document has, from its
+spec plist: :name, :opacity, :visible? and :mask (a mask generator
+spec).  raster-layer and curves-layer mix this in.")
 
   :input-slots
   (spec doc-width doc-height
-   (kind (getf (the spec) :kind :raster))
    (layer-name (getf (the spec) :name (format nil "Layer ~a" (1+ (the index)))))
    (opacity (getf (the spec) :opacity 1.0) :settable)
    (visible? (getf (the spec) :visible? t) :settable)
-   (blend-mode (getf (the spec) :blend :normal) :settable)
-   (source (getf (the spec) :source))
-   (mask-spec (getf (the spec) :mask) :settable)
-   (master (getf (the spec) :master *identity-curve*) :settable)
+   (mask-spec (getf (the spec) :mask) :settable))
+
+  :computed-slots
+  ((has-mask? (and (the mask-spec) t))
+   (mask-pixels (when (the has-mask?)
+                  (generate-mask (the mask-spec) (the doc-width) (the doc-height))))
+   (effective-opacity (if (the visible?) (coerce (the opacity) 'double-float) 0.0))
+   (mask-index (position self (the parent masked-layers)))))
+
+(define-object raster-layer (image-layer)
+  :documentation
+  (:description "Pixels from :source (a generator spec), composited
+with :blend (:normal, :multiply, :screen or :add).")
+
+  :input-slots
+  ((blend-mode (getf (the spec) :blend :normal) :settable)
+   (source (getf (the spec) :source)))
+
+  :computed-slots
+  ((kind :raster)
+   (pixels (generate-pixels (the source) (the doc-width) (the doc-height)))
+   (texture-index (position self (the parent raster-layers)))
+   (plan-entry (list :raster :tex (the texture-index) :blend (the blend-mode)
+                     :mask (the mask-index) :param (the index)))))
+
+(define-object curves-layer (image-layer)
+  :documentation
+  (:description "An adjustment of everything below it: the :master
+curve, then the :red, :green and :blue curves, each a list of (x y)
+points in [0,1].")
+
+  :input-slots
+  ((master (getf (the spec) :master *identity-curve*) :settable)
    (red (getf (the spec) :red *identity-curve*) :settable)
    (green (getf (the spec) :green *identity-curve*) :settable)
    (blue (getf (the spec) :blue *identity-curve*) :settable))
 
   :computed-slots
-  ((has-mask? (and (the mask-spec) t))
-   (pixels (when (eql (the kind) :raster)
-             (generate-pixels (the source) (the doc-width) (the doc-height))))
-   (mask-pixels (when (the has-mask?)
-                  (generate-mask (the mask-spec) (the doc-width) (the doc-height))))
-   (effective-opacity (if (the visible?) (coerce (the opacity) 'double-float) 0.0))
-   (texture-index (position self (the parent raster-layers)))
-   (mask-index (position self (the parent masked-layers)))
-   (lut-row (let ((p (position self (the parent curves-layers))))
-              (when p (* 3 p))))
-   (luts (when (eql (the kind) :curves)
-           (list (channel-lut (the master) (the red))
-                 (channel-lut (the master) (the green))
-                 (channel-lut (the master) (the blue)))))
-   (plan-entry
-    (ecase (the kind)
-      (:raster (list :raster :tex (the texture-index) :blend (the blend-mode)
-                     :mask (the mask-index) :param (the index)))
-      (:curves (list :curves :lut (the lut-row)
-                     :mask (the mask-index) :param (the index)))))))
+  ((kind :curves)
+   (lut-row (* 3 (position self (the parent curves-layers))))
+   (luts (list (channel-lut (the master) (the red))
+               (channel-lut (the master) (the green))
+               (channel-lut (the master) (the blue))))
+   (plan-entry (list :curves :lut (the lut-row)
+                     :mask (the mask-index) :param (the index)))))
 
 (define-object image-document ()
   :documentation
   (:description "A layered raster document.  LAYER-SPECS lists the
-layers bottom first; see image-layer for a spec's keys.")
+layers bottom first, each a plist whose :kind (:raster, the default, or
+:curves) picks its type; see image-layer, raster-layer and curves-layer
+for the other keys.")
 
   :input-slots
   ((doc-name "untitled")
@@ -81,14 +96,19 @@ layers bottom first; see image-layer for a spec's keys.")
    (background-srgb (list 1.0 1.0 1.0) :settable))
 
   :objects
-  ((layers :type 'image-layer
+  ((layers :type (:sequence (the layer-types))
            :sequence (:size (length (the layer-specs)))
            :spec (nth (the-child index) (the layer-specs))
            :doc-width (the doc-width)
            :doc-height (the doc-height)))
 
   :computed-slots
-  ((layer-list (list-elements (the layers)))
+  ((layer-types (mapcar (lambda (spec)
+                          (ecase (getf spec :kind :raster)
+                            (:raster 'raster-layer)
+                            (:curves 'curves-layer)))
+                        (the layer-specs)))
+   (layer-list (list-elements (the layers)))
    (raster-layers (remove-if-not (lambda (l) (eql (the-object l kind) :raster))
                                  (the layer-list)))
    (curves-layers (remove-if-not (lambda (l) (eql (the-object l kind) :curves))

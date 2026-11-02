@@ -41,6 +41,19 @@ to part of a layer.  The rectangle must lie inside the image."
                :start2 (* 4 (+ x (* width (+ y row))))
                :end2 (* 4 (+ x w (* width (+ y row))))))))
 
+(defun rgba-thumb (pixels width height tw th &optional (channels 4))
+  "A TW x TH nearest-neighbor thumbnail of PIXELS (WIDTH x HEIGHT,
+CHANNELS bytes a pixel): each thumbnail pixel is the source pixel under
+its center, as the layer panel shows a layer."
+  (let ((out (make-array (* tw th channels) :element-type '(unsigned-byte 8))))
+    (dotimes (ty th out)
+      (let ((sy (min (1- height) (floor (* (+ ty 0.5) height) th))))
+        (dotimes (tx tw)
+          (let* ((sx (min (1- width) (floor (* (+ tx 0.5) width) tw)))
+                 (from (* channels (+ sx (* sy width)))))
+            (replace out pixels :start1 (* channels (+ tx (* ty tw)))
+                                :start2 from :end2 (+ from channels))))))))
+
 (defun replace-rect! (pixels width x y w h bytes)
   "Write BYTES, a W x H RGBA rectangle as rgba-rect returns it, back into
 PIXELS (WIDTH wide) at X, Y."

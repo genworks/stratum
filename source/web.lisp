@@ -247,9 +247,40 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-name { flex: 1; font-weight: 600; }
 .st-kind { color: #8a9099; font-size: 11px; }
 .st-label { color: #8a9099; font-size: 11px; width: 62px; flex: none; }
-.st-name { cursor: pointer; }
-.st-layer.st-active { box-shadow: inset 3px 0 0 #6c9ce0; padding-left: 8px; }
-#stratum-panel button.st-tool.st-on { background: #3b5f93; border-color: #6c9ce0; }
+#stratum-tools { width: 40px; flex: none; background: #222429; border-right: 1px solid #33363c;
+  display: flex; flex-direction: column; align-items: center; padding-top: 4px; gap: 1px;
+  overflow-y: auto; user-select: none; }
+.st-tool-btn { width: 30px; height: 26px; display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; cursor: default; color: #c9cdd3; }
+.st-tool-btn:hover { background: #2c2f35; }
+.st-tool-btn.st-on { background: #3b5f93; color: #fff; }
+.st-tool-btn.st-disabled { color: #585d66; }
+.st-tool-btn svg, .st-eye svg { width: 18px; height: 18px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.st-tool-gap { height: 7px; flex: none; }
+.st-swatches { position: relative; width: 30px; height: 30px; margin-top: 10px; flex: none; }
+.st-swatch { position: absolute; width: 17px; height: 17px; border: 1px solid #c9cdd3; cursor: pointer;
+  box-sizing: border-box; }
+.st-swatch.st-fg { left: 0; top: 0; z-index: 2; }
+.st-swatch.st-bg { right: 0; bottom: 0; }
+.st-layers-head { display: flex; justify-content: space-between; align-items: baseline;
+  font-weight: 600; margin: 10px 0 4px; }
+.st-lrow { display: flex; align-items: center; gap: 6px; padding: 3px 4px;
+  border-top: 1px solid #2c2f35; cursor: default; }
+.st-lrow.st-active { background: #3b5f93; }
+.st-eye { width: 18px; height: 18px; flex: none; color: #c9cdd3; cursor: pointer; }
+.st-eye.st-off { color: #585d66; }
+.st-thumb { width: 40px; height: 24px; flex: none; border: 1px solid #3a3e45; box-sizing: content-box;
+  background: repeating-conic-gradient(#8a8f98 0 25%, #c9cdd3 0 50%) 0 0 / 8px 8px;
+  display: flex; align-items: center; justify-content: center; color: #d8dbe0; }
+.st-thumb canvas { width: 40px; height: 24px; display: block; }
+.st-thumb.st-thumb-adj { background: #2c2f35; }
+.st-thumb svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.st-lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-lkind { color: #8a9099; font-size: 11px; }
+.st-lrow.st-active .st-lkind { color: #c9cdd3; }
+.st-props { border-top: 1px solid #33363c; margin-top: 8px; padding-top: 6px; }
+.st-props .st-name { font-weight: 600; }
 .st-brush { margin-bottom: 10px; }
 .st-brush input[type=color] { width: 36px; height: 22px; padding: 0; border: 1px solid #3a3e45;
   background: #2c2f35; }
@@ -284,6 +315,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   ((body (with-lhtml-string ()
            (:div :id "stratum-menubar" "")
            (:div :id "stratum-app"
+             (:div :id "stratum-tools" "")
              (:canvas :id "stratum-canvas" "")
              (:aside :id "stratum-panel"
                (:h1 "Stratum")
@@ -345,6 +377,16 @@ goes back as a 500 carrying the condition's text."
                      (rgba-rect pixels (the-object doc doc-width) (the-object doc doc-height)
                                 (or (q "x") 0) (or (q "y") 0) (q "w") (q "h"))
                      pixels)))))
+      (pub "/stratum/api/thumb" "application/octet-stream"
+           (lambda (req)
+             (let* ((doc (request-doc req))
+                    (i (request-index req)))
+               (flet ((q (name) (parse-integer (net.aserve:request-query-value name req))))
+                 (if (net.aserve:request-query-value "mask" req)
+                     (rgba-thumb (the-object (nth i (the-object doc masked-layers)) mask-pixels)
+                                 (the-object doc doc-width) (the-object doc doc-height) (q "w") (q "h") 1)
+                     (rgba-thumb (the-object (nth i (the-object doc raster-layers)) pixels)
+                                 (the-object doc doc-width) (the-object doc doc-height) (q "w") (q "h") 4))))))
       (pub "/stratum/api/mask" "application/octet-stream"
            (lambda (req)
              (the-object (nth (request-index req) (the-object (request-doc req) masked-layers))

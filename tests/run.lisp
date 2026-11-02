@@ -187,7 +187,13 @@ to alter the pictures."
                                      (subseq pixels (* 4 (+ 2 (* 7 2))) (* 4 (+ 5 (* 7 2)))))))
     (check "rgba-rect refuses a rectangle outside the image"
            (handler-case (progn (rgba-rect pixels w h 5 0 3 1) nil)
-             (error () t)))))
+             (error () t)))
+    (check "rgba-thumb takes the source pixel under each thumbnail pixel's center"
+           (let ((thumb (rgba-thumb pixels w h 2 1)))
+             (equalp thumb (concatenate '(vector (unsigned-byte 8))
+                                        (subseq pixels (* 4 (+ 1 (* 7 2))) (* 4 (+ 2 (* 7 2))))
+                                        (subseq pixels (* 4 (+ 5 (* 7 2))) (* 4 (+ 6 (* 7 2)))))))
+           (rgba-thumb pixels w h 2 1))))
 
 (defun stroke-vectors-of (points)
   (multiple-value-list (stroke-vectors points)))

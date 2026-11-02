@@ -321,17 +321,50 @@
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
+  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in' };
+
   function setCursor(dragging) {
-    canvas.style.cursor = paints(effectiveTool()) ? 'crosshair' : (dragging ? 'grabbing' : 'grab');
+    canvas.style.cursor = CURSORS[effectiveTool()] || (dragging ? 'grabbing' : 'grab');
   }
 
+  // The tools that work: a tool from the palette that is not built
+  // yet is refused with a word in the status lines.
   S.setTool = function (tool) {
-    S.tool = paints(tool) ? tool : 'pan';
-    document.querySelectorAll('#stratum-panel .st-tool').forEach(function (b) {
+    var t = toolSpec(tool);
+    if (t && !t.built) { status(t.label + ' is not built yet'); return false; }
+    S.tool = t ? tool : 'pan';
+    document.querySelectorAll('#stratum-tools .st-tool-btn').forEach(function (b) {
       b.classList.toggle('st-on', b.getAttribute('data-tool') === S.tool);
     });
     setCursor(false);
+    return true;
   };
+
+  // The eyedropper: the composited color under the pointer, from the
+  // canvas as drawn, into the foreground.
+  function pickColor(e) {
+    var dpr = window.devicePixelRatio || 1;
+    var r = canvas.getBoundingClientRect();
+    var x = Math.floor((e.clientX - r.left) * dpr), y = Math.floor((e.clientY - r.top) * dpr);
+    draw();
+    var px = new Uint8Array(4);
+    gl.readPixels(x, canvas.height - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    S.setBrush({ color: [px[0], px[1], px[2]] });
+    status('picked ' + hexColor(S.brush.color));
+  }
+
+  // The zoom tool: in about the pointer; out with Alt held.
+  function zoomAt(e, factor) {
+    var dpr = window.devicePixelRatio || 1;
+    var r = canvas.getBoundingClientRect();
+    var cx = (e.clientX - r.left) * dpr, cy = (e.clientY - r.top) * dpr;
+    var px = view.ox + cx / view.scale, py = view.oy + cy / view.scale;
+    view.scale = Math.min(64, Math.max(0.02, view.scale * factor));
+    view.ox = px - cx / view.scale;
+    view.oy = py - cy / view.scale;
+    status();
+    requestDraw();
+  }
 
   // A pointer event as a stroke sample: document pixels (x right, y
   // down), pressure 0..1 (a pen's; a mouse or finger paints at full
@@ -358,10 +391,15 @@
     var drag = null, stroke = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-      if (paints(effectiveTool())) {
-        stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: effectiveTool(),
+      var tool = effectiveTool();
+      if (paints(tool)) {
+        stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
                    samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
+      } else if (tool === 'eyedropper') {
+        pickColor(e);
+      } else if (tool === 'zoom') {
+        zoomAt(e, e.altKey ? 1 / 1.5 : 1.5);
       } else {
         drag = { x: e.clientX, y: e.clientY };
         setCursor(true);
@@ -407,11 +445,14 @@
       else if (mod && e.key === '1') { e.preventDefault(); S.actualPixels(); }
       else if (mod || e.altKey) return;
       else if (e.key === 'Escape') closeMenus();
-      else if (e.key === 'b' || e.key === 'B') S.setTool('brush');
-      else if (e.key === 'e' || e.key === 'E') S.setTool('eraser');
-      else if (e.key === 'h' || e.key === 'H') S.setTool('pan');
       else if (e.key === '[') S.setBrush({ radius: Math.max(1, Math.round(S.brush.radius / 1.25)) });
       else if (e.key === ']') S.setBrush({ radius: Math.min(300, Math.round(S.brush.radius * 1.25)) });
+      else if (key === 'x') S.swapColors();
+      else if (key === 'd') S.defaultColors();
+      else {
+        var t = TOOLS.filter(function (x) { return x !== '-' && x.key === e.key.toUpperCase(); })[0];
+        if (t) S.setTool(t.id);
+      }
     });
     window.addEventListener('keyup', function (e) {
       if (e.code === 'Space') { spaceHeld = false; setCursor(false); }
@@ -601,6 +642,7 @@
   function tookRect(res) {
     S.undoDepth = res.undoDepth;
     doc.layers[res.layer].paintVersion = res.paintVersion;
+    S.refreshThumb(res.texIndex);
     return S.uploadRect(res.texIndex, res.x, res.y, res.w, res.h);
   }
 
@@ -736,38 +778,245 @@
     return e;
   }
 
+  // The Layers panel as other editors lay it out: the stack top first,
+  // each row an eye (visibility), a thumbnail of the layer (and of its
+  // mask), its name and kind, the active row highlighted; below the
+  // list, the active layer's own controls.
+  var propsEl = null, thumbCanvases = {}, maskCanvases = {};
+
+  var EYE_SVG = '<svg viewBox="0 0 20 20"><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.5"/></svg>';
+  var ADJ_ICONS = {
+    curves: '<svg viewBox="0 0 20 20"><path d="M3 17C6 17 8 3 17 3M3 17L17 3" stroke-dasharray="1.5 2"/></svg>',
+    levels: '<svg viewBox="0 0 20 20"><path d="M3 17V9M7 17V4M11 17V7M15 17V12M3 17h14"/></svg>',
+    'hue-saturation': '<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 3v14M3 10h14M5 5l10 10M15 5L5 15"/></svg>'
+  };
+
   function buildPanel() {
     layersEl.textContent = '';
+    thumbCanvases = {};
+    maskCanvases = {};
+    if (S.activeLayer !== null && S.activeLayer >= doc.layers.length) S.activeLayer = null;
     if (S.activeLayer === null) {
       for (var t = doc.layers.length - 1; t >= 0 && S.activeLayer === null; t--) {
         if (doc.layers[t].kind === 'raster') S.activeLayer = doc.layers[t].index;
       }
     }
-    for (var n = doc.layers.length - 1; n >= 0; n--) layersEl.appendChild(layerRow(doc.layers[n]));
+    layersEl.appendChild(el('div', { 'class': 'st-layers-head' }, [
+      el('span', { text: 'Layers' }),
+      el('span', { 'class': 'st-lkind', text: doc.layers.length + ' layers' })]));
+    var list = el('div', { 'class': 'st-llist' });
+    for (var n = doc.layers.length - 1; n >= 0; n--) list.appendChild(layerListRow(doc.layers[n]));
+    layersEl.appendChild(list);
+    propsEl = el('div', { 'class': 'st-props' });
+    layersEl.appendChild(propsEl);
+    showProperties();
+    refreshThumbs();
   }
 
-  // The layer a brush stroke paints: clicking a layer's name picks it.
-  S.setActiveLayer = function (i) {
-    S.activeLayer = i;
-    document.querySelectorAll('#stratum-layers .st-layer').forEach(function (row) {
-      row.classList.toggle('st-active', Number(row.getAttribute('data-layer')) === i);
+  function kindLabel(L) {
+    return { raster: 'raster', curves: 'curves', levels: 'levels', 'hue-saturation': 'hue/sat' }[L.kind] +
+      (L.mask ? ' + mask' : '');
+  }
+
+  function layerListRow(L) {
+    var row = el('div', { 'class': 'st-lrow' + (L.index === S.activeLayer ? ' st-active' : ''),
+                          'data-layer': String(L.index) });
+    var eye = el('span', { 'class': 'st-eye' + (L.visible ? '' : ' st-off'), title: 'Visibility' });
+    eye.innerHTML = EYE_SVG;
+    eye.addEventListener('click', function (e) {
+      e.stopPropagation();
+      L.visible = !L.visible;
+      eye.classList.toggle('st-off', !L.visible);
+      syncOpacity();
+      requestDraw();
+      post({ layer: L.index, slot: 'visible', value: L.visible });
     });
+    row.appendChild(eye);
+    var thumb = el('div', { 'class': 'st-thumb' });
+    if (L.kind === 'raster') {
+      var c = el('canvas', { width: '40', height: '24' });
+      thumb.appendChild(c);
+      thumbCanvases[L.texIndex] = c;
+    } else {
+      thumb.classList.add('st-thumb-adj');
+      thumb.innerHTML = ADJ_ICONS[L.kind] || '';
+    }
+    row.appendChild(thumb);
+    if (L.mask) {
+      var m = el('canvas', { width: '40', height: '24' });
+      row.appendChild(el('div', { 'class': 'st-thumb' }, [m]));
+      maskCanvases[L.maskIndex] = m;
+    }
+    row.appendChild(el('span', { 'class': 'st-lname', text: L.name }));
+    row.appendChild(el('span', { 'class': 'st-lkind', text: kindLabel(L) }));
+    row.addEventListener('click', function () { S.setActiveLayer(L.index); });
+    return row;
+  }
+
+  function drawThumb(c, bytes, channels) {
+    var ctx = c.getContext('2d'), img = ctx.createImageData(c.width, c.height);
+    if (channels === 4) img.data.set(bytes);
+    else for (var i = 0; i < bytes.length; i++) {
+      img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = bytes[i];
+      img.data[4 * i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // A raster layer's thumbnail from the server (its pixels as they are
+  // now), after a load, a stroke or an undo.
+  S.refreshThumb = function (texIndex) {
+    var c = thumbCanvases[texIndex];
+    if (!c) return Promise.resolve(null);
+    return fetchBytes(api('thumb?i=' + texIndex + '&w=' + c.width + '&h=' + c.height))
+      .then(function (b) { drawThumb(c, b, 4); return b.length; });
   };
 
-  // Hand, Brush and Eraser buttons under the status lines (keys: H, B,
-  // E; Space held pans whatever the tool), then the brush: size,
-  // hardness, flow, opacity, color, and Undo (Ctrl+Z).
+  function refreshThumbs() {
+    Object.keys(thumbCanvases).forEach(function (k) { S.refreshThumb(Number(k)); });
+    Object.keys(maskCanvases).forEach(function (k) {
+      var c = maskCanvases[k];
+      fetchBytes(api('thumb?mask=1&i=' + k + '&w=' + c.width + '&h=' + c.height))
+        .then(function (b) { drawThumb(c, b, 1); });
+    });
+  }
+
+  // The active layer: what the brush paints and what the controls
+  // below the list show.  Clicking a row picks it.
+  S.setActiveLayer = function (i) {
+    S.activeLayer = i;
+    document.querySelectorAll('#stratum-layers .st-lrow').forEach(function (row) {
+      row.classList.toggle('st-active', Number(row.getAttribute('data-layer')) === i);
+    });
+    showProperties();
+  };
+
+  function showProperties() {
+    if (!propsEl) return;
+    propsEl.textContent = '';
+    var L = activeL();
+    if (L) propsEl.appendChild(layerProperties(L));
+  }
+
+  // ---- the tool palette ---------------------------------------------------
+  //
+  // The tools down the left in the order other editors keep them, each
+  // with its single-letter key.  The ones not built yet are drawn
+  // dimmed and refuse to be picked; the foreground and background
+  // swatches at the bottom (X swaps them, D resets them) hold the brush
+  // color.
+
+  var ICONS = {
+    move: '<path d="M10 3v14M3 10h14M10 3l-2.5 2.5M10 3l2.5 2.5M10 17l-2.5-2.5M10 17l2.5-2.5M3 10l2.5-2.5M3 10l2.5 2.5M17 10l-2.5-2.5M17 10l-2.5 2.5"/>',
+    marquee: '<rect x="4" y="4" width="12" height="12" stroke-dasharray="2.2 1.8"/>',
+    lasso: '<path d="M10 3.5c4 0 6.5 1.8 6.5 4s-2.5 4-6.5 4-6.5-1.8-6.5-4 2.5-4 6.5-4zM7 11.5c-1.5 2-1 4.5-2 6"/>',
+    wand: '<path d="M3.5 16.5l7.5-7.5M12 7l.7-3M12 7l3-.7M12 7l2.5-2.5M12 7l-2.5-2.5M12 7l2.3 2.3"/>',
+    crop: '<path d="M6 2.5v11.5h11.5M2.5 6h11.5v11.5"/>',
+    eyedropper: '<path d="M3.5 16.5l7-7M11.5 8.5l2-2a1.6 1.6 0 0 1 2.3 2.3l-2 2M10 7l3 3"/>',
+    healing: '<rect x="3" y="7" width="14" height="6" rx="3" transform="rotate(-45 10 10)"/><path d="M8.5 10h3M10 8.5v3"/>',
+    brush: '<path d="M3 17c0-3 1.2-4.5 3.5-5l8-8 2.5 2.5-8 8c-.5 2.3-2 3.5-6 2.5z"/>',
+    stamp: '<path d="M7.5 3h5v5h-5zM4 8h12v3H4zM5 11v6h10v-6"/>',
+    history: '<path d="M4.5 10a5.5 5.5 0 1 1 1.8 4M4.5 10l-1.5-1.5M4.5 10L6 8.5M10 7v3.5l2 1.5"/>',
+    eraser: '<rect x="3.5" y="8.5" width="13" height="6" rx="1" transform="rotate(-45 10 10)"/><path d="M8 17h9"/>',
+    gradient: '<rect x="3" y="4" width="14" height="12"/><path d="M7 4v12M11 4v12M14.5 4v12" stroke-dasharray="1.2 1.2"/>',
+    blur: '<path d="M10 3c3 4 5 6.5 5 9.5a5 5 0 0 1-10 0C5 9.5 7 7 10 3z"/>',
+    dodge: '<circle cx="12.5" cy="7.5" r="4.5"/><path d="M9.5 10.5l-6 6"/>',
+    pen: '<path d="M4 16l8.5-8.5 2 2L6 18zM12.5 7.5l2-2 2 2-2 2M3 17.5l1-1.5"/>',
+    type: '<path d="M4 4.5h12M10 4.5v11.5M7 16h6"/>',
+    pathsel: '<path d="M5.5 3l10 8-5 1-2.5 5z"/>',
+    shape: '<rect x="4" y="4" width="12" height="12" rx="2"/>',
+    pan: '<path d="M7 11V6.5a1 1 0 0 1 2 0V10M9 10V4.5a1 1 0 0 1 2 0V10M11 10V5.5a1 1 0 0 1 2 0V10M13 10V7.5a1 1 0 0 1 2 0v5.5c0 3-2 4.5-5 4.5s-4-2-5-3.5l-2-3a1 1 0 0 1 1.7-1.2L7 11.5"/>',
+    zoom: '<circle cx="11.5" cy="8.5" r="5"/><path d="M8 12l-4.5 4.5M9.5 8.5h4M11.5 6.5v4"/>'
+  };
+
+  var TOOLS = [
+    { id: 'move', key: 'V', label: 'Move Tool' },
+    { id: 'marquee', key: 'M', label: 'Rectangular Marquee Tool' },
+    { id: 'lasso', key: 'L', label: 'Lasso Tool' },
+    { id: 'wand', key: 'W', label: 'Magic Wand Tool' },
+    '-',
+    { id: 'crop', key: 'C', label: 'Crop Tool' },
+    { id: 'eyedropper', key: 'I', label: 'Eyedropper Tool', built: true },
+    '-',
+    { id: 'healing', key: 'J', label: 'Healing Brush Tool' },
+    { id: 'brush', key: 'B', label: 'Brush Tool', built: true },
+    { id: 'stamp', key: 'S', label: 'Clone Stamp Tool' },
+    { id: 'history', key: 'Y', label: 'History Brush Tool' },
+    { id: 'eraser', key: 'E', label: 'Eraser Tool', built: true },
+    { id: 'gradient', key: 'G', label: 'Gradient Tool' },
+    { id: 'blur', key: 'R', label: 'Blur Tool' },
+    { id: 'dodge', key: 'O', label: 'Dodge Tool' },
+    '-',
+    { id: 'pen', key: 'P', label: 'Pen Tool' },
+    { id: 'type', key: 'T', label: 'Horizontal Type Tool' },
+    { id: 'pathsel', key: 'A', label: 'Path Selection Tool' },
+    { id: 'shape', key: 'U', label: 'Rectangle Tool' },
+    '-',
+    { id: 'pan', key: 'H', label: 'Hand Tool', built: true },
+    { id: 'zoom', key: 'Z', label: 'Zoom Tool', built: true }
+  ];
+
+  function toolSpec(id) {
+    return TOOLS.filter(function (t) { return t !== '-' && t.id === id; })[0] || null;
+  }
+
+  S.background = [255, 255, 255];
+
+  S.swapColors = function () {
+    var fg = S.brush.color;
+    S.setBrush({ color: S.background });
+    S.background = fg;
+    if (S.swatches) S.swatches.refresh();
+  };
+
+  S.defaultColors = function () {
+    S.background = [255, 255, 255];
+    S.setBrush({ color: [0, 0, 0] });
+  };
+
+  function installTools() {
+    var bar = document.getElementById('stratum-tools');
+    if (!bar) return;
+    bar.textContent = '';
+    TOOLS.forEach(function (t) {
+      if (t === '-') { bar.appendChild(el('div', { 'class': 'st-tool-gap' })); return; }
+      var b = el('div', { 'class': 'st-tool-btn' + (t.built ? '' : ' st-disabled'), 'data-tool': t.id,
+                          title: t.label + ' (' + t.key + ')' });
+      b.innerHTML = '<svg viewBox="0 0 20 20">' + ICONS[t.id] + '</svg>';
+      b.addEventListener('click', function () { S.setTool(t.id); });
+      bar.appendChild(b);
+    });
+    var fg = el('div', { 'class': 'st-swatch st-fg', title: 'Foreground color (X swaps, D resets)' });
+    var bg = el('div', { 'class': 'st-swatch st-bg', title: 'Background color' });
+    var bgInput = el('input', { type: 'color' });
+    bgInput.style.display = 'none';
+    bgInput.addEventListener('input', function () {
+      S.background = [1, 3, 5].map(function (i) { return parseInt(bgInput.value.substr(i, 2), 16); });
+      S.swatches.refresh();
+    });
+    fg.addEventListener('click', function () {
+      var input = document.querySelector('#stratum-panel .st-brush input[type=color]');
+      if (input) input.click();
+    });
+    bg.addEventListener('click', function () { bgInput.value = hexColor(S.background); bgInput.click(); });
+    bar.appendChild(el('div', { 'class': 'st-swatches' }, [fg, bg, bgInput]));
+    S.swatches = {
+      refresh: function () {
+        fg.style.background = hexColor(S.brush.color);
+        bg.style.background = hexColor(S.background);
+      }
+    };
+    S.swatches.refresh();
+    S.setTool(S.tool);
+  }
+
+  // The brush box in the panel: size, hardness, flow, opacity, color,
+  // and Undo (Ctrl+Z).
   var BRUSH_RANGES = { radius: ['size', 1, 300, 1], hardness: ['hardness', 0, 1, 0.01],
                        flow: ['flow', 0.01, 1, 0.01], opacity: ['opacity', 0, 1, 0.01] };
 
   function installToolbar() {
-    var tools = el('div', { 'class': 'st-row' });
-    [['pan', 'Hand (H)'], ['brush', 'Brush (B)'], ['eraser', 'Eraser (E)']].forEach(function (pair) {
-      var b = el('button', { type: 'button', 'class': 'st-tool', 'data-tool': pair[0], text: pair[1] });
-      b.addEventListener('click', function () { S.setTool(pair[0]); });
-      tools.appendChild(b);
-    });
-    var box = el('div', { 'class': 'st-brush' }, [tools]);
+    var box = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Brush Settings' })])]);
     var inputs = {};
     Object.keys(BRUSH_RANGES).forEach(function (key) {
       var r = BRUSH_RANGES[key];
@@ -784,6 +1033,7 @@
     var color = el('input', { type: 'color', value: hexColor(S.brush.color) });
     color.addEventListener('input', function () {
       S.brush.color = [1, 3, 5].map(function (i) { return parseInt(color.value.substr(i, 2), 16); });
+      if (S.swatches) S.swatches.refresh();
     });
     var undo = el('button', { type: 'button', text: 'Undo (Ctrl+Z)' });
     undo.addEventListener('click', function () { S.undo(); });
@@ -795,10 +1045,10 @@
           inputs[key].val.textContent = String(S.brush[key]);
         });
         color.value = hexColor(S.brush.color);
+        if (S.swatches) S.swatches.refresh();
       }
     };
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
-    S.setTool(S.tool);
   }
 
   function hexColor(c) {
@@ -967,20 +1217,13 @@
     return on;
   };
 
-  function layerRow(L) {
+  // The active layer's controls: its name and kind, opacity, and then
+  // its blend mode, its curves, or its settings.
+  function layerProperties(L) {
     var i = L.index;
-    var vis = el('input', { type: 'checkbox' });
-    vis.checked = L.visible;
-    vis.addEventListener('change', function () {
-      L.visible = vis.checked;
-      syncOpacity();
-      requestDraw();
-      post({ layer: i, slot: 'visible', value: L.visible });
-    });
-    var kind = L.kind;
     var head = el('div', { 'class': 'st-head' }, [
-      vis, el('span', { 'class': 'st-name', text: L.name }),
-      el('span', { 'class': 'st-kind', text: kind + (L.mask ? ' + mask' : '') })]);
+      el('span', { 'class': 'st-name', text: L.name }),
+      el('span', { 'class': 'st-kind', text: kindLabel(L) })]);
     var range = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(L.opacity * 100)) });
     var val = el('span', { text: Math.round(L.opacity * 100) + '%' });
     range.addEventListener('input', function () {
@@ -990,10 +1233,8 @@
       requestDraw();
       postSoon('opacity' + i, { layer: i, slot: 'opacity', value: L.opacity });
     });
-    var row = el('div', { 'class': 'st-layer' + (i === S.activeLayer ? ' st-active' : ''),
-                          'data-layer': String(i) },
-                 [head, el('div', { 'class': 'st-row' }, [range, val])]);
-    head.querySelector('.st-name').addEventListener('click', function () { S.setActiveLayer(i); });
+    var row = el('div', { 'class': 'st-layer', 'data-layer': String(i) },
+                 [head, el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'opacity' }), range, val])]);
     if (L.kind === 'raster') {
       var sel = el('select', { 'class': 'st-blend' });
       ['normal', 'multiply', 'screen', 'add'].forEach(function (m) {
@@ -1005,7 +1246,7 @@
         L.blend = sel.value;
         post({ layer: i, slot: 'blend', value: sel.value });
       });
-      row.appendChild(el('div', { 'class': 'st-row' }, [el('span', { text: 'blend' }), sel]));
+      row.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'blend' }), sel]));
     } else if (L.kind === 'curves') {
       row.appendChild(curveEditor(L));
     } else if (L.settings) {
@@ -1392,6 +1633,32 @@
         check('parity after the delete', p.maxDiff <= 1, p);
       });
     }).then(function () {
+      // The palette: a tool not built is refused; the eyedropper puts
+      // the color under the pointer into the foreground; X swaps the
+      // swatches; a raster layer's thumbnail comes w*h*4 bytes.
+      var saved = { tool: S.tool, color: S.brush.color, background: S.background };
+      var refused = !S.setTool('lasso') && S.tool === saved.tool;
+      S.setTool('eyedropper');
+      var r = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new PointerEvent('pointerdown', {
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerId: 43, pointerType: 'mouse', bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', {
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerId: 43, pointerType: 'mouse', bubbles: true }));
+      var picked = S.brush.color.slice();
+      S.swapColors();
+      var swapped = S.brush.color.join() === saved.background.join() && S.background.join() === picked.join();
+      S.background = saved.background;
+      S.setBrush({ color: saved.color });
+      S.setTool(saved.tool);
+      check('the palette refuses a tool not built', refused, { tool: S.tool });
+      check('the eyedropper picks a color and X swaps the swatches',
+            picked.length === 3 && picked.every(function (v) { return v >= 0 && v <= 255; }) && swapped,
+            { picked: picked, swapped: swapped });
+      var tex = doc.layers[S.activeLayer] && doc.layers[S.activeLayer].texIndex;
+      return S.refreshThumb(tex).then(function (n) {
+        check('a layer thumbnail comes from the server', n === 40 * 24 * 4, { bytes: n });
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -1452,6 +1719,7 @@
       draw();
       installBenchButton();
       installToolbar();
+      installTools();
       installMenubar();
       S.ready = true;
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);

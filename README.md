@@ -103,6 +103,18 @@ Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation)
 and Arrange (Bring Forward, Send Backward); View ▸ Zoom In, Zoom Out,
 Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
 
+The tool palette down the left keeps the order other editors use, with
+the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
+(W), Crop (C), Eyedropper (I), Healing Brush (J), Brush (B), Clone
+Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
+(O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
+Zoom (Z). Built: Eyedropper, Brush, Eraser, Hand and Zoom; the rest
+are drawn dimmed and refuse to be picked. The foreground and
+background swatches below them hold the brush color; X swaps them and
+D resets them. The Layers panel lists the stack top first, each row an
+eye for visibility, a thumbnail of the layer and of its mask, its name
+and kind; the active layer's own controls sit below the list.
+
 The keys are the usual ones: H is the hand, B the brush, E the eraser,
 Space held pans whatever the tool, `[` and `]` change the brush size,
 Ctrl+Z undoes the last stroke, Ctrl+Shift+N makes a layer, Ctrl+J
@@ -125,6 +137,7 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/doc?doc=N` | JSON: size, plan version, shader source, layers |
 | `/stratum/api/raster?doc=N&i=K` | raw RGBA8 of raster layer K; with `&x=&y=&w=&h=`, that rectangle |
 | `/stratum/api/mask?doc=N&i=K` | raw R8 of mask K |
+| `/stratum/api/thumb?doc=N&i=K&w=&h=` | a w × h nearest-neighbor thumbnail of raster layer K (RGBA8), or with `&mask=1` of mask K (R8) |
 | `/stratum/api/cpu?doc=N` | raw RGBA8 of the CPU render |
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
@@ -192,7 +205,10 @@ The self-test checks:
   the picture back byte for byte;
 - the stack through the menus: Layer ▸ New Adjustment Layer ▸ Curves
   and then Delete Layer, each a new plan with parity intact, and the
-  stack as found.
+  stack as found;
+- the palette: a tool not built is refused, the eyedropper picks the
+  color under the pointer, X swaps the swatches, and a layer's
+  thumbnail comes from the server.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

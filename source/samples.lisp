@@ -24,6 +24,7 @@
      :source (:clouds :seed 7 :color (255 248 236) :threshold 0.52 :alpha 235))
     (:kind :curves :name "Contrast"
      :master ((0 0) (0.25 0.18) (0.75 0.85) (1 1)))
+    (:kind :levels :name "Levels" :in-black 0.04 :in-white 0.97 :gamma 1.15)
     (:kind :raster :name "Discs"
      :source (:discs :count 18 :seed 3)
      :mask (:radial :cx 0.5 :cy 0.55 :inner 0.15 :outer 0.55))
@@ -32,6 +33,8 @@
      :mask (:linear :angle 0 :from 0.35 :to 0.75))
     (:kind :raster :name "Glow" :blend :add :opacity 0.6
      :source (:discs :count 6 :seed 11 :softness 0.9 :alpha 200 :palette ((255 210 120))))
+    (:kind :hue-saturation :name "Hue/Saturation" :hue 14 :saturation 0.25 :lightness -0.04
+     :mask (:radial :cx 0.5 :cy 0.5 :inner 0.25 :outer 0.75 :invert? t))
     (:kind :curves :name "Warm" :opacity 0.9
      :red ((0 0) (0.5 0.56) (1 1))
      :blue ((0 0) (0.5 0.44) (1 1))

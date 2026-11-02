@@ -33,6 +33,7 @@ uniform sampler2DArray u_layers;
 uniform sampler2DArray u_masks;
 uniform sampler2D u_luts;
 uniform float u_opacity[~d];
+uniform vec4 u_params[~:*~d];
 uniform vec3 u_background;
 uniform vec2 u_doc_size;
 uniform vec2 u_view_offset;
@@ -62,6 +63,39 @@ float lut(int row, float x) {
   float f = q - float(i);
   int j = min(i + 1, 255);
   return mix(texelFetch(u_luts, ivec2(i, row), 0).r, texelFetch(u_luts, ivec2(j, row), 0).r, f);
+}
+float hue_channel(float p, float q, float t) {
+  t = t - floor(t);
+  if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+  if (t < 0.5) return q;
+  if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+  return p;
+}
+vec3 hue_saturation(vec3 c, vec4 k) {
+  float mx = max(c.r, max(c.g, c.b));
+  float mn = min(c.r, min(c.g, c.b));
+  float l = (mx + mn) * 0.5;
+  float d = mx - mn;
+  float h = 0.0;
+  float s = 0.0;
+  if (d > 0.0) {
+    s = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
+    if (mx == c.r) h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+    else h = (c.r - c.g) / d + 4.0;
+    h = h / 6.0;
+  }
+  h = h + k.x;
+  h = h - floor(h);
+  s = clamp(s * (1.0 + k.y), 0.0, 1.0);
+  vec3 rgb;
+  if (s <= 0.0) rgb = vec3(l);
+  else {
+    float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+    float p = 2.0 * l - q;
+    rgb = vec3(hue_channel(p, q, h + 1.0 / 3.0), hue_channel(p, q, h), hue_channel(p, q, h - 1.0 / 3.0));
+  }
+  return k.z > 0.0 ? rgb + (1.0 - rgb) * k.z : rgb * (1.0 + k.z);
 }
 
 void main() {
@@ -101,15 +135,23 @@ void main() {
   ao = a + ao * (1.0 - a);
 "
                param blend tex param (glsl-mask mask) (glsl-blend blend)))
-      (:curves
-       (format nil "  // layer ~d: curves
+      ((:curves :levels)
+       (format nil "  // layer ~d: ~(~a~)
   a = u_opacity[~d]~a;
   cb = ao > 0.0 ? co / ao : vec3(0.0);
   adj = srgb_encode(cb);
   adj = srgb_decode(vec3(lut(~d, adj.r), lut(~d, adj.g), lut(~d, adj.b)));
   co = co * (1.0 - a) + adj * ao * a;
 "
-               param param (glsl-mask mask) lut (+ lut 1) (+ lut 2))))))
+               param kind param (glsl-mask mask) lut (+ lut 1) (+ lut 2)))
+      (:hue-saturation
+       (format nil "  // layer ~d: hue-saturation
+  a = u_opacity[~d]~a;
+  cb = ao > 0.0 ? co / ao : vec3(0.0);
+  adj = srgb_decode(hue_saturation(srgb_encode(cb), u_params[~d]));
+  co = co * (1.0 - a) + adj * ao * a;
+"
+               param param (glsl-mask mask) param)))))
 
 (defun plan->glsl (plan)
   "The fragment shader that composites PLAN, a list of plan entries

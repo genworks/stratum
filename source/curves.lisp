@@ -73,6 +73,20 @@
         (setf (aref lut i) (min 1 (max 0 (curve-eval cxs cys cm y))))))
     lut))
 
+;;; Levels as a table: input black and white points, gamma (above 1
+;;; lifts the midtones), output black and white points, on the encoded
+;;; [0,1] scale as other editors work.  Dual, like the curves.
+(define-dual-function levels-lut (in-black in-white gamma out-black out-white size)
+  (let* ((lut (new-vector size))
+         (step (/ 1.0d0 (- size 1)))
+         (span (max 1.0d-6 (- in-white in-black))))
+    (dotimes (i size)
+      (let* ((x (* i step))
+             (v (min 1 (max 0 (/ (- x in-black) span))))
+             (g (expt v (/ 1 gamma))))
+        (setf (aref lut i) (min 1 (max 0 (+ out-black (* g (- out-white out-black))))))))
+    lut))
+
 (defparameter *identity-curve* '((0 0) (1 1)))
 
 (defun normalize-points (points)

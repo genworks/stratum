@@ -42,7 +42,23 @@ spec).  raster-layer and curves-layer mix this in.")
    (mask-pixels (when (the has-mask?)
                   (generate-mask (the mask-spec) (the doc-width) (the doc-height))))
    (effective-opacity (if (the visible?) (coerce (the opacity) 'double-float) 0.0))
-   (mask-index (position self (the parent masked-layers)))))
+   (mask-index (position self (the parent masked-layers)))
+   ("List of keywords. The numeric settings the page shows as sliders and
+may set; each is a settable slot of this layer."
+    setting-names nil)
+   ("List of four numbers. This layer's entry in the shader's u_params."
+    params (list 0 0 0 0))))
+
+(define-object lut-layer (image-layer)
+  :documentation
+  (:description "An adjustment applied through three 256-entry tables,
+one per channel, on the encoded scale: curves and levels.  A subclass
+supplies `luts'.")
+
+  :computed-slots
+  ((lut-row (* 3 (position self (the parent lut-layers))))
+   (plan-entry (list (the kind) :lut (the lut-row)
+                     :mask (the mask-index) :param (the index)))))
 
 (define-object raster-layer (image-layer)
   :documentation
@@ -60,7 +76,7 @@ with :blend (:normal, :multiply, :screen or :add).")
    (plan-entry (list :raster :tex (the texture-index) :blend (the blend-mode)
                      :mask (the mask-index) :param (the index)))))
 
-(define-object curves-layer (image-layer)
+(define-object curves-layer (lut-layer)
   :documentation
   (:description "An adjustment of everything below it: the :master
 curve, then the :red, :green and :blue curves, each a list of (x y)
@@ -74,12 +90,52 @@ points in [0,1].")
 
   :computed-slots
   ((kind :curves)
-   (lut-row (* 3 (position self (the parent curves-layers))))
    (luts (list (channel-lut (the master) (the red))
                (channel-lut (the master) (the green))
-               (channel-lut (the master) (the blue))))
-   (plan-entry (list :curves :lut (the lut-row)
-                     :mask (the mask-index) :param (the index)))))
+               (channel-lut (the master) (the blue))))))
+
+(define-object levels-layer (lut-layer)
+  :documentation
+  (:description "Levels on all three channels: :in-black and :in-white
+(the input range stretched to full), :gamma (above 1 lifts the
+midtones), :out-black and :out-white (the output range), on the
+encoded [0,1] scale.")
+
+  :input-slots
+  ((in-black (getf (the spec) :in-black 0) :settable)
+   (in-white (getf (the spec) :in-white 1) :settable)
+   (gamma (getf (the spec) :gamma 1) :settable)
+   (out-black (getf (the spec) :out-black 0) :settable)
+   (out-white (getf (the spec) :out-white 1) :settable))
+
+  :computed-slots
+  ((kind :levels)
+   (setting-names '(:in-black :in-white :gamma :out-black :out-white))
+   (luts (let ((lut (map '(simple-array double-float (*))
+                         (lambda (v) (coerce v 'double-float))
+                         (levels-lut (float (the in-black) 1d0) (float (the in-white) 1d0)
+                                     (float (the gamma) 1d0)
+                                     (float (the out-black) 1d0) (float (the out-white) 1d0)
+                                     256))))
+           (list lut lut lut)))))
+
+(define-object hue-saturation-layer (image-layer)
+  :documentation
+  (:description "Hue, saturation and lightness of everything below it,
+in HSL on the encoded scale: :hue turns by degrees, :saturation scales
+by 1 + s (-1 removes the color), :lightness moves toward white (above
+0) or black (below).")
+
+  :input-slots
+  ((hue (getf (the spec) :hue 0) :settable)
+   (saturation (getf (the spec) :saturation 0) :settable)
+   (lightness (getf (the spec) :lightness 0) :settable))
+
+  :computed-slots
+  ((kind :hue-saturation)
+   (setting-names '(:hue :saturation :lightness))
+   (params (list (/ (float (the hue) 1d0) 360) (the saturation) (the lightness) 0))
+   (plan-entry (list :hue-saturation :mask (the mask-index) :param (the index)))))
 
 (define-object image-document ()
   :documentation
@@ -106,16 +162,17 @@ for the other keys.")
   ((layer-types (mapcar (lambda (spec)
                           (ecase (getf spec :kind :raster)
                             (:raster 'raster-layer)
-                            (:curves 'curves-layer)))
+                            (:curves 'curves-layer)
+                            (:levels 'levels-layer)
+                            (:hue-saturation 'hue-saturation-layer)))
                         (the layer-specs)))
    (layer-list (list-elements (the layers)))
    (raster-layers (remove-if-not (lambda (l) (eql (the-object l kind) :raster))
                                  (the layer-list)))
-   (curves-layers (remove-if-not (lambda (l) (eql (the-object l kind) :curves))
-                                 (the layer-list)))
+   (lut-layers (remove-if-not (lambda (l) (typep l 'lut-layer)) (the layer-list)))
    (masked-layers (remove-if-not (lambda (l) (the-object l has-mask?))
                                  (the layer-list)))
-   (lut-rows (* 3 (length (the curves-layers))))
+   (lut-rows (* 3 (length (the lut-layers))))
 
    (plan (mapcar (lambda (l) (the-object l plan-entry)) (the layer-list)))
    (plan-version (format nil "~36r" (sxhash (prin1-to-string (the plan)))))
@@ -130,10 +187,18 @@ for the other keys.")
                         (the layer-list)))
    (lut-vector (let ((v (make-array (* 256 (max 1 (the lut-rows)))
                                     :element-type 'double-float :initial-element 0.0)))
-                 (dolist (l (the curves-layers) v)
+                 (dolist (l (the lut-layers) v)
                    (loop for lut in (the-object l luts)
                          for row from (the-object l lut-row)
                          do (replace v lut :start1 (* 256 row))))))
+   (params-vector (let ((v (make-array (* 4 (max 1 (length (the layer-list))))
+                                       :element-type 'double-float :initial-element 0d0)))
+                    (loop for l in (the layer-list)
+                          for i from 0
+                          do (loop for p in (the-object l params)
+                                   for k from 0
+                                   do (setf (aref v (+ (* 4 i) k)) (float p 1d0))))
+                    v))
    (raster-vector (map 'simple-vector (lambda (l) (the-object l pixels))
                        (the raster-layers)))
    (mask-vector (map 'simple-vector (lambda (l) (the-object l mask-pixels))
@@ -151,6 +216,7 @@ for the other keys.")
           (bg (the background-linear)))
       (run-kernel (the cpu-kernel) (* (the doc-width) (the doc-height))
                   (the raster-vector) (the mask-vector) (the lut-vector) (the opacity-vector)
+                  (the params-vector)
                   (first bg) (second bg) (third bg)
                   out)
       out))))

@@ -53,19 +53,25 @@
   (yason:with-output-to-string* () (yason:encode object)))
 
 (defun layer-json (layer)
-  (let ((raster? (eql (the-object layer kind) :raster)))
+  (let ((kind (the-object layer kind)))
     (json-object
      "index" (the-object layer index)
      "name" (the-object layer layer-name)
-     "kind" (string-downcase (the-object layer kind))
+     "kind" (string-downcase kind)
      "opacity" (the-object layer opacity)
      "visible" (json-bool (the-object layer visible?))
      "mask" (json-bool (the-object layer has-mask?))
      "maskIndex" (the-object layer mask-index)
-     "blend" (when raster? (string-downcase (the-object layer blend-mode)))
-     "texIndex" (when raster? (the-object layer texture-index))
-     "lutRow" (unless raster? (the-object layer lut-row))
-     "curves" (unless raster?
+     "blend" (when (eql kind :raster) (string-downcase (the-object layer blend-mode)))
+     "texIndex" (when (eql kind :raster) (the-object layer texture-index))
+     "lutRow" (when (typep layer 'lut-layer) (the-object layer lut-row))
+     "settings" (let ((names (the-object layer setting-names)))
+                  (when names
+                    (apply #'json-object
+                           (loop for name in names
+                                 collect (string-downcase name)
+                                 collect (float (the-object layer (evaluate name)) 1d0)))))
+     "curves" (when (eql kind :curves)
                 (json-object "master" (normalize-points (the-object layer master))
                              "red" (normalize-points (the-object layer red))
                              "green" (normalize-points (the-object layer green))
@@ -87,8 +93,10 @@
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
 
 (defun handle-set (req)
-  "Apply one edit, {layer, slot, value} or {layer, slot: \"curve\",
-channel, points}, and answer the document's planVersion."
+  "Apply one edit -- {layer, slot, value} for opacity, visible and blend;
+{layer, slot: \"setting\", name, value} for a levels or hue/saturation
+setting; {layer, slot: \"curve\", channel, points} -- and answer the
+document's planVersion."
   (let* ((doc (request-doc req))
          (body (yason:parse (net.aserve:get-request-body req)))
          (layer (the-object doc (layer (gethash "layer" body))))
@@ -102,6 +110,12 @@ channel, points}, and answer the document's planVersion."
            (let ((mode (find value *blend-modes* :key #'string-downcase :test #'string-equal)))
              (unless mode (error "Unknown blend mode ~s." value))
              (the-object layer (set-slot! :blend-mode mode))))
+          ((string= slot "setting")
+           (let ((name (find (gethash "name" body) (the-object layer setting-names)
+                             :test #'string-equal)))
+             (unless name (error "~a has no setting ~s." (the-object layer layer-name)
+                                 (gethash "name" body)))
+             (the-object layer (set-slot! name (float value 1d0)))))
           ((string= slot "curve")
            (let ((channel (find (gethash "channel" body) '(:master :red :green :blue)
                                 :test #'string-equal)))
@@ -125,6 +139,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-head { display: flex; align-items: center; gap: 6px; }
 .st-name { flex: 1; font-weight: 600; }
 .st-kind { color: #8a9099; font-size: 11px; }
+.st-label { color: #8a9099; font-size: 11px; width: 62px; flex: none; }
 .st-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
 .st-row input[type=range] { flex: 1; }
 .st-row select { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; }

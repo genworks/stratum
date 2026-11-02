@@ -37,7 +37,7 @@
 
   var canvas, gl, vao, prog = null, uni = {}, doc = null;
   var texLayers = null, texMasks = null, texLuts = null;
-  var opacity = null, lutData = null;
+  var opacity = null, params = null, lutData = null;
   var view = { scale: 1, ox: 0, oy: 0 };
   var pending = false;
   var statusEl, layersEl;
@@ -71,7 +71,7 @@
     if (prog) gl.deleteProgram(prog);
     prog = p;
     uni = {};
-    ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_background', 'u_doc_size',
+    ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
@@ -144,24 +144,48 @@
     });
   }
 
-  // ---- parameters: opacity uniforms and curve tables ----------------------
+  // ---- parameters: opacity and params uniforms, curve and levels tables ----
+
+  // Each layer's four-number u_params entry, as its Lisp class's
+  // `params' slot computes it.
+  function layerParams(L) {
+    if (L.kind === 'hue-saturation') {
+      return [L.settings.hue / 360, L.settings.saturation, L.settings.lightness, 0];
+    }
+    return [0, 0, 0, 0];
+  }
 
   function syncOpacity() {
-    if (!opacity || opacity.length !== Math.max(1, doc.layers.length)) {
-      opacity = new Float32Array(Math.max(1, doc.layers.length));
+    var n = Math.max(1, doc.layers.length);
+    if (!opacity || opacity.length !== n) {
+      opacity = new Float32Array(n);
+      params = new Float32Array(4 * n);
     }
-    doc.layers.forEach(function (L, i) { opacity[i] = L.visible ? L.opacity : 0; });
+    doc.layers.forEach(function (L, i) {
+      opacity[i] = L.visible ? L.opacity : 0;
+      params.set(layerParams(L), 4 * i);
+    });
   }
 
   function column(points, k) { return points.map(function (p) { return p[k]; }); }
 
-  function fillLutRows(L) {
+  // A table layer's three tables (red, green, blue), from the same dual
+  // functions the server's slots call.
+  function layerLuts(L) {
+    if (L.kind === 'levels') {
+      var s = L.settings;
+      var t = levelsLut(s['in-black'], s['in-white'], s.gamma, s['out-black'], s['out-white'], 256);
+      return [t, t, t];
+    }
     var m = L.curves.master;
-    ['red', 'green', 'blue'].forEach(function (ch, k) {
+    return ['red', 'green', 'blue'].map(function (ch) {
       var c = L.curves[ch];
-      var lut = composedLut(column(m, 0), column(m, 1), column(c, 0), column(c, 1), 256);
-      lutData.set(lut, (L.lutRow + k) * 256);
+      return composedLut(column(m, 0), column(m, 1), column(c, 0), column(c, 1), 256);
     });
+  }
+
+  function fillLutRows(L) {
+    layerLuts(L).forEach(function (lut, k) { lutData.set(lut, (L.lutRow + k) * 256); });
   }
 
   function uploadLuts() {
@@ -175,7 +199,7 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     }
-    doc.layers.forEach(function (L) { if (L.kind === 'curves') fillLutRows(L); });
+    doc.layers.forEach(function (L) { if (L.lutRow !== null && L.lutRow !== undefined) fillLutRows(L); });
     gl.bindTexture(gl.TEXTURE_2D, texLuts);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, rows, gl.RED, gl.FLOAT, lutData);
     S.stats.lutUploads++;
@@ -196,6 +220,7 @@
     gl.bindTexture(gl.TEXTURE_2D, texLuts);
     gl.uniform1i(uni.u_luts, 2);
     gl.uniform1fv(uni.u_opacity, opacity);
+    gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
     gl.uniform2f(uni.u_doc_size, doc.width, doc.height);
     gl.uniform2f(uni.u_view_offset, v.ox, v.oy);
@@ -344,7 +369,7 @@
       requestDraw();
       post({ layer: i, slot: 'visible', value: L.visible });
     });
-    var kind = L.kind === 'raster' ? 'raster' : 'curves';
+    var kind = L.kind;
     var head = el('div', { 'class': 'st-head' }, [
       vis, el('span', { 'class': 'st-name', text: L.name }),
       el('span', { 'class': 'st-kind', text: kind + (L.mask ? ' + mask' : '') })]);
@@ -370,10 +395,41 @@
         post({ layer: i, slot: 'blend', value: sel.value });
       });
       row.appendChild(el('div', { 'class': 'st-row' }, [el('span', { text: 'blend' }), sel]));
-    } else {
+    } else if (L.kind === 'curves') {
       row.appendChild(curveEditor(L));
+    } else if (L.settings) {
+      Object.keys(SETTING_RANGES).forEach(function (name) {
+        if (name in L.settings) row.appendChild(settingSlider(L, name));
+      });
     }
     return row;
+  }
+
+  // Ranges for the settings sliders: [min, max, step].
+  var SETTING_RANGES = {
+    'in-black': [0, 1, 0.005], 'in-white': [0, 1, 0.005], gamma: [0.2, 4, 0.01],
+    'out-black': [0, 1, 0.005], 'out-white': [0, 1, 0.005],
+    hue: [-180, 180, 1], saturation: [-1, 1, 0.01], lightness: [-1, 1, 0.01]
+  };
+
+  // One slider for a levels or hue/saturation setting.  A move changes
+  // the tables or the params uniform and redraws; the server hears
+  // when the slider rests.
+  function settingSlider(L, name) {
+    var r = SETTING_RANGES[name] || [0, 1, 0.01];
+    var input = el('input', { type: 'range', min: String(r[0]), max: String(r[1]), step: String(r[2]),
+                              value: String(L.settings[name]) });
+    var val = el('span', { text: String(Math.round(L.settings[name] * 1000) / 1000) });
+    input.addEventListener('input', function () {
+      var v = Number(input.value);
+      L.settings[name] = v;
+      val.textContent = String(v);
+      if (L.lutRow !== null && L.lutRow !== undefined) uploadLuts();
+      syncOpacity();
+      requestDraw();
+      postSoon('setting' + L.index + name, { layer: L.index, slot: 'setting', name: name, value: v });
+    });
+    return el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: name }), input, val]);
   }
 
   // A small curves editor: drag a point; click empty space to add one;
@@ -552,11 +608,8 @@
     return fetchJSON(api('luts')).then(function (server) {
       var max = 0, count = 0;
       doc.layers.forEach(function (L) {
-        if (L.kind !== 'curves') return;
-        var m = L.curves.master;
-        ['red', 'green', 'blue'].forEach(function (ch, k) {
-          var c = L.curves[ch];
-          var lut = composedLut(column(m, 0), column(m, 1), column(c, 0), column(c, 1), 256);
+        if (L.lutRow === null || L.lutRow === undefined) return;
+        layerLuts(L).forEach(function (lut, k) {
           for (var i = 0; i < 256; i++) {
             max = Math.max(max, Math.abs(lut[i] - server[(L.lutRow + k) * 256 + i]));
             count++;

@@ -34,6 +34,50 @@ shader's lut() does it."
     (+ (* (aref luts (+ base i)) (- 1.0 f))
        (* (aref luts (+ base j)) f))))
 
+(declaim (inline hue-channel hue-saturation))
+(defun hue-channel (p q tt)
+  (declare (type double-float p q tt))
+  (let ((tt (- tt (ffloor tt))))
+    (cond ((< tt (/ 1.0 6.0)) (+ p (* (- q p) 6.0 tt)))
+          ((< tt 0.5) q)
+          ((< tt (/ 2.0 3.0)) (+ p (* (- q p) (- (/ 2.0 3.0) tt) 6.0)))
+          (t p))))
+
+(defun hue-saturation (r g b k0 k1 k2)
+  "R G B (encoded, in [0,1]) through HSL: hue turned by K0 (turns),
+saturation scaled by 1 + K1, lightness toward white or black by K2, as
+the shader's hue_saturation() does it."
+  (declare (type double-float r g b k0 k1 k2)
+           (optimize (speed 3) (safety 0)))
+  (let* ((mx (max r g b))
+         (mn (min r g b))
+         (l (* (+ mx mn) 0.5))
+         (d (- mx mn))
+         (h 0.0)
+         (s 0.0))
+    (declare (type double-float mx mn l d h s))
+    (when (> d 0.0)
+      (setf s (if (> l 0.5) (/ d (- 2.0 mx mn)) (/ d (+ mx mn)))
+            h (/ (cond ((= mx r) (+ (/ (- g b) d) (if (< g b) 6.0 0.0)))
+                       ((= mx g) (+ (/ (- b r) d) 2.0))
+                       (t (+ (/ (- r g) d) 4.0)))
+                 6.0)))
+    (setf h (+ h k0)
+          h (- h (ffloor h))
+          s (min 1.0 (max 0.0 (* s (+ 1.0 k1)))))
+    (multiple-value-bind (nr ng nb)
+        (if (<= s 0.0)
+            (values l l l)
+            (let* ((q (if (< l 0.5) (* l (+ 1.0 s)) (- (+ l s) (* l s))))
+                   (p (- (* 2.0 l) q)))
+              (values (hue-channel p q (+ h (/ 1.0 3.0)))
+                      (hue-channel p q h)
+                      (hue-channel p q (- h (/ 1.0 3.0))))))
+      (declare (type double-float nr ng nb))
+      (if (> k2 0.0)
+          (values (+ nr (* (- 1.0 nr) k2)) (+ ng (* (- 1.0 ng) k2)) (+ nb (* (- 1.0 nb) k2)))
+          (values (* nr (+ 1.0 k2)) (* ng (+ 1.0 k2)) (* nb (+ 1.0 k2)))))))
+
 (defun tex-var (i) (intern (format nil "TEX~d" i) :stratum))
 (defun mask-var (i) (intern (format nil "MASK~d" i) :stratum))
 
@@ -73,7 +117,23 @@ shader's lut() does it."
                     kg (+ (* (+ (* (- 1.0 ao) sg) (* ao ,mg)) a) (* kg (- 1.0 a)))
                     kb (+ (* (+ (* (- 1.0 ao) sb) (* ao ,mb)) a) (* kb (- 1.0 a)))
                     ao (+ a (* ao (- 1.0 a))))))))
-      (:curves
+      (:hue-saturation
+       `(let* ((a (* (aref opacity ,param) ,(lisp-mask mask))))
+          (declare (type double-float a))
+          (multiple-value-bind (hr hg hb)
+              (hue-saturation (linear->srgb (if (> ao 0.0) (/ kr ao) 0.0))
+                              (linear->srgb (if (> ao 0.0) (/ kg ao) 0.0))
+                              (linear->srgb (if (> ao 0.0) (/ kb ao) 0.0))
+                              (aref params ,(* 4 param))
+                              (aref params ,(+ 1 (* 4 param)))
+                              (aref params ,(+ 2 (* 4 param))))
+            (declare (type double-float hr hg hb))
+            (let ((nr (srgb->linear hr)) (ng (srgb->linear hg)) (nb (srgb->linear hb)))
+              (declare (type double-float nr ng nb))
+              (setf kr (+ (* kr (- 1.0 a)) (* nr ao a))
+                    kg (+ (* kg (- 1.0 a)) (* ng ao a))
+                    kb (+ (* kb (- 1.0 a)) (* nb ao a)))))))
+      ((:curves :levels)
        `(let* ((a (* (aref opacity ,param) ,(lisp-mask mask)))
                (nr (srgb->linear (lut-lookup luts ,lut (linear->srgb (if (> ao 0.0) (/ kr ao) 0.0)))))
                (ng (srgb->linear (lut-lookup luts ,(+ lut 1) (linear->srgb (if (> ao 0.0) (/ kg ao) 0.0)))))
@@ -86,22 +146,22 @@ shader's lut() does it."
 (defun plan->lisp (plan)
   "A lambda form compositing PLAN into OUT, sRGB RGBA8 straight alpha,
 for the pixels from START below END.  Called with the raster and mask
-pixel vectors, the curve tables, the per-layer opacities and the linear
-background.  Pixels are independent, so disjoint ranges may run at once
+pixel vectors, the curve and levels tables, the per-layer opacities and
+four-number parameters, and the linear background.  Pixels are independent, so disjoint ranges may run at once
 (run-kernel)."
   (let ((tex-ids (remove-duplicates
                   (loop for e in plan when (eql (first e) :raster)
                         collect (getf (rest e) :tex))))
         (mask-ids (remove nil (remove-duplicates
                                (loop for e in plan collect (getf (rest e) :mask))))))
-    `(lambda (rasters masks luts opacity bg-r bg-g bg-b out start end)
+    `(lambda (rasters masks luts opacity params bg-r bg-g bg-b out start end)
        (declare (optimize (speed 3) (safety 0) (debug 0))
                 (type simple-vector rasters masks)
-                (type (simple-array double-float (*)) luts opacity)
+                (type (simple-array double-float (*)) luts opacity params)
                 (type double-float bg-r bg-g bg-b)
                 (type (simple-array (unsigned-byte 8) (*)) out)
                 (type fixnum start end)
-                (ignorable rasters masks luts opacity))
+                (ignorable rasters masks luts opacity params))
        (let ((decode *srgb-decode*)
              ,@(loop for i in tex-ids collect `(,(tex-var i) (svref rasters ,i)))
              ,@(loop for j in mask-ids collect `(,(mask-var j) (svref masks ,j))))

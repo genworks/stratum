@@ -89,7 +89,11 @@ to alter the pictures."
          (kinds (mapcar (lambda (s) (getf s :kind :raster)) (the-object doc layer-specs)))
          (types (mapcar #'type-of (the-object doc layer-list))))
     (check "each spec's kind picks its layer type"
-           (every (lambda (k ty) (eql ty (ecase k (:raster 'raster-layer) (:curves 'curves-layer))))
+           (every (lambda (k ty) (eql ty (ecase k
+                                           (:raster 'raster-layer)
+                                           (:curves 'curves-layer)
+                                           (:levels 'levels-layer)
+                                           (:hue-saturation 'hue-saturation-layer))))
                   kinds types)
            types)
     (the-object doc (set-slot! :layer-specs (reverse (the-object doc layer-specs))))
@@ -117,6 +121,37 @@ to alter the pictures."
   (check "fewer than two points is the identity curve"
          (equal (normalize-points '((0.3 0.3))) *identity-curve*)))
 
+(defun test-adjustments ()
+  (let ((identity (levels-lut 0d0 1d0 1d0 0d0 1d0 256)))
+    (check "neutral levels are the identity table"
+           (loop for i below 256 always (< (abs (- (aref identity i) (/ i 255d0))) 1d-12))))
+  (let ((lifted (levels-lut 0.1d0 0.9d0 1.5d0 0d0 1d0 256)))
+    (check "levels clip below in-black and above in-white, and stay monotone"
+           (and (zerop (aref lifted 0)) (= 1 (aref lifted 255))
+                (zerop (aref lifted 25)) (= 1 (aref lifted 230))
+                (loop for i from 1 below 256 always (>= (aref lifted i) (aref lifted (1- i)))))))
+  (check "neutral hue/saturation leaves colors alone"
+         (loop for (r g b) in '((0.2d0 0.5d0 0.8d0) (0.9d0 0.1d0 0.1d0) (0.5d0 0.5d0 0.5d0)
+                                (1d0 1d0 0d0) (0d0 0d0 0d0))
+               always (multiple-value-bind (nr ng nb) (hue-saturation r g b 0d0 0d0 0d0)
+                        (every (lambda (x y) (< (abs (- x y)) 1d-12))
+                               (list nr ng nb) (list r g b)))))
+  (check "a full turn of hue leaves colors alone"
+         (multiple-value-bind (nr ng nb) (hue-saturation 0.2d0 0.5d0 0.8d0 1d0 0d0 0d0)
+           (every (lambda (x y) (< (abs (- x y)) 1d-12)) (list nr ng nb) '(0.2d0 0.5d0 0.8d0))))
+  (check "saturation -1 makes gray"
+         (multiple-value-bind (nr ng nb) (hue-saturation 0.2d0 0.5d0 0.8d0 0d0 -1d0 0d0)
+           (and (= nr ng nb) (< (abs (- nr 0.5d0)) 1d-12))))
+  (let ((doc (make-sample-document "parity")))
+    (demand doc)
+    (let ((levels (find :levels (the-object doc layer-list) :key (lambda (l) (the-object l kind))))
+          (hue-sat (find :hue-saturation (the-object doc layer-list)
+                         :key (lambda (l) (the-object l kind)))))
+      (the-object levels (set-slot! :gamma 1.6d0))
+      (the-object hue-sat (set-slot! :hue -30d0))
+      (check "levels and hue/saturation edits rebuild nothing" (equal (demand doc) '(1 1))
+             (counts doc)))))
+
 (defun test-golden ()
   (let ((golden (and (probe-file *golden-file*)
                      (with-open-file (s *golden-file*)
@@ -138,7 +173,8 @@ to alter the pictures."
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
-  (dolist (test '(test-rebuilds test-layer-types test-curves test-threads test-golden))
+  (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-threads
+                  test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

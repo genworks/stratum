@@ -24,11 +24,24 @@ slider never recompiles anything, and changing a blend mode rebuilds
 each program exactly once, without any code saying when to.
 `build-counts` on the document records both.
 
-Curves use monotone cubic interpolation (Fritsch–Carlson). The curve
+There are four kinds of layer, each its own class on an `image-layer`
+mixin (the document picks them with `:type (:sequence LIST)`):
+
+- **raster**: pixels and a blend mode;
+- **curves**: a master curve and red, green and blue curves;
+- **levels**: input black and white points, gamma, and output black
+  and white points;
+- **hue/saturation**: hue, saturation and lightness, in HSL.
+
+Curves and levels become per-channel tables (`lut-layer`). Hue and
+saturation travel in a four-number uniform for each layer
+(`u_params`). Every layer can carry a mask.
+
+Curves use monotone cubic interpolation (Fritsch–Carlson). The table
 functions are *dual* (`source/dual.lisp`): each is an ordinary Lisp
 function, and the same form is translated by Parenscript into
-`/stratum/dual.js`, so the browser builds a curve's table while a point
-is dragged exactly as the server does.
+`/stratum/dual.js`. So the browser builds a table while a point or a
+slider is dragged exactly as the server does, equal to the last bit.
 
 Compositing happens in linear light on premultiplied color, following
 the W3C Compositing and Blending formulas (normal, multiply, screen,
@@ -45,7 +58,7 @@ In a Gendl image (an SBCL or CCL room):
 ```
 
 Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
-1080, seven layers), `?doc=parity` (the same stack at 320 × 200) or
+1080, nine layers), `?doc=parity` (the same stack at 320 × 200) or
 `?doc=stress` (3840 × 2160, twenty layers). Drag to pan, use the wheel
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
@@ -59,7 +72,8 @@ empty space to add a point, or double-click a point to remove it.
 | `/stratum/api/mask?doc=N&i=K` | raw R8 of mask K |
 | `/stratum/api/cpu?doc=N` | raw RGBA8 of the CPU render |
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
-| `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "curve", channel, points}` |
+| `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
+| `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 
 ## Tests
 

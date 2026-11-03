@@ -206,6 +206,15 @@ white reveals, and the eraser paints the background color. The shader
 has a second live-stroke stage for masks (`masked()`), the server's
 twin is `composite-mask-stroke!`, and undo covers mask strokes too.
 
+Documents belong to sessions. The page keeps a session id in the
+browser's own storage and sends it on every call, and the server
+keeps a table of documents per session, so two browsers opening
+"demo" get two documents and one's edits never show in the other. A
+call without a session id reaches the shared pool, which Lisp callers
+and the earlier API use as before. A session idle for four hours is
+forgotten with its documents. The Window menu lists the session's open
+documents, the current one checked.
+
 Image ▸ Mode ▸ Grayscale turns every raster layer gray, each pixel's
 luminance in linear light with its alpha kept, and from then on turns
 whatever is painted, filled, placed or pasted to gray on its way in,
@@ -251,7 +260,8 @@ Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete), Arrange (Bring Forward,
 Send Backward), Merge Down (Ctrl+E) and Flatten Image; View ▸ Zoom In,
 Zoom Out,
-Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
+Fit on Screen, Actual Pixels; Window ▸ Layers, Brush Settings and the
+session's open documents.
 
 The tool palette down the left keeps the order other editors use, with
 the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
@@ -336,6 +346,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 | `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null, heal: true or false}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back, or for a mode change `{mode, group: [rectangles]}` |
+| `/stratum/api/documents?s=S` | the session's open documents: `{documents: [names], session}`; every path above takes `&s=S` as well, the session id, and without it reaches the shared pool |
 | `POST /stratum/api/mode?doc=N` | `{mode: "rgb" or "grayscale"}`; answers `{mode, group: [the layers turned, as rectangles]}` |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
 | `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
@@ -377,6 +388,8 @@ It checks:
   brings changes back exactly and in order, that a new change empties
   the redo list, and that undo and redo round trip through the whole
   list;
+- sessions: each session has its own documents and no session is the
+  shared pool; an idle session is swept and comes back empty;
 - Image ▸ Mode: a color turns to its luminance gray with its alpha
   kept; Grayscale turns every raster layer gray in one undo entry and
   rebuilds nothing; in Grayscale a red stroke, a red fill and a
@@ -554,6 +567,9 @@ The self-test checks:
   of its preview, on the parity document's Sky ramp the healed pixel
   keeps the destination's tone rather than the source's, parity, and
   undo gives the layer back;
+- sessions: the page has a session id, a document made here is listed
+  for this session and not for another nor for the shared pool, and
+  Close drops it;
 - Image ▸ Mode ▸ Grayscale on the document: every pixel of a layer and
   the swatches turn gray, the Mode menu checks Grayscale, parity holds,
   and one undo brings the color and the mode back exactly;
@@ -596,9 +612,8 @@ on a 4K layer copies the layer's 33 MB once; undo keeps whole
 rectangles until the tile store exists; and the dab is a round, soft
 disc, with no texture, tilt or scatter yet.
 
-Smaller items still to do: per-session documents (today one document is
-shared per name), and premultiplying before mipmap generation to remove
-edge fringes when zoomed out.  The CPU render runs on
+Smaller items still to do: premultiplying before mipmap generation to
+remove edge fringes when zoomed out.  The CPU render runs on
 `*render-threads*` threads (8 by default): 2 s for the 4K twenty-layer
 document, against 10 s on one thread.
 

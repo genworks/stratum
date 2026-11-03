@@ -30,10 +30,26 @@
   var qs = new URLSearchParams(location.search);
   var docName = qs.get('doc') || 'demo';
 
-  function api(path) {
+  // This browser's session: an id kept in its own storage and sent on
+  // every call, so the server keeps this browser's documents apart
+  // from another's.  Without storage the id lasts the page.
+  var session = null;
+  try {
+    session = localStorage.getItem('stratum-session');
+    if (!session) {
+      session = 's' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem('stratum-session', session);
+    }
+  } catch (e) {}
+  if (!session) session = 's' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  S.session = session;
+  S.documents = null;
+
+  function apiFor(name, path) {
     return '/stratum/api/' + path + (path.indexOf('?') < 0 ? '?' : '&') +
-      'doc=' + encodeURIComponent(docName);
+      'doc=' + encodeURIComponent(name) + '&s=' + encodeURIComponent(S.session);
   }
+  function api(path) { return apiFor(docName, path); }
 
   var VERT = '#version 300 es\n' +
     'const vec2 P[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n' +
@@ -2247,7 +2263,11 @@
       { title: 'Window', items: [
         { label: 'Layers', check: panelShown('#stratum-panel'), run: function () { togglePanel('#stratum-panel'); } },
         { label: 'Brush Settings', check: panelShown('#stratum-panel .st-brush'),
-          run: function () { togglePanel('#stratum-panel .st-brush'); } }] },
+          run: function () { togglePanel('#stratum-panel .st-brush'); } },
+        '-'].concat((S.documents || [docName]).map(function (n) {
+          // this session's open documents, the current one checked
+          return { label: n, check: n === docName, run: function () { location.search = '?doc=' + encodeURIComponent(n); } };
+        })) },
       { title: 'Help', items: [
         { label: 'About Stratum', run: function () {
           status('Stratum: a layered image editor in Common Lisp, on Gendl.  AGPL-3.0-or-later.'); } },
@@ -3161,11 +3181,11 @@
         S.setActiveLayer(active);
         return S.openImage(decoded, 'selftest');
       }).then(function (res) {
-        return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(res.doc)).then(function (d) {
+        return fetchJSON(apiFor(res.doc, 'doc')).then(function (d) {
           check('an opened image is a new document of its size with one Background layer',
                 d.width === w && d.height === h && d.layers.length === 1 && d.layers[0].name === 'Background',
                 { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
-          return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
+          return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
         });
       }).then(function () {
         // The same PNG file sent whole: the server's own reader decodes
@@ -3173,10 +3193,10 @@
         return pngBlob.arrayBuffer().then(function (buf) {
           return postBytes('open?name=pngtest', new Uint8Array(buf));
         }).then(function (res) {
-          return fetchBytes('/stratum/api/raster?doc=' + encodeURIComponent(res.doc) + '&i=0').then(function (b) {
+          return fetchBytes(apiFor(res.doc, 'raster?i=0')).then(function (b) {
             check('the server reads a PNG file to the bytes the browser decodes',
                   res.width === w && res.height === h && same(b, want), { width: res.width, height: res.height, bytes: b.length });
-            return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
+            return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
           });
         });
       });
@@ -3519,9 +3539,9 @@
       ctx.fillStyle = '#4080c0';
       ctx.fillRect(0, 0, w, h);
       var name = null;
-      function sized(d) { return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(d)).then(function (j) { return [j.width, j.height]; }); }
+      function sized(d) { return fetchJSON(apiFor(d, 'doc')).then(function (j) { return [j.width, j.height]; }); }
       function resize(body) {
-        return fetchJSON('/stratum/api/resize?doc=' + encodeURIComponent(name),
+        return fetchJSON(apiFor(name, 'resize'),
                          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       }
       var dialog = S.openImageSize();
@@ -3533,7 +3553,7 @@
         return S.openImage(img, 'sizetest');
       }).then(function (res) {
         name = res.doc;
-        return fetchJSON('/stratum/api/select?doc=' + encodeURIComponent(name),
+        return fetchJSON(apiFor(name, 'select'),
                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
                            body: JSON.stringify({ op: 'rect', x: 10, y: 4, w: 20, h: 16 }) });
       }).then(function () { return resize({ op: 'crop' }); })
@@ -3542,7 +3562,7 @@
         .then(function () { return sized(name).then(function (s) { check('Image Size remakes the document at the new size', s[0] === 60 && s[1] === 48, s); }); })
         .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
         .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
-        .then(function () { return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' }); });
+        .then(function () { return fetchJSON(apiFor(name, 'close'), { method: 'POST' }); });
     }).then(function () {
       // File > New makes a document of the asked size with a white or a
       // transparent Background; the Crop tool's drag leaves a box that
@@ -3556,8 +3576,8 @@
       var made = null;
       return postJSON('new', JSON.stringify({ name: 'newtest', width: 64, height: 48, background: 'transparent' })).then(function (res) {
         made = res.doc;
-        return Promise.all([fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(made)),
-                            fetchBytes('/stratum/api/raster?doc=' + encodeURIComponent(made) + '&i=0')]);
+        return Promise.all([fetchJSON(apiFor(made, 'doc')),
+                            fetchBytes(apiFor(made, 'raster?i=0'))]);
       }).then(function (pair) {
         var d = pair[0], px = pair[1], clear = true;
         for (var k = 3; k < px.length; k += 4) if (px[k] !== 0) clear = false;
@@ -3577,12 +3597,12 @@
         S.cancelCrop();
         S.setTool(saved);
         check('the Crop tool leaves a box that Escape drops', box && box.w === 100 && box.h === 60 && !S.cropBox, box);
-        return fetchJSON('/stratum/api/resize?doc=' + encodeURIComponent(made),
+        return fetchJSON(apiFor(made, 'resize'),
                          { method: 'POST', headers: { 'Content-Type': 'application/json' },
                            body: JSON.stringify({ op: 'crop-rect', x: 10, y: 8, w: 30, h: 20 }) });
       }).then(function (res) {
         check('a crop to a rectangle remakes the document at that size', res.width === 30 && res.height === 20, res);
-        return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(made), { method: 'POST' });
+        return fetchJSON(apiFor(made, 'close'), { method: 'POST' });
       });
     }).then(function () {
       // The Gradient tool on the lowest raster layer: a drag across it
@@ -3776,6 +3796,27 @@
         }).then(restore, function (e) { restore(); throw e; });
       });
     }).then(function () {
+      // Sessions: this browser's id goes on every call, and the server
+      // keeps a document table per session, so a document made here is
+      // listed for this session and not for another, nor for the shared
+      // pool a call without a session reaches; Close drops it.
+      var other = 'other-' + Math.random().toString(36).slice(2), made = null;
+      check('the page has a session id', typeof S.session === 'string' && S.session.length > 0, S.session);
+      return postJSON('new', JSON.stringify({ name: 'sesstest', width: 8, height: 8, background: 'white' })).then(function (res) {
+        made = res.doc;
+        return Promise.all([fetchJSON(api('documents')),
+                            fetchJSON('/stratum/api/documents?s=' + encodeURIComponent(other)),
+                            fetchJSON('/stratum/api/documents')]);
+      }).then(function (lists) {
+        var mine = lists[0].documents, theirs = lists[1].documents, shared = lists[2].documents;
+        check('a document made here is listed for this session and not for another, nor for the shared pool',
+              mine.indexOf(made) >= 0 && mine.indexOf(docName) >= 0 && theirs.indexOf(made) < 0 && shared.indexOf(made) < 0,
+              { mine: mine, theirs: theirs, shared: shared });
+        return fetchJSON(apiFor(made, 'close'), { method: 'POST' });
+      }).then(function () { return fetchJSON(api('documents')); }).then(function (r) {
+        check('Close drops it from the session', r.documents.indexOf(made) < 0, r.documents);
+      });
+    }).then(function () {
       // Image > Mode > Grayscale on the document: every raster layer
       // turns gray and the swatches with it, parity holds, the Mode
       // menu shows the check; one undo brings the color and the mode
@@ -3823,14 +3864,14 @@
       ctx.fillRect(0, 0, w, h);
       var name = null;
       function op(body) {
-        return fetchJSON('/stratum/api/layers?doc=' + encodeURIComponent(name),
+        return fetchJSON(apiFor(name, 'layers'),
                          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       }
-      function layers() { return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(name)).then(function (d) { return d.layers; }); }
+      function layers() { return fetchJSON(apiFor(name, 'doc')).then(function (d) { return d.layers; }); }
       return new Promise(function (r) { c2.toBlob(r, 'image/png'); }).then(S.decodeImage).then(function (img) {
         return S.openImage(img, 'mergetest').then(function (res) {
           name = res.doc;
-          return fetch('/stratum/api/place?doc=' + encodeURIComponent(name) + '&name=top&w=' + w + '&h=' + h + '&above=0',
+          return fetch(apiFor(name, 'place?name=top&w=' + w + '&h=' + h + '&above=0'),
                        { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: img.bytes });
         });
       }).then(function () { return op({ op: 'merge', layer: 1 }); })
@@ -3841,7 +3882,7 @@
         .then(function () { return op({ op: 'flatten' }); })
         .then(function () { return layers().then(function (L) {
           check('Flatten leaves one Background layer', L.length === 1 && L[0].name === 'Background' && L[0].kind === 'raster', L.map(function (x) { return x.name; }));
-          return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' });
+          return fetchJSON(apiFor(name, 'close'), { method: 'POST' });
         }); });
     }).then(function () {
       // The native file: Save brings a .stratum file of this document;
@@ -3854,17 +3895,17 @@
         return postBytes('load?name=roundtrip', bytes);
       }).then(function (res) {
         loaded = res.doc;
-        return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(loaded));
+        return fetchJSON(apiFor(loaded, 'doc'));
       }).then(function (d) {
         var same = d.width === doc.width && d.height === doc.height && d.layers.length === doc.layers.length &&
           d.layers.every(function (L, k) { return L.name === doc.layers[k].name && L.kind === doc.layers[k].kind; });
         check('loaded back, it is the same stack', same, { width: d.width, height: d.height, layers: d.layers.length });
-        return Promise.all([fetchBytes(api('cpu')), fetchBytes('/stratum/api/cpu?doc=' + encodeURIComponent(loaded))]);
+        return Promise.all([fetchBytes(api('cpu')), fetchBytes(apiFor(loaded, 'cpu'))]);
       }).then(function (pair) {
         var same = pair[0].length === pair[1].length;
         for (var k = 0; same && k < pair[0].length; k++) if (pair[0][k] !== pair[1][k]) same = false;
         check('loaded back, it renders byte for byte the same', same, { bytes: pair[0].length });
-        return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(loaded), { method: 'POST' });
+        return fetchJSON(apiFor(loaded, 'close'), { method: 'POST' });
       });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
@@ -3938,6 +3979,7 @@
       installTools();
       installMenubar();
       S.ready = true;
+      fetchJSON(api('documents')).then(function (r) { S.documents = r.documents; }).catch(function () {});
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
     }).catch(function (e) {
       S.error = String(e && e.message || e);

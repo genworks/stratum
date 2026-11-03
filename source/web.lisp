@@ -26,10 +26,43 @@
                    :directory (butlast (pathname-directory base))
                    :defaults base)))
 
-(defvar *documents* (make-hash-table :test 'equal))
+(defvar *documents* (make-hash-table :test 'equal)
+  "The documents of the session being served, by name.  Bound around
+every request to its session's table (request-session-table); the
+global value is the shared pool, which a request without a session
+(?s=) and Lisp callers use.")
+
+(defvar *sessions* (make-hash-table :test 'equal)
+  "Session id -> (documents-table . last-touched universal time).  A
+browser keeps its id in its own storage and sends it as ?s= on every
+call, so two browsers opening \"demo\" get two documents.")
+
+(defparameter *session-idle-seconds* (* 4 3600)
+  "A session untouched this long is forgotten, documents and all.")
 
 (defvar *lock* (bt:make-lock "stratum")
   "Held around every request: one GDL tree, many server threads.")
+
+(defun sweep-sessions! ()
+  "Forget every session idle longer than *session-idle-seconds*."
+  (let ((now (get-universal-time)) (gone '()))
+    (maphash (lambda (id cell) (when (> (- now (cdr cell)) *session-idle-seconds*) (push id gone))) *sessions*)
+    (dolist (id gone) (remhash id *sessions*))
+    gone))
+
+(defun session-table (id)
+  "The documents table of session ID, made on first sight and touched
+now; the shared pool for no id."
+  (if (or (null id) (string= id ""))
+      *documents*
+      (let ((cell (or (gethash id *sessions*)
+                      (setf (gethash id *sessions*) (cons (make-hash-table :test 'equal) 0)))))
+        (setf (cdr cell) (get-universal-time))
+        (sweep-sessions!)
+        (car cell))))
+
+(defun request-session-table (req)
+  (session-table (net.aserve:request-query-value "s" req)))
 
 (defun find-document (name)
   (or (gethash name *documents*)
@@ -541,6 +574,14 @@ under its name (?name=); answers {doc, width, height}."
       (setf (gethash name *documents*) doc)
       (json-string (json-object "doc" name "width" w "height" h)))))
 
+(defun handle-documents (req)
+  "The names of the session's open documents, sorted; {documents,
+session}."
+  (let ((names '()))
+    (maphash (lambda (name doc) (declare (ignore doc)) (push name names)) *documents*)
+    (json-string (json-object "documents" (coerce (sort names #'string<) 'vector)
+                              "session" (or (net.aserve:request-query-value "s" req) "")))))
+
 (defun handle-close (req)
   "Forget the named document; a sample is remade on its next request."
   (let ((name (net.aserve:request-query-value "doc" req)))
@@ -705,7 +746,9 @@ goes back as a 500 carrying the condition's text."
                                  :content-type content-type
                                  :function (lambda (req ent)
                                              (reply req ent content-type
-                                                    (lambda () (funcall fn req)))))))
+                                                    (lambda ()
+                                                      (let ((*documents* (request-session-table req)))
+                                                        (funcall fn req))))))))
       (pub "/stratum" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/viewer.js" "application/javascript"
@@ -765,6 +808,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/filter" "application/json" #'handle-filter)
       (pub "/stratum/api/gradient" "application/json" #'handle-gradient)
       (pub "/stratum/api/mode" "application/json" #'handle-mode)
+      (pub "/stratum/api/documents" "application/json" #'handle-documents)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)

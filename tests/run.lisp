@@ -1194,6 +1194,25 @@ to alter the pictures."
                     (= (length (the-object doc (render-cpu)))
                        (* 4 (the-object doc doc-width) (the-object doc doc-height)))))))))
 
+(defun test-sessions ()
+  (let ((a (session-table "test-a")) (b (session-table "test-b"))
+        (shared-parity (find-document "parity")))
+    (check "each session has its own documents; no session is the shared pool"
+           (and (not (eq a b)) (eq a (session-table "test-a"))
+                (eq *documents* (session-table "")) (eq *documents* (session-table nil))
+                (let ((*documents* a))
+                  (find-document "parity")
+                  (and (gethash "parity" a) (not (gethash "parity" b))
+                       (not (eq (gethash "parity" a) shared-parity))))))
+    (check "an idle session is swept, and comes back empty"
+           (progn (setf (cdr (gethash "test-a" *sessions*)) (- (get-universal-time) (* 2 *session-idle-seconds*)))
+                  (sweep-sessions!)
+                  (and (null (gethash "test-a" *sessions*))
+                       (gethash "test-b" *sessions*)
+                       (null (gethash "parity" (session-table "test-a"))))))
+    (remhash "test-a" *sessions*)
+    (remhash "test-b" *sessions*)))
+
 (defun test-threads ()
   (let* ((doc (make-sample-document "parity"))
          (threaded (let ((*render-threads* 8)) (the-object doc (render-cpu))))
@@ -1206,7 +1225,7 @@ to alter the pictures."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
-                  test-layers test-files test-png
+                  test-layers test-files test-png test-sessions
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

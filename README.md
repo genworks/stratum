@@ -123,6 +123,18 @@ masks on their own scale) or placed on the new canvas around an
 anchor, and the page reloads. A cropped document renders as exactly
 that rectangle of the original, edits and all.
 
+Filters bake into one raster layer inside the selection, with the
+whole layer on the undo list, and preview through a replacement
+texture: the viewer computes the filtered layer itself and the main
+shader's fifth live stage swaps it in for the layer's pixels where the
+selection covers. Gaussian Blur (`source/filter.lisp`) runs the
+server's blur shader in two passes into float textures, rows then
+columns, and the server's `gaussian-blur-rgba` is its twin: the same
+discrete kernel over three sigmas, premultiplied linear light, edges
+clamped, the intermediate in single floats as the GPU keeps it,
+threaded across rows and then columns. A browser without float render
+targets gets no preview and still bakes the filter on OK.
+
 Free Transform (Ctrl+T) is the same floating stage with a matrix in
 place of the offset: a box with eight handles around the selection or
 the layer; drag inside to move, a handle to scale about the center
@@ -170,7 +182,7 @@ Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
 (Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
-Inverse (Ctrl+Shift+I); Layer ▸ New ▸ Layer, Duplicate Layer,
+Inverse (Ctrl+Shift+I); Filter ▸ Blur ▸ Gaussian Blur; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
 Send Backward); View ▸ Zoom In, Zoom Out,
@@ -248,6 +260,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/transform?doc=N` | `{layer, matrix: [a, b, c, d, e, f]}` (x′ = ax + by + c, y′ = dx + ey + f): the selected pixels resampled through it; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
+| `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", radius}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
@@ -295,6 +308,10 @@ It checks:
   translation transforms as a move does, a singular matrix is refused,
   the selection goes through the matrix, and a 2× scale keeps the
   interior opaque while the edge feathers;
+- filters: a blurred dot spreads symmetrically with its center the
+  brightest, a uniform layer blurs to itself, a blur changes the layer
+  and rebuilds nothing, undoes exactly, and under a selection changes
+  the selected pixels only;
 - the native file: a saved document loads back rendering the same with
   its edits, strokes and masks, is smaller than its pixels, and a file
   that is not a Stratum file or a header that tries to evaluate is
@@ -372,6 +389,9 @@ The self-test checks:
   preview with the selection moving along, parity, undo; Copy and
   Paste making a layer above with the same bytes where they came from;
   Cut clearing them; undo;
+- Gaussian Blur on the Discs layer: previewed through the blur passes
+  and the replacement stage, OK baking what the preview showed within
+  two levels, parity, undo exact;
 - Free Transform: a rectangle scaled, turned and moved, previewed and
   committed within two levels, the selection following, parity, undo,
   and Escape leaving the picture alone;

@@ -538,6 +538,44 @@ to alter the pictures."
                                   nil)
                (error () t))))))
 
+(defun test-filter ()
+  (let ((dot (let ((p (make-rgba 9 9)))
+               (let ((o (* 4 (+ 4 (* 9 4)))))
+                 (setf (aref p o) 255 (aref p (+ o 1)) 255 (aref p (+ o 2)) 255 (aref p (+ o 3)) 255))
+               p)))
+    (let ((b (gaussian-blur-rgba dot 9 9 1d0)))
+      (check "a blurred dot spreads symmetrically with its center the brightest"
+             (flet ((a (x y) (aref b (+ 3 (* 4 (+ x (* 9 y)))))))
+               (and (> (a 4 4) (a 3 4)) (= (a 3 4) (a 5 4) (a 4 3) (a 4 5))
+                    (> (a 3 4) 0) (= 0 (a 0 0))))
+             (coerce b 'list))))
+  (let ((flat (let ((p (make-rgba 7 5)))
+                (dotimes (i 35 p)
+                  (let ((o (* 4 i)))
+                    (setf (aref p o) 90 (aref p (+ o 1)) 140 (aref p (+ o 2)) 200 (aref p (+ o 3)) 255))))))
+    (check "a uniform layer blurs to itself, edges clamped"
+           (equalp (gaussian-blur-rgba flat 7 5 3d0) flat)))
+  (let* ((doc (make-sample-document "parity"))
+         (discs (the-object doc (layer 4)))
+         (w 320)
+         (before (copy-seq (the-object discs pixels))))
+    (demand doc)
+    (check "a blur changes the layer and rebuilds nothing"
+           (progn (filter-layer! discs :gaussian-blur :radius 2)
+                  (and (not (equalp before (the-object discs pixels)))
+                       (equal (demand doc) '(1 1)))))
+    (check "undo gives the layer back after a blur"
+           (and (undo-stroke! doc) (equalp before (the-object discs pixels))))
+    (check "under a selection a blur changes the selected pixels only"
+           (progn (select-rect! doc 100 60 60 40)
+                  (filter-layer! discs :gaussian-blur :radius 2)
+                  (let ((after (the-object discs pixels)))
+                    (and (not (equalp before after))
+                         (loop for i below (length before)
+                               for px = (mod (floor i 4) w) for py = (floor (floor i 4) w)
+                               always (or (and (<= 100 px 159) (<= 60 py 99))
+                                          (= (aref before i) (aref after i))))))))))
+
 (defun test-resize ()
   (let ((image (let ((p (make-rgba 4 3)))
                  (dotimes (i 12 p)
@@ -683,7 +721,7 @@ to alter the pictures."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-masks test-adjust test-selection test-floating test-transform test-resize
-                  test-file-format
+                  test-file-format test-filter
                   test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)

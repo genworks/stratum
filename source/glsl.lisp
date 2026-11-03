@@ -54,6 +54,8 @@ uniform int u_selection_on;
 uniform float u_ants;
 uniform int u_float_layer;
 uniform mat3 u_float_inv;
+uniform sampler2D u_replace;
+uniform int u_replace_layer;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -196,6 +198,10 @@ void main() {
        ;; the cut leaves (alpha times one minus the selection) with the
        ;; copy, sampled through the inverse matrix, composited over it,
        ;; as move-pixels! and transform-pixels! (selection.lisp) commit.
+       ;; Then the replacement (u_replace_layer, idle at -1): a filter's
+       ;; preview, computed by the viewer into a texture of its own,
+       ;; swapped in for the layer's pixels where the selection covers,
+       ;; as filter-layer! (filter.lisp) will bake it.
        (format nil "  // layer ~d: raster, ~(~a~)
   s = layer_px(~d, p);
   if (u_float_layer == ~:*~d) {
@@ -206,6 +212,13 @@ void main() {
     float na = m.a + ba * (1.0 - m.a);
     s.rgb = na > 0.0 ? (m.rgb + s.rgb * ba * (1.0 - m.a)) / na : vec3(0.0);
     s.a = na;
+  }
+  if (u_replace_layer == ~:*~d) {
+    vec4 r = texelFetch(u_replace, ivec2(p), 0);
+    float sv = u_selection_on == 1 ? selected(p) : 1.0;
+    vec3 pm = mix(s.rgb * s.a, r.rgb * r.a, sv);
+    float ra = mix(s.a, r.a, sv);
+    s = vec4(ra > 0.0 ? pm / ra : vec3(0.0), ra);
   }
   if (u_stroke_layer == ~:*~d) {
     float cv = stroke_px(p) * u_stroke_color.a;
@@ -247,6 +260,46 @@ void main() {
   co = co * (1.0 - a) + adj * ao * a;
 "
                param param (glsl-mask mask) param)))))
+
+(defparameter *blur-glsl* "#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+precision highp sampler2DArray;
+uniform sampler2DArray u_layers;
+uniform sampler2D u_src;
+uniform int u_layer;
+uniform int u_pass;
+uniform vec2 u_size;
+uniform float u_sigma;
+uniform int u_extent;
+out vec4 o_color;
+// Pass 0 reads the layer's texels as premultiplied linear and blurs
+// along rows; pass 1 reads pass 0's output and blurs along columns,
+// giving straight linear RGBA.  Edges are clamped.  The twin of
+// gaussian-blur-rgba (filter.lisp).
+vec4 fetch(ivec2 c) {
+  c = clamp(c, ivec2(0), ivec2(u_size) - 1);
+  if (u_pass == 0) {
+    vec4 px = texelFetch(u_layers, ivec3(c, u_layer), 0);
+    return vec4(px.rgb * px.a, px.a);
+  }
+  return texelFetch(u_src, c, 0);
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = -u_extent; i <= u_extent; i++) {
+    float w = exp(-float(i * i) / (2.0 * u_sigma * u_sigma));
+    acc += w * fetch(u_pass == 0 ? p + ivec2(i, 0) : p + ivec2(0, i));
+    wsum += w;
+  }
+  acc /= wsum;
+  o_color = u_pass == 0 ? acc : vec4(acc.a > 0.0 ? acc.rgb / acc.a : vec3(0.0), acc.a);
+}
+"
+  "The separable Gaussian blur the viewer runs for a filter preview.")
 
 (defun plan->glsl (plan)
   "The fragment shader that composites PLAN, a list of plan entries

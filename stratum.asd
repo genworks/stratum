@@ -14,5 +14,5 @@
   (:file "source/cpu") (:file "source/document")
   (:file "source/brush") (:file "source/selection")
   (:file "source/resize") (:file "source/file")
-  (:file "source/samples") (:file "source/png") (:file "source/web")
-  (:file "source/stubs")))
+  (:file "source/filter") (:file "source/samples")
+  (:file "source/png") (:file "source/web") (:file "source/stubs")))

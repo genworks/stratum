@@ -86,6 +86,7 @@
    "height" (the-object doc doc-height)
    "planVersion" (the-object doc plan-version)
    "shader" (the-object doc shader-source)
+   "blurShader" *blur-glsl*
    "shaderBuilds" (aref (the-object doc build-counts) 0)
    "kernelBuilds" (aref (the-object doc build-counts) 1)
    "rasterCount" (length (the-object doc raster-layers))
@@ -313,6 +314,17 @@ name; answers {width, height} and the page reloads."
         (setf (gethash name *documents*) new)
         (json-string (json-object "width" (the-object new doc-width)
                                   "height" (the-object new doc-height)))))))
+
+(defun handle-filter (req)
+  "Filter > ...: {layer, kind: \"gaussian-blur\", radius} baked into the
+layer inside the selection; answers the whole layer as a rectangle."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (kind (find (gethash "kind" body) '(:gaussian-blur) :test #'string-equal)))
+    (unless kind (error "Unknown filter ~s." (gethash "kind" body)))
+    (json-string (rect-json doc layer :layer
+                            (filter-layer! layer kind :radius (or (gethash "radius" body) 1))))))
 
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
@@ -660,6 +672,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/redo" "application/json" #'handle-redo)
       (pub "/stratum/api/layers" "application/json" #'handle-layers)
       (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
+      (pub "/stratum/api/filter" "application/json" #'handle-filter)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)

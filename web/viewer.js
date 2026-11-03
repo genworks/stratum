@@ -79,7 +79,8 @@
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
      'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
-     'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv'].forEach(function (n) {
+     'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv',
+     'u_replace', 'u_replace_layer'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -248,6 +249,10 @@
     gl.uniform1f(uni.u_ants, antsPhase);
     gl.uniform1i(uni.u_float_layer, floating.layer);
     gl.uniformMatrix3fv(uni.u_float_inv, false, floating.inv);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, replace.layer >= 0 ? replace.texture : texIdle);
+    gl.uniform1i(uni.u_replace, 5);
+    gl.uniform1i(uni.u_replace_layer, replace.layer);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -559,6 +564,8 @@
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) { e.preventDefault(); S.clear(); }
       else if (e.key === 'Escape' && S.fillDialog) S.fillDialog.cancel();
       else if (e.key === 'Enter' && S.fillDialog) S.fillDialog.ok();
+      else if (e.key === 'Escape' && S.filterDialog) S.filterDialog.cancel();
+      else if (e.key === 'Enter' && S.filterDialog) S.filterDialog.ok();
       else if (e.key === 'Escape' && S.adjustDialog) S.adjustDialog.cancel();
       else if (e.key === 'Enter' && S.adjustDialog) S.adjustDialog.ok();
       else if (mod && e.shiftKey && key === 's') { e.preventDefault(); S.saveAs(); }
@@ -1870,7 +1877,8 @@
         { label: 'Color Range...' },
         { label: 'Feather...', key: 'Shift+F6' }] },
       { title: 'Filter', items: [
-        { label: 'Blur', sub: [{ label: 'Gaussian Blur...' }] },
+        { label: 'Blur', sub: [{ label: 'Gaussian Blur...', enabled: rasterActive,
+                                 run: function () { S.openFilter('gaussian-blur'); } }] },
         { label: 'Sharpen', sub: [{ label: 'Unsharp Mask...' }] },
         { label: 'Noise', sub: [{ label: 'Add Noise...' }] }] },
       { title: 'View', items: [
@@ -2014,7 +2022,8 @@
   var SETTING_RANGES = {
     'in-black': [0, 1, 0.005], 'in-white': [0, 1, 0.005], gamma: [0.2, 4, 0.01],
     'out-black': [0, 1, 0.005], 'out-white': [0, 1, 0.005],
-    hue: [-180, 180, 1], saturation: [-1, 1, 0.01], lightness: [-1, 1, 0.01]
+    hue: [-180, 180, 1], saturation: [-1, 1, 0.01], lightness: [-1, 1, 0.01],
+    radius: [0.1, 100, 0.1]
   };
 
   // One slider for a levels or hue/saturation setting.  A move changes
@@ -2124,6 +2133,139 @@
     paint();
     return wrap;
   }
+
+  // ---- Filters ------------------------------------------------------------
+  //
+  // A filter's preview is a texture the viewer computes itself and the
+  // main shader swaps in for the layer's pixels (the replacement
+  // stage, u_replace_layer), blended by the selection.  Gaussian Blur
+  // runs the server's shader (doc.blurShader) in two passes into float
+  // textures, rows then columns, the same kernel as
+  // gaussian-blur-rgba; OK sends the radius and the server bakes it.
+  // Float render targets need EXT_color_buffer_float; without it the
+  // preview is off and OK still applies the filter.
+
+  var replace = { layer: -1, texture: null }, texIdle = null;
+  var blurProg = null, blurUni = {}, blurTex = [null, null], blurFbo = [null, null], floatRenderable = null;
+  S.filterPreviewSupported = null;
+
+  function ensureBlur() {
+    if (floatRenderable === null) {
+      floatRenderable = !!gl.getExtension('EXT_color_buffer_float');
+      S.filterPreviewSupported = floatRenderable;
+    }
+    if (!floatRenderable) return false;
+    if (!blurProg) {
+      var p = gl.createProgram();
+      var vs = compileShader(gl.VERTEX_SHADER, VERT), fs = compileShader(gl.FRAGMENT_SHADER, doc.blurShader);
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('blur link: ' + gl.getProgramInfoLog(p));
+      blurProg = p;
+      ['u_layers', 'u_src', 'u_layer', 'u_pass', 'u_size', 'u_sigma', 'u_extent'].forEach(function (n) {
+        blurUni[n] = gl.getUniformLocation(p, n);
+      });
+    }
+    if (!blurTex[0] || blurTex[0].w !== doc.width || blurTex[0].h !== doc.height) {
+      for (var k = 0; k < 2; k++) {
+        if (blurTex[k]) { gl.deleteTexture(blurTex[k]); gl.deleteFramebuffer(blurFbo[k]); }
+        var t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, doc.width, doc.height);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        t.w = doc.width;
+        t.h = doc.height;
+        var f = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        blurTex[k] = t;
+        blurFbo[k] = f;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    return true;
+  }
+
+  // Blur layer TEXINDEX by SIGMA into the replacement texture.
+  function runBlur(texIndex, sigma) {
+    if (!ensureBlur()) return false;
+    var extent = Math.max(1, Math.ceil(3 * sigma));
+    gl.useProgram(blurProg);
+    gl.bindVertexArray(vao);
+    gl.viewport(0, 0, doc.width, doc.height);
+    for (var pass = 0; pass < 2; pass++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo[pass]);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
+      gl.uniform1i(blurUni.u_layers, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, pass === 0 ? texIdle : blurTex[0]);
+      gl.uniform1i(blurUni.u_src, 1);
+      gl.uniform1i(blurUni.u_layer, texIndex);
+      gl.uniform1i(blurUni.u_pass, pass);
+      gl.uniform2f(blurUni.u_size, doc.width, doc.height);
+      gl.uniform1f(blurUni.u_sigma, sigma);
+      gl.uniform1i(blurUni.u_extent, extent);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    replace.texture = blurTex[1];
+    replace.layer = texIndex;
+    requestDraw();
+    return true;
+  }
+
+  function clearReplace() {
+    replace.layer = -1;
+    requestDraw();
+  }
+
+  var FILTER_TITLES = { 'gaussian-blur': 'Gaussian Blur' };
+
+  S.openFilter = function (kind) {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer to filter'); return null; }
+    if (S.filterDialog) S.filterDialog.cancel();
+    var state = { radius: 4 };
+    var controls = el('div');
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: FILTER_TITLES[kind] + ': ' + L.name }), controls]);
+    function refresh() {
+      if (!runBlur(L.texIndex, Math.max(0.1, state.radius))) {
+        status('no float render targets here: the preview is off, OK still applies the filter');
+      }
+    }
+    function buildControls() {
+      controls.textContent = '';
+      controls.appendChild(settingSlider(state, 'radius', refresh));
+    }
+    buildControls();
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.filterDialog = {
+      kind: kind, state: state, layer: L.index,
+      set: function (changes) { Object.assign(state, changes); buildControls(); refresh(); },
+      cancel: function () { box.remove(); S.filterDialog = null; clearReplace(); },
+      ok: function () {
+        box.remove();
+        S.filterDialog = null;
+        return S.strokesSettled().then(function () {
+          return postJSON('filter', JSON.stringify({ layer: L.index, kind: kind, radius: state.radius }));
+        }).then(tookRect)
+          .then(function () { clearReplace(); status(); },
+                function (e) { clearReplace(); status('filter failed: ' + e.message); });
+      }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    refresh();
+    return dialog;
+  };
 
   // ---- Image > Adjustments ------------------------------------------------
   //
@@ -2646,6 +2788,35 @@
         S.setActiveLayer(active, false);
       });
     }).then(function () {
+      // Filter > Blur > Gaussian Blur on the Discs layer, whose edges
+      // show a blur: previewed through the blur passes and the
+      // replacement stage, baked by the server with the same kernel;
+      // parity; undo.
+      var active = S.activeLayer, discs = null;
+      doc.layers.forEach(function (L) { if (!discs && L.kind === 'raster' && /disc/i.test(L.name)) discs = L; });
+      if (!discs) return null;
+      S.setActiveLayer(discs.index, false);
+      var before = S.renderExact();
+      var dialog = S.openFilter('gaussian-blur');
+      dialog.set({ radius: 3 });
+      var previewed = S.renderExact(), previews = S.filterPreviewSupported;
+      check('Gaussian Blur previews on its layer', !previews || renderDiff(before, previewed).maxDiff > 0, { preview: previews });
+      return dialog.ok().then(function () {
+        var after = S.renderExact();
+        check('the baked blur changed the picture', renderDiff(before, after).maxDiff > 0);
+        if (previews) {
+          var d = renderDiff(previewed, after);
+          check('OK bakes what the blur preview showed', d.maxDiff <= 2, d);
+        }
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a blur', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the layer back after a blur', renderDiff(before, S.renderExact()).maxDiff === 0);
+        S.setActiveLayer(active, false);
+      });
+    }).then(function () {
       // The selection: a marquee rectangle through the tool, a stroke
       // under it that changes nothing outside it and still matches the
       // server's coverage to the last bit, Fill inside it, undo, Inverse
@@ -2911,6 +3082,9 @@
     vao = gl.createVertexArray();
     strokeTexture(1, 1);
     selectionTexture(1, 1);
+    texIdle = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texIdle);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1, 1);
     installNavigation();
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));

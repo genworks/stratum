@@ -349,6 +349,25 @@ the selection; answers the whole layer as a rectangle."
     (unless kind (error "Unknown filter ~s." (gethash "kind" body)))
     (json-string (rect-json doc layer :layer (filter-layer! layer kind :settings settings)))))
 
+(defun handle-gradient (req)
+  "The Gradient tool's commit: {layer, x0, y0, x1, y1, start: [r, g,
+b, a], end: [r, g, b, a], shape: \"linear\" | \"reflected\" | \"radial\"
+| \"diamond\" | \"angle\", opacity} laid over the layer inside the
+selection; answers the whole layer as a rectangle."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (shape (find (or (gethash "shape" body) "linear") *gradient-shapes* :test #'string-equal)))
+    (unless shape (error "Unknown gradient shape ~s." (gethash "shape" body)))
+    (json-string
+     (rect-json doc layer :layer
+                (gradient-layer! layer (gethash "x0" body) (gethash "y0" body)
+                                 (gethash "x1" body) (gethash "y1" body)
+                                 :shape shape
+                                 :start (or (gethash "start" body) '(0 0 0 255))
+                                 :end (or (gethash "end" body) '(255 255 255 255))
+                                 :opacity (or (gethash "opacity" body) 1))))))
+
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
 \"hue-saturation\", settings: {name: value}, curves: {channel: points}}
@@ -713,6 +732,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/layers" "application/json" #'handle-layers)
       (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
       (pub "/stratum/api/filter" "application/json" #'handle-filter)
+      (pub "/stratum/api/gradient" "application/json" #'handle-gradient)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)

@@ -5,7 +5,7 @@
 (asdf:defsystem #:stratum :description
  "The Gendl™ stratum Subsystem" :author "Genworks International"
  :license "Affero Gnu Public License (http://www.gnu.org/licenses/)"
- :serial t :version "20261102" :depends-on
+ :serial t :version "20261103" :depends-on
  (:zpng :flexi-streams :chipz) :around-compile
  "gendl-asdf:around-compile" :components
  ((:file "source/package") (:file "source/color")
@@ -13,7 +13,7 @@
   (:file "source/generators") (:file "source/glsl")
   (:file "source/cpu") (:file "source/document")
   (:file "source/brush") (:file "source/filter")
-  (:file "source/selection") (:file "source/resize")
-  (:file "source/file") (:file "source/merge")
-  (:file "source/samples") (:file "source/png") (:file "source/web")
-  (:file "source/stubs")))
+  (:file "source/selection") (:file "source/gradient")
+  (:file "source/resize") (:file "source/file")
+  (:file "source/merge") (:file "source/samples")
+  (:file "source/png") (:file "source/web") (:file "source/stubs")))

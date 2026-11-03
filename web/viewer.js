@@ -345,7 +345,8 @@
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
   var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
-                  marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair' };
+                  marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair',
+                  gradient: 'crosshair' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso' || tool === 'crop'; }
 
   // Shift adds to the selection, Alt takes from it, as in other editors.
@@ -353,6 +354,36 @@
 
   // The Magic Wand's options.
   S.wand = { tolerance: 32, contiguous: true };
+
+  // The Gradient tool's options: which two colors, the ramp's shape,
+  // its opacity, and whether it runs the other way.  The presets are
+  // functions of the swatches, read when a drag starts.
+  S.gradient = { preset: 'Foreground to Background', shape: 'linear', opacity: 1, reverse: false };
+  var GRADIENT_PRESETS = {
+    'Foreground to Background': function () { return [S.brush.color.concat(255), S.background.concat(255)]; },
+    'Foreground to Transparent': function () { return [S.brush.color.concat(255), S.brush.color.concat(0)]; },
+    'Black, White': function () { return [[0, 0, 0, 255], [255, 255, 255, 255]]; }
+  };
+  var GRADIENT_SHAPES = ['linear', 'reflected', 'radial', 'diamond', 'angle'];
+  S.gradientColors = function () {
+    var c = GRADIENT_PRESETS[S.gradient.preset]();
+    return S.gradient.reverse ? [c[1], c[0]] : c;
+  };
+
+  // The drag's end, held to a multiple of 45 degrees with Shift.
+  function gradientEnd(a, b, constrain) {
+    if (!constrain) return b;
+    var dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+    if (!len) return b;
+    var ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    return [a[0] + len * Math.cos(ang), a[1] + len * Math.sin(ang)];
+  }
+
+  function gradientBody(g) {
+    var colors = g.colors;
+    return { layer: g.layer, x0: g.start[0], y0: g.start[1], x1: g.end[0], y1: g.end[1],
+             start: colors[0], end: colors[1], shape: S.gradient.shape, opacity: S.gradient.opacity };
+  }
 
   function setCursor(dragging) {
     canvas.style.cursor = CURSORS[effectiveTool()] || (dragging ? 'grabbing' : 'grab');
@@ -515,7 +546,7 @@
   }
 
   function installNavigation() {
-    var drag = null, stroke = null, gesture = null, mover = null;
+    var drag = null, stroke = null, gesture = null, mover = null, grad = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       if (S.transforming) { S.transforming.down(e); return; }
@@ -524,6 +555,11 @@
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
                    samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
+      } else if (tool === 'gradient') {
+        var GL = activeL();
+        if (!GL || GL.kind !== 'raster') { status('pick a raster layer for a gradient'); return; }
+        var p0 = docPoint(e);
+        grad = { start: p0, end: p0, layer: GL.index, texIndex: GL.texIndex, colors: S.gradientColors() };
       } else if (selects(tool)) {
         gesture = { tool: tool, points: [docPoint(e)], mode: selectionMode(e) };
         drawGesture(gesture);
@@ -558,6 +594,12 @@
         drawGesture(gesture);
         return;
       }
+      if (grad) {
+        grad.end = gradientEnd(grad.start, docPoint(e), e.shiftKey);
+        drawGesture({ tool: 'gradient', points: [grad.start, grad.end] });
+        previewGradient(grad);
+        return;
+      }
       if (mover) {
         var q = docPoint(e);
         mover.dx = Math.round(q[0] - mover.start[0]);
@@ -584,6 +626,14 @@
         var g = gesture;
         gesture = null;
         if (e.type === 'pointerup') finishGesture(g); else drawGesture(null);
+      }
+      if (grad) {
+        var gd = grad;
+        grad = null;
+        drawGesture(null);
+        var len = Math.hypot(gd.end[0] - gd.start[0], gd.end[1] - gd.start[1]);
+        if (e.type === 'pointerup' && len >= 1) S.gradientFill(gradientBody(gd));
+        else clearReplace();
       }
       if (mover) {
         var m = mover;
@@ -1240,7 +1290,7 @@
     { id: 'stamp', key: 'S', label: 'Clone Stamp Tool' },
     { id: 'history', key: 'Y', label: 'History Brush Tool' },
     { id: 'eraser', key: 'E', label: 'Eraser Tool', built: true },
-    { id: 'gradient', key: 'G', label: 'Gradient Tool' },
+    { id: 'gradient', key: 'G', label: 'Gradient Tool', built: true },
     { id: 'blur', key: 'R', label: 'Blur Tool' },
     { id: 'dodge', key: 'O', label: 'Dodge Tool' },
     '-',
@@ -1352,8 +1402,23 @@
     contiguous.checked = true;
     contiguous.addEventListener('change', function () { S.wand.contiguous = contiguous.checked; });
     wand.appendChild(el('div', { 'class': 'st-row' }, [contiguous, el('span', { text: 'Contiguous' })]));
+    // The Gradient tool's preset, shape, opacity and direction, under it.
+    var grad = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Gradient' })])]);
+    var preset = el('select');
+    Object.keys(GRADIENT_PRESETS).forEach(function (k) { preset.appendChild(el('option', { value: k, text: k })); });
+    preset.addEventListener('change', function () { S.gradient.preset = preset.value; });
+    var shape = el('select');
+    GRADIENT_SHAPES.forEach(function (k) { shape.appendChild(el('option', { value: k, text: k })); });
+    shape.addEventListener('change', function () { S.gradient.shape = shape.value; });
+    grad.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'colors' }), preset]));
+    grad.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'shape' }), shape]));
+    grad.appendChild(settingSlider(S.gradient, 'opacity', function () {}));
+    var reverse = el('input', { type: 'checkbox' });
+    reverse.addEventListener('change', function () { S.gradient.reverse = reverse.checked; });
+    grad.appendChild(el('div', { 'class': 'st-row' }, [reverse, el('span', { text: 'Reverse' })]));
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
     statusEl.parentNode.insertBefore(wand, box.nextSibling);
+    statusEl.parentNode.insertBefore(grad, wand.nextSibling);
   }
 
   function hexColor(c) {
@@ -2309,7 +2374,8 @@
       if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('filter link: ' + gl.getProgramInfoLog(p));
       blurProg = p;
       ['u_layers', 'u_src', 'u_layer', 'u_pass', 'u_size', 'u_sigma', 'u_extent',
-       'u_amount', 'u_threshold', 'u_mono', 'u_seed'].forEach(function (n) {
+       'u_amount', 'u_threshold', 'u_mono', 'u_seed',
+       'u_g0', 'u_g1', 'u_c0', 'u_c1', 'u_shape', 'u_opacity'].forEach(function (n) {
         blurUni[n] = gl.getUniformLocation(p, n);
       });
     }
@@ -2353,8 +2419,54 @@
     gl.uniform1f(blurUni.u_threshold, s.threshold || 0);
     gl.uniform1i(blurUni.u_mono, s.mono ? 1 : 0);
     gl.uniform1i(blurUni.u_seed, s.seed || 1);
+    if (s.gradient) {
+      var g = s.gradient;
+      gl.uniform2f(blurUni.u_g0, g.x0, g.y0);
+      gl.uniform2f(blurUni.u_g1, g.x1, g.y1);
+      gl.uniform4f(blurUni.u_c0, g.start[0] / 255, g.start[1] / 255, g.start[2] / 255, g.start[3] / 255);
+      gl.uniform4f(blurUni.u_c1, g.end[0] / 255, g.end[1] / 255, g.end[2] / 255, g.end[3] / 255);
+      gl.uniform1i(blurUni.u_shape, Math.max(0, GRADIENT_SHAPES.indexOf(g.shape)));
+      gl.uniform1f(blurUni.u_opacity, g.opacity);
+    }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
+
+  // The Gradient tool's preview: pass 4 lays the ramp over layer
+  // TEXINDEX into the replacement texture, the twin of gradient-rgba;
+  // the drag's commit (S.gradientFill) bakes the same ramp on the
+  // server.
+  function runGradient(texIndex, body) {
+    if (!ensureBlur()) return false;
+    gl.useProgram(blurProg);
+    gl.bindVertexArray(vao);
+    gl.viewport(0, 0, doc.width, doc.height);
+    filterPass(4, 1, texIdle, texIndex, { gradient: body });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    replace.texture = blurTex[1];
+    replace.layer = texIndex;
+    requestDraw();
+    return true;
+  }
+
+  var gradientWarned = false;
+  function previewGradient(g) {
+    if (!runGradient(g.texIndex, gradientBody(g)) && !gradientWarned) {
+      gradientWarned = true;
+      status('no float render targets here: the gradient shows when the pointer lifts');
+    }
+  }
+
+  S.gradientFill = function (body) {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer for a gradient'); return Promise.resolve(null); }
+    body.layer = L.index;
+    strokeChain = strokeChain.then(function () {
+      return postJSON('gradient', JSON.stringify(body)).then(tookRect)
+        .then(function () { clearReplace(); status(); },
+              function (e) { clearReplace(); status('gradient failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
 
   // Filter layer TEXINDEX into the replacement texture: a blur is
   // passes 0 and 1; a sharpening adds pass 2 over the blur; noise is
@@ -3294,6 +3406,87 @@
       }).then(function (res) {
         check('a crop to a rectangle remakes the document at that size', res.width === 30 && res.height === 20, res);
         return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(made), { method: 'POST' });
+      });
+    }).then(function () {
+      // The Gradient tool on the lowest raster layer: a drag across it
+      // previews a ramp from the foreground to the background through
+      // the replacement stage and bakes it when the pointer lifts, the
+      // bake within two levels of the preview, the layer's bytes the
+      // two colors at the ends and their encoded mean in the middle;
+      // parity; undo; a radial ramp under a selection changes nothing
+      // outside it.
+      var active = S.activeLayer, L = null;
+      doc.layers.forEach(function (x) { if (!L && x.kind === 'raster') L = x; });
+      if (!L) return null;
+      S.setActiveLayer(L.index, false);
+      var saved = { tool: S.tool, color: S.brush.color, background: S.background, options: Object.assign({}, S.gradient) };
+      S.setBrush({ color: [200, 30, 30] });
+      S.background = [20, 40, 220];
+      Object.assign(S.gradient, { preset: 'Foreground to Background', shape: 'linear', opacity: 1, reverse: false });
+      var W = doc.width, H = doc.height, before = S.renderExact(), previews = S.filterPreviewSupported;
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      function at(x, y) {
+        return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                 pointerId: 48, pointerType: 'mouse', bubbles: true };
+      }
+      function dragRamp(x0, y0, x1, y1) {
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(x0, y0)));
+        canvas.dispatchEvent(new PointerEvent('pointermove', at(x1, y1)));
+        var shown = S.renderExact();
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(x1, y1)));
+        return S.strokesSettled().then(function () { return shown; });
+      }
+      function outside(a, b, rect) {
+        var n = 0;
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+          if (x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) continue;
+          var o = ((H - 1 - y) * W + x) * 4;
+          if (a[o] !== b[o] || a[o + 1] !== b[o + 1] || a[o + 2] !== b[o + 2] || a[o + 3] !== b[o + 3]) n++;
+        }
+        return n;
+      }
+      S.setTool('gradient');
+      var x0 = Math.round(W * 0.1), x1 = Math.round(W * 0.9), ym = Math.round(H * 0.5);
+      return dragRamp(x0, ym, x1, ym).then(function (shown) {
+        var after = S.renderExact();
+        check('a gradient drag previews on its layer and bakes on release',
+              renderDiff(before, after).maxDiff > 0 && (!previews || renderDiff(before, shown).maxDiff > 0), { preview: previews });
+        if (previews) {
+          var d = renderDiff(shown, after);
+          check('release bakes what the gradient preview showed', d.maxDiff <= 2, d);
+        }
+        return fetchBytes(api('raster?i=' + L.texIndex));
+      }).then(function (px) {
+        function px4(x, y) { var o = (y * W + x) * 4; return [px[o], px[o + 1], px[o + 2], px[o + 3]]; }
+        function near(a, b, tol) { return a.every(function (v, i) { return Math.abs(v - b[i]) <= tol; }); }
+        var left = px4(Math.round(W * 0.05), ym), right = px4(Math.round(W * 0.95), ym), mid = px4(Math.round(W * 0.5), ym);
+        check('the ramp runs from the foreground to the background, their encoded mean in the middle',
+              near(left, [200, 30, 30, 255], 1) && near(right, [20, 40, 220, 255], 1) && near(mid, [110, 35, 125, 255], 2),
+              { left: left, mid: mid, right: right });
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a gradient', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the layer back after a gradient', renderDiff(before, S.renderExact()).maxDiff === 0);
+        var rect = { x: Math.floor(W * 0.3), y: Math.floor(H * 0.3), w: Math.floor(W * 0.4), h: Math.floor(H * 0.4) };
+        S.gradient.shape = 'radial';
+        return S.select({ op: 'rect', x: rect.x, y: rect.y, w: rect.w, h: rect.h }).then(function () {
+          return dragRamp(W * 0.5, H * 0.5, W * 0.5, H * 0.3);
+        }).then(function (shown) {
+          var after = S.renderExact(), d = renderDiff(shown, after);
+          check('a radial gradient under a selection changes nothing outside it',
+                renderDiff(before, after).maxDiff > 0 && outside(before, after, rect) === 0 && (!previews || d.maxDiff <= 2),
+                { outside: outside(before, after, rect), preview: d });
+          return S.undo();
+        }).then(function () { return S.select({ op: 'none' }); });
+      }).then(function () {
+        check('undo gives the layer back after the radial gradient', renderDiff(before, S.renderExact()).maxDiff === 0);
+        S.setTool(saved.tool);
+        S.setBrush({ color: saved.color });
+        S.background = saved.background;
+        Object.assign(S.gradient, saved.options);
+        S.setActiveLayer(active, false);
       });
     }).then(function () {
       // Merge Down and Flatten on a throwaway document: an image opened,

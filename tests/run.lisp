@@ -646,6 +646,71 @@ to alter the pictures."
                    for o = (* 4 x)
                    always (= (aref n o) (aref n (+ o 1)) (aref n (+ o 2))))))))
 
+(defun test-gradient ()
+  (flet ((gray (pixels x &optional (y 0) (w 10)) (aref pixels (* 4 (+ x (* y w)))))
+         (alpha (pixels x &optional (y 0) (w 10)) (aref pixels (+ 3 (* 4 (+ x (* y w)))))))
+    (let ((strip (make-rgba 10 1)))
+      (check "a linear ramp from black to white climbs on the encoded scale and is opaque"
+             (let ((g (gradient-rgba strip 10 1 0 0.5 10 0.5 '(0 0 0 255) '(255 255 255 255) :linear 1)))
+               (and (= (gray g 0) 13) (= (gray g 9) 242) (= (gray g 4) 115) (= (gray g 5) 140)
+                    (loop for x from 1 below 10 always (> (gray g x) (gray g (1- x))))
+                    (loop for x below 10 always (= 255 (alpha g x)))))
+             (coerce (gradient-rgba strip 10 1 0 0.5 10 0.5 '(0 0 0 255) '(255 255 255 255) :linear 1) 'list))
+      (check "a linear ramp saturates beyond its ends"
+             (let ((g (gradient-rgba strip 10 1 3 0.5 7 0.5 '(0 0 0 255) '(255 255 255 255) :linear 1)))
+               (and (= 0 (gray g 0) (gray g 2)) (= 255 (gray g 7) (gray g 9)))))
+      (check "a reflected ramp mirrors about its start"
+             (let ((g (gradient-rgba strip 10 1 5 0.5 10 0.5 '(0 0 0 255) '(255 255 255 255) :reflected 1)))
+               (and (= (gray g 4) (gray g 5)) (= (gray g 0) (gray g 9)) (< (gray g 5) (gray g 9)))))
+      (check "a ramp to transparency fades out, and over white at half opacity a black ramp is linear mid-gray"
+             (let ((fade (gradient-rgba strip 10 1 0 0.5 10 0.5 '(255 0 0 255) '(255 0 0 0) :linear 1))
+                   (white (let ((p (make-rgba 10 1))) (fill p 255) p)))
+               (and (= 242 (alpha fade 0)) (= 13 (alpha fade 9)) (> (alpha fade 0) (alpha fade 5)) (> (alpha fade 5) (alpha fade 9))
+                    (loop for x below 10 always (= 255 (gray fade x)))
+                    (= 188 (gray (gradient-rgba white 10 1 0 0.5 10 0.5 '(0 0 0 255) '(0 0 0 255) :linear 0.5) 5)))))
+      (check "a drag of no length paints the start color"
+             (let ((g (gradient-rgba strip 10 1 4 0.5 4 0.5 '(30 60 90 255) '(255 255 255 255) :radial 1)))
+               (loop for x below 10 always (and (= 30 (gray g x)) (= 255 (alpha g x)))))))
+    (let ((square (make-rgba 9 9)))
+      (check "a radial ramp is symmetric about its center and white one length out"
+             (let ((g (gradient-rgba square 9 9 4.5 4.5 8.5 4.5 '(0 0 0 255) '(255 255 255 255) :radial 1)))
+               (and (= 0 (gray g 4 4 9)) (= 255 (gray g 0 4 9) (gray g 8 4 9) (gray g 4 0 9) (gray g 4 8 9))
+                    (= (gray g 2 4 9) (gray g 6 4 9) (gray g 4 2 9) (gray g 4 6 9)) (< 0 (gray g 2 4 9) 255))))
+      (check "a diamond ramp reaches the end color along both axes and the diagonal alike"
+             (let ((g (gradient-rgba square 9 9 4.5 4.5 8.5 4.5 '(0 0 0 255) '(255 255 255 255) :diamond 1)))
+               (and (= 0 (gray g 4 4 9)) (= 255 (gray g 0 4 9) (gray g 4 0 9) (gray g 8 8 9) (gray g 0 0 9))
+                    (= (gray g 6 6 9) (gray g 6 4 9)) (<= 127 (gray g 6 6 9) 128))))
+      (check "an angle ramp turns once around the start, a quarter turn a quarter of the way"
+             (let ((g (gradient-rgba square 9 9 4.5 4.5 8.5 4.5 '(0 0 0 255) '(255 255 255 255) :angle 1)))
+               (and (= 64 (gray g 4 8 9)) (<= 127 (gray g 0 4 9) 128) (= 191 (gray g 4 0 9))
+                    (< (gray g 8 5 9) 20))))))
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0)))
+         (w 320)
+         (before (copy-seq (the-object sky pixels))))
+    (demand doc)
+    (check "a gradient over a layer changes it and rebuilds nothing"
+           (progn (gradient-layer! sky 0 100 320 100 :start '(200 30 30 255) :end '(20 40 220 255))
+                  (let ((after (the-object sky pixels)))
+                    (and (not (equalp before after))
+                         (= 200 (aref after (* 4 (+ 0 (* w 100)))))
+                         (= 220 (aref after (+ 2 (* 4 (+ 319 (* w 100))))))
+                         (equal (demand doc) '(1 1))))))
+    (check "undo gives the layer back after a gradient"
+           (and (undo-stroke! doc) (equalp before (the-object sky pixels))))
+    (check "under a selection a gradient changes the selected pixels only"
+           (progn (select-rect! doc 100 60 60 40)
+                  (gradient-layer! sky 130 80 130 60 :shape :radial)
+                  (let ((after (the-object sky pixels)))
+                    (and (not (equalp before after))
+                         (loop for i below (length before)
+                               for px = (mod (floor i 4) w) for py = (floor (floor i 4) w)
+                               always (or (and (<= 100 px 159) (<= 60 py 99))
+                                          (= (aref before i) (aref after i))))))))
+    (check "a gradient refuses a shape it does not know"
+           (handler-case (progn (gradient-layer! sky 0 0 10 10 :shape :spiral) nil)
+             (error () t)))))
+
 (defun max-byte-diff (a b)
   (loop for x across a for y across b maximize (abs (- x y))))
 
@@ -827,7 +892,7 @@ to alter the pictures."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
-                  test-file-format test-filter test-merge
+                  test-file-format test-filter test-gradient test-merge
                   test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)

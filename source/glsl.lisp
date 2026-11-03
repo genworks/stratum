@@ -277,6 +277,12 @@ uniform float u_amount;
 uniform float u_threshold;
 uniform int u_mono;
 uniform int u_seed;
+uniform vec2 u_g0;
+uniform vec2 u_g1;
+uniform vec4 u_c0;
+uniform vec4 u_c1;
+uniform int u_shape;
+uniform float u_opacity;
 out vec4 o_color;
 // The filter passes the viewer runs for a preview, each the twin of a
 // function in filter.lisp.  Pass 0 reads the layer's texels as
@@ -287,7 +293,12 @@ out vec4 o_color;
 // away from its blur by u_amount of the difference where that exceeds
 // u_threshold (unsharp-mask-rgba).  Pass 3 adds uniform noise to the
 // encoded color channels from an integer hash of pixel, channel and
-// seed (noise-hash, add-noise-rgba).  Edges are clamped.
+// seed (noise-hash, add-noise-rgba).  Pass 4 lays the Gradient tool's
+// ramp over the layer: colors u_c0 to u_c1 (encoded, straight alpha)
+// interpolated on the encoded scale along the drag u_g0 -> u_g1 by
+// u_shape (0 linear, 1 reflected, 2 radial, 3 diamond, 4 angle), at
+// u_opacity, composited in premultiplied linear light (gradient-rgba,
+// gradient.lisp).  Edges are clamped.
 vec4 fetch(ivec2 c) {
   c = clamp(c, ivec2(0), ivec2(u_size) - 1);
   if (u_pass == 0) {
@@ -323,6 +334,27 @@ void main() {
     o_color = vec4(orig.a > 0.0 ? clamp(pm / orig.a, 0.0, 1.0) : vec3(0.0), orig.a);
     return;
   }
+  if (u_pass == 4) {
+    vec4 px = texelFetch(u_layers, ivec3(p, u_layer), 0);
+    vec2 d = u_g1 - u_g0;
+    float len2 = dot(d, d);
+    vec2 q = vec2(p) + 0.5 - u_g0;
+    float u = len2 > 0.0 ? dot(q, d) / len2 : 0.0;
+    float v = len2 > 0.0 ? (q.y * d.x - q.x * d.y) / len2 : 0.0;
+    float t;
+    if (u_shape == 1) t = min(1.0, abs(u));
+    else if (u_shape == 2) t = min(1.0, sqrt(u * u + v * v));
+    else if (u_shape == 3) t = min(1.0, max(abs(u), abs(v)));
+    else if (u_shape == 4) { float a = atan(v, u); t = (a < 0.0 ? a + 6.283185307179586 : a) / 6.283185307179586; }
+    else t = clamp(u, 0.0, 1.0);
+    vec4 c = u_c0 * (1.0 - t) + u_c1 * t;
+    float sa = c.a * u_opacity;
+    float keep = px.a * (1.0 - sa);
+    float na = sa + keep;
+    vec3 pm = decode(c.rgb) * sa + px.rgb * keep;
+    o_color = vec4(na > 0.0 ? pm / na : vec3(0.0), na);
+    return;
+  }
   if (u_pass == 3) {
     vec4 px = texelFetch(u_layers, ivec3(p, u_layer), 0);
     vec3 e = encode(px.rgb) * 255.0;
@@ -344,7 +376,7 @@ void main() {
   o_color = u_pass == 0 ? acc : vec4(acc.a > 0.0 ? acc.rgb / acc.a : vec3(0.0), acc.a);
 }
 "
-  "The filter passes the viewer runs for a preview: blur, sharpen, noise.")
+  "The filter passes the viewer runs for a preview: blur, sharpen, noise, gradient.")
 
 (defun plan->glsl (plan)
   "The fragment shader that composites PLAN, a list of plan entries

@@ -147,6 +147,21 @@ and in Lisp, so the preview and the bake draw the same numbers;
 monochromatic noise uses one draw per pixel. A browser without float
 render targets gets no preview and still bakes the filter on OK.
 
+The Gradient tool (G) lays a ramp between two colors over the active
+raster layer inside the selection: drag from where the first color
+ends to where the second begins, Shift holding the drag to a multiple
+of 45 degrees. The ramp is the classic one, the two colors
+interpolated on the encoded scale so a half-way gray is 128, then
+composited over the layer in premultiplied linear light, so a ramp to
+transparency fades the way a brush stroke does. Five shapes: linear,
+reflected, radial, diamond and angle; presets Foreground to
+Background, Foreground to Transparent and Black, White; an opacity;
+Reverse. While the pointer drags, pass 4 of the filter shader lays the
+ramp over the layer into the replacement texture, so the preview is
+live and exact; when it lifts the server bakes the same ramp with
+`gradient-rgba` (`source/gradient.lisp`), the twin of that pass, the
+whole layer on the undo list.
+
 Free Transform (Ctrl+T) is the same floating stage with a matrix in
 place of the offset: a box with eight handles around the selection or
 the layer; drag inside to move, a handle to scale about the center
@@ -209,8 +224,8 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
 Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Crop, Eyedropper,
-Brush, Eraser, Hand and Zoom; the rest are drawn dimmed and refuse to
-be picked. The Crop tool's drag leaves a box with everything outside
+Brush, Eraser, Gradient, Hand and Zoom; the rest are drawn dimmed and
+refuse to be picked. The Crop tool's drag leaves a box with everything outside
 it darkened; Enter or a double-click crops, Escape drops it. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
@@ -291,6 +306,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "crop-rect", x, y, w, h}`, `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
 | `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", "unsharp-mask" or "add-noise", settings: {radius, amount, threshold, monochrome, seed}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
+| `POST /stratum/api/gradient?doc=N` | `{layer, x0, y0, x1, y1, start: [r, g, b, a], end: [r, g, b, a], shape: "linear", "reflected", "radial", "diamond" or "angle", opacity}` laid over the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}`, `{op: "mask", layer, value: "reveal", "hide" or "delete"}`, `{op: "merge", layer}` or `{op: "flatten"}`; answers the new plan version and the layer to work on |
 
@@ -452,6 +468,11 @@ The self-test checks:
   of the asked size with a transparent Background, the Crop tool's
   drag leaves a box that Escape drops, and a crop to a rectangle
   remakes the document at that size;
+- the Gradient tool on the lowest raster layer: a drag previews the
+  ramp and bakes it on release within two levels of the preview, the
+  layer's bytes the two colors at the ends and their encoded mean in
+  the middle, parity, undo exact; a radial ramp under a selection
+  changes nothing outside it, undo exact;
 - merging, on a throwaway document: an image placed on another and
   merged down leaves one raster layer with the lower name, and a
   curves layer added then flattened leaves one Background;

@@ -227,6 +227,14 @@ and the earlier API use as before. A session idle for four hours is
 forgotten with its documents. The Window menu lists the session's open
 documents, the current one checked.
 
+Image ▸ Image Rotation turns or flips the whole document: 180°, 90°
+Clockwise, 90° Counter Clockwise, Flip Canvas Horizontal and Vertical
+move every layer's and mask's pixels whole, exactly, and Arbitrary
+turns by any angle onto a canvas grown to hold the turned picture,
+bilinear in premultiplied linear light like Image Size, the exposed
+corners transparent; a multiple of 90 turns whole pixels. Each remakes
+the document through the resize path, so the page reloads.
+
 Image ▸ Mode ▸ Grayscale turns every raster layer gray, each pixel's
 luminance in linear light with its alpha kept, and from then on turns
 whatever is painted, filled, placed or pasted to gray on its way in,
@@ -263,8 +271,8 @@ Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Mode ▸ Grayscale and RGB Color; Image ▸
-Image Size (Ctrl+Alt+I), Canvas Size
-(Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D),
+Image Size (Ctrl+Alt+I), Canvas Size (Ctrl+Alt+C), Image Rotation
+(180°, 90° either way, Arbitrary, the two flips) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D),
 Inverse (Ctrl+Shift+I) and Feather (Shift+F6); Filter ▸ Blur ▸
 Gaussian Blur, Sharpen ▸
 Unsharp Mask and Noise ▸ Add Noise; Layer ▸ New ▸ Layer, Duplicate Layer,
@@ -375,7 +383,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/transform?doc=N` | `{layer, matrix: [a, b, c, d, e, f]}` (x′ = ax + by + c, y′ = dx + ey + f): the selected pixels resampled through it; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
-| `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "crop-rect", x, y, w, h}`, `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
+| `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "crop-rect", x, y, w, h}`, `{op: "image-size", width, height}`, `{op: "canvas-size", width, height, anchor: [ax, ay]}`, `{op: "rotate", turn: "cw", "ccw", "180", "flip-h" or "flip-v"}` or `{op: "rotate-arbitrary", degrees}` (clockwise); the document is remade; answers `{width, height}` |
 | `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", "unsharp-mask" or "add-noise", settings: {radius, amount, threshold, monochrome, seed}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/gradient?doc=N` | `{layer, x0, y0, x1, y1, start: [r, g, b, a], end: [r, g, b, a], shape: "linear", "reflected", "radial", "diamond" or "angle", opacity}` laid over the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
@@ -402,6 +410,15 @@ It checks:
   brings changes back exactly and in order, that a new change empties
   the redo list, and that undo and redo round trip through the whole
   list;
+- Image Rotation: the quarter turns, the half turn and the flips move
+  the pixels whole, a turn each way and four the same way give the
+  picture back, a mask turns on one channel, an arbitrary 90 degrees
+  through the resampler equals the whole-pixel turn within a level, 45
+  degrees grows the canvas and keeps the center and clears the
+  corners, the half turn is its own inverse through the resampler, a
+  turned document has its sides swapped with every layer and mask
+  turned and its mode kept, and an arbitrary multiple of 90 turns
+  whole pixels;
 - the History Brush: the history composite is the document as opened,
   rendered once and kept; a history stroke paints it onto the layer
   inside its rectangle and rebuilds nothing; undo gives the layer
@@ -567,8 +584,9 @@ The self-test checks:
   committed within two levels, the selection following, parity, undo,
   and Escape leaving the picture alone;
 - sizes, on a throwaway document opened from a small image: Crop,
-  Image Size and Canvas Size each remake it at the new size; the
-  Image Size dialog opens and cancels;
+  Image Size, a quarter turn, an arbitrary 30 degrees and Canvas Size
+  each remake it at the new size; the Image Size and Rotate Canvas
+  dialogs open and cancel;
 - New and Crop: the New dialog opens and cancels, New makes a document
   of the asked size with a transparent Background, the Crop tool's
   drag leaves a box that Escape drops, and a crop to a rectangle

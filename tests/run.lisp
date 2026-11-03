@@ -924,6 +924,62 @@ to alter the pictures."
                          (< (aref p (+ 3 (* 4 0))) 255))))
            (the-object doc (layer 0) pixels))))
 
+(defun test-rotate ()
+  ;; A 3 x 2 picture whose pixels are numbered 1..6, row by row.
+  (let ((pic (let ((p (make-rgba 3 2)))
+               (dotimes (i 6 p)
+                 (let ((o (* 4 i))) (setf (aref p o) (1+ i) (aref p (+ o 1)) (1+ i) (aref p (+ o 2)) (1+ i) (aref p (+ o 3)) 255))))))
+    (flet ((numbers (pixels) (loop for i from 0 below (length pixels) by 4 collect (aref pixels i))))
+      (check "the quarter turns, the half turn and the flips move the pixels whole"
+             (and (equal (numbers (turn-rgba pic 3 2 :cw)) '(4 1 5 2 6 3))
+                  (equal (numbers (turn-rgba pic 3 2 :ccw)) '(3 6 2 5 1 4))
+                  (equal (numbers (turn-rgba pic 3 2 :180)) '(6 5 4 3 2 1))
+                  (equal (numbers (turn-rgba pic 3 2 :flip-h)) '(3 2 1 6 5 4))
+                  (equal (numbers (turn-rgba pic 3 2 :flip-v)) '(4 5 6 1 2 3)))
+             (list (numbers (turn-rgba pic 3 2 :cw)) (numbers (turn-rgba pic 3 2 :ccw))))
+      (check "a quarter turn each way, and four the same way, give the picture back"
+             (and (equalp pic (turn-rgba (turn-rgba pic 3 2 :cw) 2 3 :ccw))
+                  (equalp pic (turn-rgba (turn-rgba (turn-rgba (turn-rgba pic 3 2 :cw) 2 3 :cw) 3 2 :cw) 2 3 :cw))))
+      (check "a mask turns on one channel"
+             (equalp (turn-rgba (coerce #(1 2 3 4 5 6) '(simple-array (unsigned-byte 8) (*))) 3 2 :cw 1)
+                     (coerce #(4 1 5 2 6 3) '(simple-array (unsigned-byte 8) (*)))))))
+  (let ((pic (let ((p (make-rgba 10 10)))
+               (dotimes (y 10 p)
+                 (dotimes (x 10)
+                   (let ((o (* 4 (+ x (* 10 y)))))
+                     (setf (aref p o) (* 25 x) (aref p (+ o 1)) (* 25 y) (aref p (+ o 2)) 128 (aref p (+ o 3)) 255)))))))
+    (check "an arbitrary 90 degrees through resampling equals the whole-pixel turn within a level"
+           (multiple-value-bind (nw nh) (rotated-size 10 10 90)
+             (and (= nw 10) (= nh 10)
+                  (<= (max-byte-diff (rotate-rgba pic 10 10 90) (turn-rgba pic 10 10 :cw)) 1))))
+    (check "45 degrees grows the canvas, keeps the center and clears the corners"
+           (multiple-value-bind (nw nh) (rotated-size 10 10 45)
+             (let ((r (rotate-rgba pic 10 10 45)))
+               (and (= nw 15) (= nh 15)
+                    (= 0 (aref r 3)) (= 0 (aref r (+ 3 (* 4 (+ 14 (* 15 14))))))
+                    (= 255 (aref r (+ 3 (* 4 (+ 7 (* 15 7))))))
+                    (<= (abs (- (aref r (* 4 (+ 7 (* 15 7)))) 112)) 14)))))
+    (check "the half turn and a flip are each their own inverse through the resampler too"
+           (<= (max-byte-diff (rotate-rgba (rotate-rgba pic 10 10 180) 10 10 180) pic) 1)))
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0))))
+    (the-object sky (set-mask! '(:flat :value 255)))
+    (apply-brush-stroke sky (list :points '((10 10 1)) :color '(0 0 0) :radius 3 :hardness 1 :flow 1 :opacity 1) :target :mask)
+    (set-color-mode! doc :grayscale)
+    (let* ((before (copy-seq (the-object sky pixels)))
+           (mask-before (copy-seq (the-object sky mask-pixels)))
+           (turned (rotate-document doc :cw))
+           (turned-sky (the-object turned (layer 0))))
+      (check "a turned document has the sides swapped, every layer and mask turned, and keeps its mode"
+             (and (= 200 (the-object turned doc-width)) (= 320 (the-object turned doc-height))
+                  (equalp (the-object turned-sky pixels) (turn-rgba before 320 200 :cw))
+                  (equalp (the-object turned-sky mask-pixels) (turn-rgba mask-before 320 200 :cw 1))
+                  (eql (the-object turned color-mode) :grayscale)
+                  (equal (layer-names turned) (layer-names doc))))
+      (check "an arbitrary multiple of 90 turns whole pixels; 360 changes nothing"
+             (and (equalp (the-object (rotate-document-arbitrary doc -90) (layer 0) pixels) (turn-rgba before 320 200 :ccw))
+                  (equalp (the-object (rotate-document-arbitrary doc 360) (layer 0) pixels) before))))))
+
 (defun test-file-format ()
   (let ((doc (make-sample-document "parity")))
     (the-object doc (layer 1) (set-slot! :opacity 0.3d0))
@@ -1278,7 +1334,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions
                   test-threads test-golden))

@@ -414,10 +414,12 @@ Paste the new layer as handle-layers does."
            (t (error "Unknown clipboard operation ~s." op))))))
 
 (defun handle-resize (req)
-  "Image > Crop, Image Size and Canvas Size: {op: \"crop\"} (to the
-selection), {op: \"image-size\", width, height} or {op: \"canvas-size\",
-width, height, anchor: [ax, ay]}.  The document is remade under its
-name; answers {width, height} and the page reloads."
+  "Image > Crop, Image Size, Canvas Size and Image Rotation: {op:
+\"crop\"} (to the selection), {op: \"image-size\", width, height}, {op:
+\"canvas-size\", width, height, anchor: [ax, ay]}, {op: \"rotate\", turn:
+\"cw\" | \"ccw\" | \"180\" | \"flip-h\" | \"flip-v\"} or {op:
+\"rotate-arbitrary\", degrees} (clockwise).  The document is remade
+under its name; answers {width, height} and the page reloads."
   (let* ((name (or (net.aserve:request-query-value "doc" req) "demo"))
          (doc (find-document name))
          (body (parse-json-body req))
@@ -442,6 +444,14 @@ name; answers {width, height} and the page reloads."
                         (let ((anchor (or (gethash "anchor" body) '(0.5 0.5))))
                           (canvas-size-document doc (size "width") (size "height")
                                                 (float (first anchor) 1d0) (float (second anchor) 1d0))))
+                       ((equal op "rotate")
+                        (let ((turn (find (gethash "turn" body) '(:cw :ccw :180 :flip-h :flip-v) :test #'string-equal)))
+                          (unless turn (error "Unknown turn ~s." (gethash "turn" body)))
+                          (rotate-document doc turn)))
+                       ((equal op "rotate-arbitrary")
+                        (let ((degrees (gethash "degrees" body)))
+                          (unless (realp degrees) (error "Bad angle ~s." degrees))
+                          (rotate-document-arbitrary doc degrees)))
                        (t (error "Unknown resize operation ~s." op)))))
         (setf (gethash name *documents*) new)
         (json-string (json-object "width" (the-object new doc-width)

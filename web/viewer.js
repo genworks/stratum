@@ -1878,6 +1878,38 @@
     return dialog;
   };
 
+  // Image > Image Rotation: a turn or flip of the whole document, and
+  // Arbitrary, an angle clockwise or counter clockwise.
+  S.rotate = function (turn) { return S.resize({ op: 'rotate', turn: turn }); };
+
+  S.openRotate = function () {
+    if (S.sizeDialog) S.sizeDialog.cancel();
+    var state = { degrees: 0, direction: 'cw' };
+    var angle = el('input', { type: 'number', min: '-360', max: '360', step: '0.1', value: '0' });
+    angle.style.width = '80px';
+    angle.addEventListener('input', function () { state.degrees = Number(angle.value); });
+    var dir = el('select');
+    [['cw', '°CW'], ['ccw', '°CCW']].forEach(function (pair) { dir.appendChild(el('option', { value: pair[0], text: pair[1] })); });
+    dir.addEventListener('change', function () { state.direction = dir.value; });
+    var d = sizeDialog('Rotate Canvas', [
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'angle' }), angle, dir])]);
+    var dialog = S.sizeDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); angle.value = String(state.degrees); dir.value = state.direction; },
+      cancel: function () { d.box.remove(); S.sizeDialog = null; },
+      ok: function () {
+        d.box.remove();
+        S.sizeDialog = null;
+        var degrees = state.direction === 'ccw' ? -state.degrees : state.degrees;
+        return degrees === 0 ? Promise.resolve(null) : S.resize({ op: 'rotate-arbitrary', degrees: degrees });
+      }
+    };
+    d.cancel.addEventListener('click', dialog.cancel);
+    d.ok.addEventListener('click', dialog.ok);
+    angle.focus();
+    return dialog;
+  };
+
   // Image Size: width and height, proportions constrained by default.
   S.openImageSize = function () {
     if (S.sizeDialog) S.sizeDialog.cancel();
@@ -2252,6 +2284,14 @@
         '-',
         { label: 'Image Size...', key: 'Ctrl+Alt+I', run: function () { S.openImageSize(); } },
         { label: 'Canvas Size...', key: 'Ctrl+Alt+C', run: function () { S.openCanvasSize(); } },
+        { label: 'Image Rotation', sub: [
+          { label: '180°', run: function () { S.rotate('180'); } },
+          { label: '90° Clockwise', run: function () { S.rotate('cw'); } },
+          { label: '90° Counter Clockwise', run: function () { S.rotate('ccw'); } },
+          { label: 'Arbitrary...', run: function () { S.openRotate(); } },
+          '-',
+          { label: 'Flip Canvas Horizontal', run: function () { S.rotate('flip-h'); } },
+          { label: 'Flip Canvas Vertical', run: function () { S.rotate('flip-v'); } }] },
         '-',
         { label: 'Crop', enabled: function () { return !!S.selection; }, run: function () { S.resize({ op: 'crop' }); } }] },
       { title: 'Layer', items: [
@@ -3606,6 +3646,19 @@
         .then(function (r) { return sized(name).then(function (s) { check('Crop remakes the document as the selection', r.width === 20 && r.height === 16 && s[0] === 20 && s[1] === 16, s); }); })
         .then(function () { return resize({ op: 'image-size', width: 60, height: 48 }); })
         .then(function () { return sized(name).then(function (s) { check('Image Size remakes the document at the new size', s[0] === 60 && s[1] === 48, s); }); })
+        .then(function () { return resize({ op: 'rotate', turn: 'cw' }); })
+        .then(function () { return sized(name).then(function (s) { check('a quarter turn swaps the document\'s sides', s[0] === 48 && s[1] === 60, s); }); })
+        .then(function () { return resize({ op: 'rotate-arbitrary', degrees: 30 }); })
+        .then(function () {
+          return sized(name).then(function (s) {
+            check('Arbitrary grows the canvas to hold the turned picture', s[0] === 72 && s[1] === 76, s);
+            var dlg = S.openRotate();
+            dlg.set({ degrees: 15, direction: 'ccw' });
+            var opened = !!document.querySelector('.st-dialog');
+            dlg.cancel();
+            check('the Rotate Canvas dialog opens and cancels', opened && !document.querySelector('.st-dialog') && !S.sizeDialog);
+          });
+        })
         .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
         .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
         .then(function () { return fetchJSON(apiFor(name, 'close'), { method: 'POST' }); });

@@ -101,6 +101,17 @@ itself is drawn on a 2D overlay while the pointer is down. Edit ▸
 Fill paints the selection with the foreground, background, black,
 white or gray at an opacity, and Clear empties it.
 
+The Move tool drags the active layer's selected pixels (all of them
+without a selection). While the pointer is down the shader's floating
+stage shows them cut from where they were and composited at the
+offset, from the textures already on the GPU, with the ants moving
+along; on release the server does the same arithmetic once
+(`move-pixels!`), the selection moves with the pixels, and the layer
+comes back whole. Copy and Cut keep the selection's pixels on the
+server's clipboard, shared by every document; Paste makes a new layer
+of them above the active one, where they came from, or centered when
+they do not fit.
+
 Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
 Reveal All or Hide All makes a white or black one; Delete takes it
 away); clicking the mask's thumbnail in the Layers panel makes it the
@@ -129,7 +140,8 @@ with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
-Undo, Fill (Shift+F5) and Clear (Delete); Image ▸ Adjustments ▸ Levels
+Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5) and
+Clear (Delete); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
@@ -144,8 +156,8 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 (W), Crop (C), Eyedropper (I), Healing Brush (J), Brush (B), Clone
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
-Zoom (Z). Built: Marquee, Lasso, Eyedropper, Brush, Eraser, Hand and
-Zoom; the rest are drawn dimmed and refuse to be picked. The foreground and
+Zoom (Z). Built: Move, Marquee, Lasso, Eyedropper, Brush, Eraser, Hand
+and Zoom; the rest are drawn dimmed and refuse to be picked. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
 eye for visibility, a thumbnail of the layer and of its mask, its name
@@ -195,6 +207,8 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`; answers `{selection: {x, y, w, h} or null}` |
 | `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
+| `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
+| `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
@@ -230,6 +244,11 @@ It checks:
   selection changing pixels inside it only, clipping as the browser
   does it, Fill and Clear inside the selection with exact undo, and no
   rebuild;
+- the floating layer: a move without a selection shifting the whole
+  layer and emptying what it left, a move under a selection moving
+  those pixels only and the selection with them, undo, Copy and
+  Paste putting the bytes back where they were on a new layer, Cut
+  clearing them and undoing;
 - the stack: a layer added above another, deleted, moved and
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
@@ -290,7 +309,12 @@ The self-test checks:
   exact;
 - selections: a marquee rectangle through the tool, a stroke under it
   matching the server's coverage to the last bit and changing nothing
-  outside it, Fill inside it, undo, Inverse and Deselect.
+  outside it, Fill inside it, undo, Inverse and Deselect;
+- the floating layer: a rectangle dragged with the Move tool,
+  previewed through the shader and committed within two levels of the
+  preview with the selection moving along, parity, undo; Copy and
+  Paste making a layer above with the same bytes where they came from;
+  Cut clearing them; undo.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

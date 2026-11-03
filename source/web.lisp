@@ -232,6 +232,38 @@ handle-stroke does."
                                  (or (gethash "opacity" body) 1)
                                  (equal (gethash "mode" body) "erase"))))))
 
+(defun handle-move (req)
+  "The Move tool's commit: {layer, dx, dy}; answers the whole layer as
+a rectangle, with the selection's new rectangle."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (rect (move-pixels! layer (round (gethash "dx" body)) (round (gethash "dy" body))))
+         (json (rect-json doc layer :layer rect)))
+    (setf (gethash "selection" json) (selection-json doc))
+    (json-string json)))
+
+(defun handle-clipboard (req)
+  "{op: \"copy\" | \"cut\" | \"paste\", layer, above}.  Copy answers the
+clipboard's size; Cut the rectangle cleared, as handle-stroke does;
+Paste the new layer as handle-layers does."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (op (gethash "op" body))
+         (layer (and (gethash "layer" body) (the-object doc (layer (gethash "layer" body))))))
+    (json-string
+     (cond ((equal op "copy")
+            (copy-selection! layer)
+            (json-object "clipboard" (json-object "w" (getf *clipboard* :w) "h" (getf *clipboard* :h))))
+           ((equal op "cut")
+            (rect-json doc layer :layer (cut-selection! layer)))
+           ((equal op "paste")
+            (let ((active (paste-clipboard! doc (gethash "above" body))))
+              (json-object "planVersion" (the-object doc plan-version)
+                           "active" active
+                           "layerCount" (length (the-object doc layer-list)))))
+           (t (error "Unknown clipboard operation ~s." op))))))
+
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
 \"hue-saturation\", settings: {name: value}, curves: {channel: points}}
@@ -570,6 +602,8 @@ goes back as a 500 carrying the condition's text."
              (let ((selection (the-object (request-doc req) selection)))
                (if selection (getf selection :mask) (make-array 0 :element-type '(unsigned-byte 8))))))
       (pub "/stratum/api/fill" "application/json" #'handle-fill)
+      (pub "/stratum/api/move" "application/json" #'handle-move)
+      (pub "/stratum/api/clipboard" "application/json" #'handle-clipboard)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
       (pub "/stratum/api/close" "application/json" #'handle-close))))

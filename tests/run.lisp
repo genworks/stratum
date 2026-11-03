@@ -408,6 +408,48 @@ to alter the pictures."
                            (equalp (the-object sky pixels) before)))))
       (check "a selection rebuilds nothing" (equal (demand doc) '(1 1)) (counts doc)))))
 
+(defun test-floating ()
+  (let* ((image (let ((p (make-rgba 4 3)))
+                  (dotimes (i 12 p)
+                    (let ((o (* 4 i)))
+                      (setf (aref p o) (* 20 i) (aref p (+ o 1)) 100 (aref p (+ o 2)) 50 (aref p (+ o 3)) 255)))))
+         (doc (make-file-document "float" 4 3 image))
+         (before (copy-seq (the-object doc (layer 0) pixels))))
+    (check "a move without a selection shifts the whole layer and empties what it left"
+           (progn (move-pixels! (the-object doc (layer 0)) 1 0)
+                  (let ((p (the-object doc (layer 0) pixels)))
+                    (and (= 0 (aref p 3))
+                         (= (aref p (+ 3 (* 4 1))) 255)
+                         (= (aref p (* 4 (+ 3 (* 4 1)))) (aref before (* 4 (+ 2 (* 4 1)))))
+                         (= (aref p (* 4 (+ 1 (* 4 2)))) (aref before (* 4 (+ 0 (* 4 2))))))))
+           (the-object doc (layer 0) pixels))
+    (check "undo gives the layer back after a move"
+           (and (undo-stroke! doc) (equalp (the-object doc (layer 0) pixels) before)))
+    (check "a move under a selection moves the selected pixels only, and the selection with them"
+           (progn (select-rect! doc 0 0 1 3)
+                  (move-pixels! (the-object doc (layer 0)) 2 0)
+                  (let ((p (the-object doc (layer 0) pixels)))
+                    (and (= 0 (aref p 3))
+                         (= (aref p (* 4 1)) (aref before (* 4 1)))
+                         (= (aref p (* 4 (+ 2 (* 4 1)))) (aref before (* 4 (+ 0 (* 4 1)))))
+                         (= (aref p (+ 3 (* 4 2))) 255)
+                         (equal (getf (the-object doc selection) :rect) '(2 0 1 3)))))
+           (list (the-object doc (layer 0) pixels) (getf (the-object doc selection) :rect)))
+    (undo-stroke! doc)
+    (check "Copy takes the selection's bytes; Paste puts them where they were, on a new layer above"
+           (progn (select-rect! doc 1 1 2 2)
+                  (copy-selection! (the-object doc (layer 0)))
+                  (and (= 2 (getf *clipboard* :w)) (= 2 (getf *clipboard* :h))
+                       (= 1 (paste-clipboard! doc 0))
+                       (let ((p (the-object doc (layer 1) pixels)))
+                         (and (equalp (rgba-rect p 4 3 1 1 2 2) (rgba-rect before 4 3 1 1 2 2))
+                              (= 0 (aref p 3)))))))
+    (check "Cut clears the selection on the layer, and undo gives it back"
+           (progn (cut-selection! (the-object doc (layer 0)))
+                  (and (= 0 (aref (the-object doc (layer 0) pixels) (+ 3 (* 4 (+ 1 (* 4 1))))))
+                       (progn (undo-stroke! doc)
+                              (equalp (the-object doc (layer 0) pixels) before)))))))
+
 (defun test-adjust ()
   (let* ((doc (make-sample-document "parity"))
          (sky (the-object doc (layer 0)))
@@ -504,7 +546,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-selection test-layers test-files
+                  test-brush test-masks test-adjust test-selection test-floating test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

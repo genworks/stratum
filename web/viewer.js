@@ -79,7 +79,7 @@
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
      'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
-     'u_selection', 'u_selection_on', 'u_ants'].forEach(function (n) {
+     'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_offset'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -246,6 +246,8 @@
     gl.uniform1i(uni.u_selection, 4);
     gl.uniform1i(uni.u_selection_on, selectionMask ? 1 : 0);
     gl.uniform1f(uni.u_ants, antsPhase);
+    gl.uniform1i(uni.u_float_layer, floating.layer);
+    gl.uniform2f(uni.u_float_offset, floating.dx, floating.dy);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -338,7 +340,7 @@
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
   var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
-                  marquee: 'crosshair', lasso: 'crosshair' };
+                  marquee: 'crosshair', lasso: 'crosshair', move: 'move' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso'; }
 
   function setCursor(dragging) {
@@ -451,7 +453,7 @@
   }
 
   function installNavigation() {
-    var drag = null, stroke = null, gesture = null;
+    var drag = null, stroke = null, gesture = null, mover = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       var tool = effectiveTool();
@@ -462,6 +464,13 @@
       } else if (selects(tool)) {
         gesture = { tool: tool, points: [docPoint(e)] };
         drawGesture(gesture);
+      } else if (tool === 'move') {
+        var L = activeL();
+        if (!L || L.kind !== 'raster') { status('pick a raster layer to move'); return; }
+        mover = { start: docPoint(e), layer: L.index, texIndex: L.texIndex, dx: 0, dy: 0 };
+        floating.layer = L.texIndex;
+        floating.dx = 0;
+        floating.dy = 0;
       } else if (tool === 'eyedropper') {
         pickColor(e);
       } else if (tool === 'zoom') {
@@ -484,6 +493,15 @@
         drawGesture(gesture);
         return;
       }
+      if (mover) {
+        var q = docPoint(e);
+        mover.dx = Math.round(q[0] - mover.start[0]);
+        mover.dy = Math.round(q[1] - mover.start[1]);
+        floating.dx = mover.dx;
+        floating.dy = mover.dy;
+        requestDraw();
+        return;
+      }
       if (!drag) return;
       var dpr = window.devicePixelRatio || 1;
       view.ox -= (e.clientX - drag.x) * dpr / view.scale;
@@ -502,6 +520,12 @@
         gesture = null;
         if (e.type === 'pointerup') finishGesture(g); else drawGesture(null);
       }
+      if (mover) {
+        var m = mover;
+        mover = null;
+        if (e.type === 'pointerup' && (m.dx !== 0 || m.dy !== 0)) S.move(m.layer, m.dx, m.dy);
+        else { floating.layer = -1; requestDraw(); }
+      }
       drag = null;
       setCursor(false);
     }
@@ -517,6 +541,9 @@
       else if (mod && key === 'm') { e.preventDefault(); S.openAdjust('curves'); }
       else if (mod && key === 'u') { e.preventDefault(); S.openAdjust('hue-saturation'); }
       else if (mod && !e.shiftKey && key === 'a') { e.preventDefault(); S.select({ op: 'all' }); }
+      else if (mod && key === 'x') { e.preventDefault(); S.clipboard('cut'); }
+      else if (mod && key === 'c') { e.preventDefault(); S.clipboard('copy'); }
+      else if (mod && key === 'v') { e.preventDefault(); S.clipboard('paste'); }
       else if (mod && key === 'd') { e.preventDefault(); S.select({ op: 'none' }); }
       else if (mod && e.shiftKey && key === 'i') { e.preventDefault(); S.select({ op: 'inverse' }); }
       else if (e.shiftKey && e.key === 'F5') { e.preventDefault(); S.openFill(); }
@@ -1099,7 +1126,7 @@
   };
 
   var TOOLS = [
-    { id: 'move', key: 'V', label: 'Move Tool' },
+    { id: 'move', key: 'V', label: 'Move Tool', built: true },
     { id: 'marquee', key: 'M', label: 'Rectangular Marquee Tool', built: true },
     { id: 'lasso', key: 'L', label: 'Lasso Tool', built: true },
     { id: 'wand', key: 'W', label: 'Magic Wand Tool' },
@@ -1332,6 +1359,45 @@
 
   S.clear = function () { return S.fill({ color: [0, 0, 0], opacity: 1, mode: 'erase' }); };
 
+  // ---- the floating layer: Move, Cut, Copy, Paste -------------------------
+  //
+  // While the Move tool drags, the shader's floating stage shows the
+  // active layer's selected pixels (all of them without a selection)
+  // cut from where they were and composited at the offset, from the
+  // textures already on the GPU, the ants moving along; on release the
+  // server does the same arithmetic once (move-pixels!), the selection
+  // moves with the pixels, and the layer comes back whole.  Copy and
+  // Cut keep the selection's pixels on the server's clipboard; Paste
+  // makes a new layer of them above the active one.
+
+  var floating = { layer: -1, dx: 0, dy: 0 };
+
+  S.move = function (layer, dx, dy) {
+    strokeChain = strokeChain.then(function () {
+      return postJSON('move', JSON.stringify({ layer: layer, dx: dx, dy: dy })).then(function (res) {
+        return tookRect(res).then(function () { return loadSelection(res.selection); });
+      }).then(function () { floating.layer = -1; requestDraw(); status(); },
+              function (e) { floating.layer = -1; requestDraw(); status('move failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
+
+  S.clipboard = function (op) {
+    var L = activeL();
+    if (op !== 'paste' && (!L || L.kind !== 'raster')) { status('pick a raster layer to ' + op); return Promise.resolve(null); }
+    var body = { op: op, layer: L ? L.index : null, above: S.activeLayer };
+    strokeChain = strokeChain.then(function () {
+      return postJSON('clipboard', JSON.stringify(body)).then(function (res) {
+        if (op === 'copy') { status('copied ' + res.clipboard.w + ' x ' + res.clipboard.h); return null; }
+        if (op === 'cut') return tookRect(res).then(function () { status(); });
+        S.activeLayer = res.active;
+        S.undoDepth = 0;
+        return reloadStructure(true);
+      }).catch(function (e) { status(op + ' failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
+
   // The ants crawl while something is selected.
   setInterval(function () {
     if (selectionMask) { antsPhase = (antsPhase + 1) % 8; requestDraw(); }
@@ -1463,7 +1529,9 @@
           enabled: function () { return S.undoDepth > 0; } },
         { label: 'Redo', key: 'Ctrl+Shift+Z' },
         '-',
-        { label: 'Cut', key: 'Ctrl+X' }, { label: 'Copy', key: 'Ctrl+C' }, { label: 'Paste', key: 'Ctrl+V' },
+        { label: 'Cut', key: 'Ctrl+X', enabled: rasterActive, run: function () { S.clipboard('cut'); } },
+        { label: 'Copy', key: 'Ctrl+C', enabled: rasterActive, run: function () { S.clipboard('copy'); } },
+        { label: 'Paste', key: 'Ctrl+V', run: function () { S.clipboard('paste'); } },
         '-',
         { label: 'Fill...', key: 'Shift+F5', enabled: rasterActive, run: function () { S.openFill(); } },
         { label: 'Clear', key: 'Delete', enabled: rasterActive, run: function () { S.clear(); } },
@@ -2130,7 +2198,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('move') && S.tool === saved.tool;
+      var refused = !S.setTool('wand') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -2344,6 +2412,68 @@
         check('Deselect clears the selection', rect === null && !S.selection);
         S.setActiveLayer(active, false);
       });
+    }).then(function () {
+      // The floating layer: a rectangle of the bottom layer dragged with
+      // the Move tool, previewed through the shader's floating stage and
+      // committed by the server with the selection moving along; undo;
+      // then Copy and Paste (a new layer above with the same bytes where
+      // they came from), Cut (the rectangle cleared) and undo.
+      var active = S.activeLayer;
+      S.setActiveLayer(0, false);
+      var W = doc.width, H = doc.height, before = S.renderExact(), n = doc.layers.length;
+      var rx = Math.floor(W * 0.2), ry = Math.floor(H * 0.2), rw = Math.floor(W * 0.2), rh = Math.floor(H * 0.2);
+      var dx = Math.floor(W * 0.1), dy = Math.floor(H * 0.05), saved = S.tool, previewed = null;
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      function at(x, y) {
+        return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                 pointerId: 46, pointerType: 'mouse', bubbles: true };
+      }
+      function same(a, b) { if (a.length !== b.length) return false; for (var k = 0; k < a.length; k++) if (a[k] !== b[k]) return false; return true; }
+      function rect(tex) { return fetchBytes(api('raster?i=' + tex + '&x=' + rx + '&y=' + ry + '&w=' + rw + '&h=' + rh)); }
+      return S.select({ op: 'rect', x: rx, y: ry, w: rw, h: rh }).then(function () {
+        S.setTool('move');
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(rx + 5, ry + 5)));
+        canvas.dispatchEvent(new PointerEvent('pointermove', at(rx + 5 + dx, ry + 5 + dy)));
+        previewed = S.renderExact();
+        check('the Move tool previews the moved pixels', renderDiff(before, previewed).maxDiff > 0);
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(rx + 5 + dx, ry + 5 + dy)));
+        S.setTool(saved);
+        return S.strokesSettled();
+      }).then(function () {
+        var after = S.renderExact(), d = renderDiff(previewed, after), sel = S.selection;
+        check('the committed move is what the preview showed', d.maxDiff <= 2, d);
+        check('the selection moved with the pixels', sel && sel.x === rx + dx && sel.y === ry + dy, sel);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a move', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the picture back after a move', renderDiff(before, S.renderExact()).maxDiff === 0);
+        return S.select({ op: 'rect', x: rx, y: ry, w: rw, h: rh });
+      }).then(function () { return S.clipboard('copy'); })
+        .then(function () { return S.clipboard('paste'); })
+        .then(function () {
+          var L = doc.layers[S.activeLayer];
+          return Promise.all([rect(L.texIndex), rect(doc.layers[0].texIndex)]).then(function (pair) {
+            check('Paste makes a layer above with the copied bytes where they came from',
+                  doc.layers.length === n + 1 && S.activeLayer === 1 && L.kind === 'raster' && same(pair[0], pair[1]),
+                  { layers: doc.layers.length, active: S.activeLayer });
+            return S.layerOp({ op: 'delete' });
+          });
+        }).then(function () {
+          S.setActiveLayer(0, false);
+          return S.clipboard('cut');
+        }).then(function () {
+          return rect(doc.layers[0].texIndex);
+        }).then(function (b) {
+          var clear = true;
+          for (var k = 3; k < b.length; k += 4) if (b[k] !== 0) clear = false;
+          check('Cut clears the selection on the layer', clear);
+          return S.undo();
+        }).then(function () {
+          check('undo gives the picture back after a cut', renderDiff(before, S.renderExact()).maxDiff === 0);
+          return S.select({ op: 'none' });
+        }).then(function () { S.setActiveLayer(active, false); });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {

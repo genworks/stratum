@@ -52,6 +52,8 @@ uniform vec4 u_adjust_params;
 uniform sampler2D u_selection;
 uniform int u_selection_on;
 uniform float u_ants;
+uniform int u_float_layer;
+uniform vec2 u_float_offset;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -168,8 +170,24 @@ void main() {
        ;; Adjustments shown on one layer's pixels, a table (kind 1, three
        ;; rows of u_luts from u_adjust_row) or hue/saturation (kind 2),
        ;; on the encoded scale, as adjust-layer! will bake it.
+       ;; Before both, the floating layer (u_float_layer, idle at -1): the
+       ;; Move tool's drag shown live, the pixel being what the cut leaves
+       ;; (alpha times one minus the selection) with the moved copy over
+       ;; it, exactly as move-pixels! (selection.lisp) will commit it.
        (format nil "  // layer ~d: raster, ~(~a~)
   s = layer_px(~d, p);
+  if (u_float_layer == ~:*~d) {
+    float sh = u_selection_on == 1 ? selected(p) : 1.0;
+    vec2 q = p - u_float_offset;
+    bool inq = q.x >= 0.0 && q.y >= 0.0 && q.x < u_doc_size.x && q.y < u_doc_size.y;
+    float st = inq ? (u_selection_on == 1 ? selected(q) : 1.0) : 0.0;
+    vec4 m = inq ? layer_px(~:*~d, q) : vec4(0.0);
+    float ma = m.a * st;
+    float ba = s.a * (1.0 - sh);
+    float na = ma + ba * (1.0 - ma);
+    s.rgb = na > 0.0 ? (m.rgb * ma + s.rgb * ba * (1.0 - ma)) / na : vec3(0.0);
+    s.a = na;
+  }
   if (u_stroke_layer == ~:*~d) {
     float cv = stroke_px(p) * u_stroke_color.a;
     if (cv > 0.0) {
@@ -225,9 +243,10 @@ bottom first."
   o_color = vec4(srgb_encode(c), ao);
   if (u_selection_on == 1 && u_exact == 0) {
     float d = 1.0 / u_view_scale;
-    bool in0 = selected(p) >= 0.5;
-    if ((selected(p + vec2(d, 0.0)) >= 0.5) != in0 || (selected(p - vec2(d, 0.0)) >= 0.5) != in0 ||
-        (selected(p + vec2(0.0, d)) >= 0.5) != in0 || (selected(p - vec2(0.0, d)) >= 0.5) != in0) {
+    vec2 pa = p - u_float_offset;
+    bool in0 = selected(pa) >= 0.5;
+    if ((selected(pa + vec2(d, 0.0)) >= 0.5) != in0 || (selected(pa - vec2(d, 0.0)) >= 0.5) != in0 ||
+        (selected(pa + vec2(0.0, d)) >= 0.5) != in0 || (selected(pa - vec2(0.0, d)) >= 0.5) != in0) {
       float t = mod(gl_FragCoord.x + gl_FragCoord.y + u_ants, 8.0);
       o_color = vec4(vec3(t < 4.0 ? 0.0 : 1.0), 1.0);
     }

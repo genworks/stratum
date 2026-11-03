@@ -53,7 +53,7 @@ uniform sampler2D u_selection;
 uniform int u_selection_on;
 uniform float u_ants;
 uniform int u_float_layer;
-uniform vec2 u_float_offset;
+uniform mat3 u_float_inv;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -79,6 +79,27 @@ float stroke_px(vec2 p) {
 float selected(vec2 q) {
   if (q.x < 0.0 || q.y < 0.0 || q.x >= u_doc_size.x || q.y >= u_doc_size.y) return 0.0;
   return texelFetch(u_selection, ivec2(q), 0).r;
+}
+// The floating copy of layer i at source point q: bilinear over the
+// four texels around it, premultiplied linear with the selection as a
+// weight, nothing beyond the document; as transform-pixels! samples.
+vec4 float_sample(int i, vec2 q) {
+  vec2 f = q - 0.5;
+  vec2 b = floor(f);
+  vec2 t = f - b;
+  vec4 acc = vec4(0.0);
+  for (int j = 0; j < 2; j++) {
+    for (int k = 0; k < 2; k++) {
+      vec2 c = b + vec2(float(k), float(j));
+      float wgt = (k == 0 ? 1.0 - t.x : t.x) * (j == 0 ? 1.0 - t.y : t.y);
+      if (c.x >= 0.0 && c.y >= 0.0 && c.x < u_doc_size.x && c.y < u_doc_size.y) {
+        vec4 px = texelFetch(u_layers, ivec3(ivec2(c), i), 0);
+        float sv = u_selection_on == 1 ? texelFetch(u_selection, ivec2(c), 0).r : 1.0;
+        acc += vec4(px.rgb * px.a * sv, px.a * sv) * wgt;
+      }
+    }
+  }
+  return acc;
 }
 // Mask i at p, with the live stroke painted on it when the stroke is on
 // that mask: the mask moves toward the stroke's gray (u_stroke_color.r)
@@ -170,22 +191,20 @@ void main() {
        ;; Adjustments shown on one layer's pixels, a table (kind 1, three
        ;; rows of u_luts from u_adjust_row) or hue/saturation (kind 2),
        ;; on the encoded scale, as adjust-layer! will bake it.
-       ;; Before both, the floating layer (u_float_layer, idle at -1): the
-       ;; Move tool's drag shown live, the pixel being what the cut leaves
-       ;; (alpha times one minus the selection) with the moved copy over
-       ;; it, exactly as move-pixels! (selection.lisp) will commit it.
+       ;; Before both, the floating layer (u_float_layer, idle at -1): a
+       ;; Move drag or a Free Transform shown live, the pixel being what
+       ;; the cut leaves (alpha times one minus the selection) with the
+       ;; copy, sampled through the inverse matrix, composited over it,
+       ;; as move-pixels! and transform-pixels! (selection.lisp) commit.
        (format nil "  // layer ~d: raster, ~(~a~)
   s = layer_px(~d, p);
   if (u_float_layer == ~:*~d) {
     float sh = u_selection_on == 1 ? selected(p) : 1.0;
-    vec2 q = p - u_float_offset;
-    bool inq = q.x >= 0.0 && q.y >= 0.0 && q.x < u_doc_size.x && q.y < u_doc_size.y;
-    float st = inq ? (u_selection_on == 1 ? selected(q) : 1.0) : 0.0;
-    vec4 m = inq ? layer_px(~:*~d, q) : vec4(0.0);
-    float ma = m.a * st;
+    vec2 q = (u_float_inv * vec3(p, 1.0)).xy;
+    vec4 m = float_sample(~:*~d, q);
     float ba = s.a * (1.0 - sh);
-    float na = ma + ba * (1.0 - ma);
-    s.rgb = na > 0.0 ? (m.rgb * ma + s.rgb * ba * (1.0 - ma)) / na : vec3(0.0);
+    float na = m.a + ba * (1.0 - m.a);
+    s.rgb = na > 0.0 ? (m.rgb + s.rgb * ba * (1.0 - m.a)) / na : vec3(0.0);
     s.a = na;
   }
   if (u_stroke_layer == ~:*~d) {
@@ -243,7 +262,7 @@ bottom first."
   o_color = vec4(srgb_encode(c), ao);
   if (u_selection_on == 1 && u_exact == 0) {
     float d = 1.0 / u_view_scale;
-    vec2 pa = p - u_float_offset;
+    vec2 pa = (u_float_inv * vec3(p, 1.0)).xy;
     bool in0 = selected(pa) >= 0.5;
     if ((selected(pa + vec2(d, 0.0)) >= 0.5) != in0 || (selected(pa - vec2(d, 0.0)) >= 0.5) != in0 ||
         (selected(pa + vec2(0.0, d)) >= 0.5) != in0 || (selected(pa - vec2(0.0, d)) >= 0.5) != in0) {

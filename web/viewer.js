@@ -79,7 +79,7 @@
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
      'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
-     'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_offset'].forEach(function (n) {
+     'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -247,7 +247,7 @@
     gl.uniform1i(uni.u_selection_on, selectionMask ? 1 : 0);
     gl.uniform1f(uni.u_ants, antsPhase);
     gl.uniform1i(uni.u_float_layer, floating.layer);
-    gl.uniform2f(uni.u_float_offset, floating.dx, floating.dy);
+    gl.uniformMatrix3fv(uni.u_float_inv, false, floating.inv);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -456,6 +456,7 @@
     var drag = null, stroke = null, gesture = null, mover = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      if (S.transforming) { S.transforming.down(e); return; }
       var tool = effectiveTool();
       if (paints(tool)) {
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
@@ -469,8 +470,7 @@
         if (!L || L.kind !== 'raster') { status('pick a raster layer to move'); return; }
         mover = { start: docPoint(e), layer: L.index, texIndex: L.texIndex, dx: 0, dy: 0 };
         floating.layer = L.texIndex;
-        floating.dx = 0;
-        floating.dy = 0;
+        setFloatTranslation(0, 0);
       } else if (tool === 'eyedropper') {
         pickColor(e);
       } else if (tool === 'zoom') {
@@ -481,6 +481,7 @@
       }
     });
     canvas.addEventListener('pointermove', function (e) {
+      if (S.transforming) { S.transforming.move(e); return; }
       if (stroke) {
         var fresh = coalesced(e).map(strokeSample);
         Array.prototype.push.apply(stroke.samples, fresh);
@@ -497,8 +498,7 @@
         var q = docPoint(e);
         mover.dx = Math.round(q[0] - mover.start[0]);
         mover.dy = Math.round(q[1] - mover.start[1]);
-        floating.dx = mover.dx;
-        floating.dy = mover.dy;
+        setFloatTranslation(mover.dx, mover.dy);
         requestDraw();
         return;
       }
@@ -510,6 +510,7 @@
       requestDraw();
     });
     function end(e) {
+      if (S.transforming) { S.transforming.up(e); return; }
       if (stroke) {
         var done = stroke;
         stroke = null;
@@ -535,6 +536,9 @@
       if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       var mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
+      else if (e.key === 'Enter' && S.transforming) { e.preventDefault(); S.transforming.commit(); }
+      else if (e.key === 'Escape' && S.transforming) { e.preventDefault(); S.transforming.cancel(); }
+      else if (mod && key === 't') { e.preventDefault(); S.beginTransform(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
       else if (mod && key === 'o') { e.preventDefault(); chooseFile(S.openFile); }
       else if (mod && e.altKey && key === 'i') { e.preventDefault(); S.openImageSize(); }
@@ -591,7 +595,10 @@
       status();
       requestDraw();
     }, { passive: false });
-    canvas.addEventListener('dblclick', function () { fitView(); status(); requestDraw(); });
+    canvas.addEventListener('dblclick', function () {
+      if (S.transforming) { S.transforming.commit(); return; }
+      fitView(); status(); requestDraw();
+    });
   }
 
   // Re-upload one rectangle of raster layer I (its texture index) from
@@ -1374,7 +1381,22 @@
   // Cut keep the selection's pixels on the server's clipboard; Paste
   // makes a new layer of them above the active one.
 
-  var floating = { layer: -1, dx: 0, dy: 0 };
+  // u_float_inv: the inverse of the forward affine, column-major for GLSL.
+  var floating = { layer: -1, inv: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]) };
+
+  function setFloatTranslation(dx, dy) {
+    floating.inv = new Float32Array([1, 0, 0, 0, 1, 0, -dx, -dy, 1]);
+  }
+
+  // The inverse of [a, b, c, d, e, f] (x' = ax + by + c, y' = dx + ey + f)
+  // as the column-major mat3 the shader multiplies by.
+  function inverseAffine(m) {
+    var a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5];
+    var det = a * e - b * d;
+    if (Math.abs(det) < 1e-12) det = 1e-12;
+    return new Float32Array([e / det, -d / det, 0, -b / det, a / det, 0,
+                             (b * f - c * e) / det, (c * d - a * f) / det, 1]);
+  }
 
   S.move = function (layer, dx, dy) {
     strokeChain = strokeChain.then(function () {
@@ -1497,6 +1519,139 @@
     d.cancel.addEventListener('click', dialog.cancel);
     d.ok.addEventListener('click', dialog.ok);
     return dialog;
+  };
+
+  // ---- Free Transform -----------------------------------------------------
+  //
+  // Ctrl+T: a box with eight handles around the selection (or the
+  // layer), drawn on the overlay.  Dragging inside moves it, a handle
+  // scales it about its center (Shift keeps the proportions), outside
+  // turns it; the floating stage previews the result through the
+  // inverse matrix with bilinear sampling, and Enter or a double-click
+  // sends the forward matrix to the server (transform-pixels!), which
+  // resamples the same way; Escape drops it.
+
+  S.transforming = null;
+
+  function applyAffine(m, p) { return [m[0] * p[0] + m[1] * p[1] + m[2], m[3] * p[0] + m[4] * p[1] + m[5]]; }
+
+  S.beginTransform = function () {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer to transform'); return null; }
+    if (S.transforming) S.transforming.cancel();
+    var box = S.selection ? { x: S.selection.x, y: S.selection.y, w: S.selection.w, h: S.selection.h }
+                          : { x: 0, y: 0, w: doc.width, h: doc.height };
+    var cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    var params = { tx: 0, ty: 0, sx: 1, sy: 1, angle: 0 };
+    var drag = null;
+    function matrix() {
+      var cs = Math.cos(params.angle), sn = Math.sin(params.angle);
+      var a = params.sx * cs, b = -params.sy * sn, d = params.sx * sn, e = params.sy * cs;
+      return [a, b, cx + params.tx - (a * cx + b * cy), d, e, cy + params.ty - (d * cx + e * cy)];
+    }
+    function corners() {
+      var m = matrix();
+      return [[box.x, box.y], [box.x + box.w, box.y], [box.x + box.w, box.y + box.h], [box.x, box.y + box.h]]
+        .map(function (p) { return applyAffine(m, p); });
+    }
+    function handles() {
+      var c = corners(), out = c.slice();
+      for (var k = 0; k < 4; k++) {
+        var n = c[(k + 1) % 4];
+        out.push([(c[k][0] + n[0]) / 2, (c[k][1] + n[1]) / 2]);
+      }
+      return out;
+    }
+    function draw() {
+      if (!overlay) return;
+      var ctx = overlay.getContext('2d');
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      var c = corners().map(toCanvas);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#000';
+      ctx.beginPath();
+      c.forEach(function (p, k) { if (k === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]); });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.strokeStyle = '#fff';
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      handles().map(toCanvas).forEach(function (p) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(p[0] - 4, p[1] - 4, 8, 8);
+        ctx.strokeStyle = '#000';
+        ctx.strokeRect(p[0] - 4.5, p[1] - 4.5, 9, 9);
+      });
+    }
+    function apply() {
+      floating.layer = L.texIndex;
+      floating.inv = inverseAffine(matrix());
+      draw();
+      requestDraw();
+    }
+    function local(p) {
+      // p relative to the moved center, turned back by the angle
+      var dx = p[0] - (cx + params.tx), dy = p[1] - (cy + params.ty);
+      var cs = Math.cos(-params.angle), sn = Math.sin(-params.angle);
+      return [dx * cs - dy * sn, dx * sn + dy * cs];
+    }
+    function finish() {
+      S.transforming = null;
+      floating.layer = -1;
+      floating.inv = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+      drawGesture(null);
+      requestDraw();
+    }
+    var t = S.transforming = {
+      layer: L.index, params: params, box: box, matrix: matrix,
+      set: function (changes) { Object.assign(params, changes); apply(); },
+      down: function (e) {
+        var p = docPoint(e), pc = toCanvas(p), hs = handles().map(toCanvas), hit = -1;
+        for (var k = 0; k < hs.length; k++) {
+          if (Math.abs(hs[k][0] - pc[0]) <= 10 && Math.abs(hs[k][1] - pc[1]) <= 10) { hit = k; break; }
+        }
+        var l = local(p), inside = Math.abs(l[0]) <= Math.abs(params.sx) * box.w / 2 && Math.abs(l[1]) <= Math.abs(params.sy) * box.h / 2;
+        drag = { mode: hit >= 0 ? 'scale' : (inside ? 'move' : 'rotate'), handle: hit, start: p,
+                 from: Object.assign({}, params), shift: e.shiftKey,
+                 angle0: Math.atan2(p[1] - (cy + params.ty), p[0] - (cx + params.tx)) };
+      },
+      move: function (e) {
+        if (!drag) return;
+        var p = docPoint(e);
+        if (drag.mode === 'move') {
+          params.tx = drag.from.tx + (p[0] - drag.start[0]);
+          params.ty = drag.from.ty + (p[1] - drag.start[1]);
+        } else if (drag.mode === 'rotate') {
+          params.angle = drag.from.angle + Math.atan2(p[1] - (cy + params.ty), p[0] - (cx + params.tx)) - drag.angle0;
+        } else {
+          var l = local(p), k = drag.handle;
+          var signX = [-1, 1, 1, -1, 0, 1, 0, -1][k], signY = [-1, -1, 1, 1, -1, 0, 1, 0][k];
+          var sx = signX ? l[0] / (signX * box.w / 2) : params.sx;
+          var sy = signY ? l[1] / (signY * box.h / 2) : params.sy;
+          if (e.shiftKey || drag.shift) { var u = (Math.abs(sx) + Math.abs(sy)) / 2; sx = u * (sx < 0 ? -1 : 1); sy = u * (sy < 0 ? -1 : 1); }
+          params.sx = Math.abs(sx) < 0.01 ? 0.01 : sx;
+          params.sy = Math.abs(sy) < 0.01 ? 0.01 : sy;
+        }
+        apply();
+      },
+      up: function () { drag = null; },
+      commit: function () {
+        var m = matrix();
+        finish();
+        strokeChain = strokeChain.then(function () {
+          return postJSON('transform', JSON.stringify({ layer: L.index, matrix: m })).then(function (res) {
+            return tookRect(res).then(function () { return loadSelection(res.selection); });
+          }).then(function () { status(); }, function (e) { status('transform failed: ' + e.message); });
+        });
+        return strokeChain;
+      },
+      cancel: finish
+    };
+    apply();
+    status('Free Transform: drag to move, handles to scale, outside to turn; Enter commits, Escape cancels');
+    return t;
   };
 
   // The ants crawl while something is selected.
@@ -1637,7 +1792,7 @@
         { label: 'Fill...', key: 'Shift+F5', enabled: rasterActive, run: function () { S.openFill(); } },
         { label: 'Clear', key: 'Delete', enabled: rasterActive, run: function () { S.clear(); } },
         '-',
-        { label: 'Free Transform', key: 'Ctrl+T' }] },
+        { label: 'Free Transform', key: 'Ctrl+T', enabled: rasterActive, run: function () { S.beginTransform(); } }] },
       { title: 'Image', items: [
         { label: 'Mode', sub: [{ label: 'RGB Color', check: true }, { label: 'Grayscale' }, { label: 'CMYK Color' }] },
         '-',
@@ -2577,6 +2732,39 @@
           check('undo gives the picture back after a cut', renderDiff(before, S.renderExact()).maxDiff === 0);
           return S.select({ op: 'none' });
         }).then(function () { S.setActiveLayer(active, false); });
+    }).then(function () {
+      // Free Transform: a rectangle of the bottom layer scaled, turned
+      // and moved, previewed through the floating stage with bilinear
+      // sampling and committed by the server with the same; the
+      // selection follows; parity; undo; and Escape leaves the picture.
+      var active = S.activeLayer;
+      S.setActiveLayer(0, false);
+      var W = doc.width, H = doc.height, before = S.renderExact(), previewed = null;
+      var rx = Math.floor(W * 0.25), ry = Math.floor(H * 0.25), rw = Math.floor(W * 0.3), rh = Math.floor(H * 0.3);
+      return S.select({ op: 'rect', x: rx, y: ry, w: rw, h: rh }).then(function () {
+        var t = S.beginTransform();
+        t.set({ sx: 1.3, sy: 0.8, angle: 0.35, tx: Math.floor(W * 0.05), ty: Math.floor(H * 0.03) });
+        previewed = S.renderExact();
+        check('Free Transform previews the transformed pixels', renderDiff(before, previewed).maxDiff > 0);
+        return t.commit();
+      }).then(function () {
+        var after = S.renderExact(), d = renderDiff(previewed, after), sel = S.selection;
+        check('the committed transform is what the preview showed', d.maxDiff <= 2, d);
+        check('the selection follows the transform', sel && (sel.w !== rw || sel.x !== rx), sel);
+        return S.parity();
+      }).then(function (p) {
+        check('parity after a transform', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('undo gives the picture back after a transform', renderDiff(before, S.renderExact()).maxDiff === 0);
+        return S.select({ op: 'none' });
+      }).then(function () {
+        var t = S.beginTransform();
+        t.set({ angle: 1 });
+        t.cancel();
+        check('Escape leaves the picture alone', !S.transforming && renderDiff(before, S.renderExact()).maxDiff === 0);
+        S.setActiveLayer(active, false);
+      });
     }).then(function () {
       // Crop, Image Size and Canvas Size on a throwaway document opened
       // from a small image, through the endpoint the dialogs use (this

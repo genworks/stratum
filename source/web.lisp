@@ -243,6 +243,17 @@ a rectangle, with the selection's new rectangle."
     (setf (gethash "selection" json) (selection-json doc))
     (json-string json)))
 
+(defun handle-transform (req)
+  "Free Transform's commit: {layer, matrix: [a, b, c, d, e, f]}; answers
+the whole layer as a rectangle, with the selection's new rectangle."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body))))
+         (rect (transform-pixels! layer (gethash "matrix" body)))
+         (json (rect-json doc layer :layer rect)))
+    (setf (gethash "selection" json) (selection-json doc))
+    (json-string json)))
+
 (defun handle-clipboard (req)
   "{op: \"copy\" | \"cut\" | \"paste\", layer, above}.  Copy answers the
 clipboard's size; Cut the rectangle cleared, as handle-stroke does;
@@ -633,6 +644,7 @@ goes back as a 500 carrying the condition's text."
                (if selection (getf selection :mask) (make-array 0 :element-type '(unsigned-byte 8))))))
       (pub "/stratum/api/fill" "application/json" #'handle-fill)
       (pub "/stratum/api/move" "application/json" #'handle-move)
+      (pub "/stratum/api/transform" "application/json" #'handle-transform)
       (pub "/stratum/api/clipboard" "application/json" #'handle-clipboard)
       (pub "/stratum/api/resize" "application/json" #'handle-resize)
       (pub "/stratum/api/open" "application/json" #'handle-open)

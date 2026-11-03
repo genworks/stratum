@@ -191,6 +191,93 @@ layer."
     (select-translate! doc dx dy)
     (list 0 0 w h)))
 
+;;; Free Transform: the same cut-and-composite as Move, the copy sampled
+;;; through an affine matrix.  The matrix (a b c d e f) maps a source
+;;; point to its destination, x' = ax + by + c, y' = dx + ey + f, in
+;;; pixel coordinates with centers at half-integers; its inverse finds,
+;;; for each destination pixel, the source point to sample, bilinear in
+;;; premultiplied linear light with the selection as a weight, as the
+;;; shader's float_sample() does it.
+
+(defun affine-inverse (m)
+  "The inverse of the affine M (a b c d e f), or nil when singular."
+  (destructuring-bind (a b c d e f) (mapcar (lambda (v) (float v 1d0)) m)
+    (let ((det (- (* a e) (* b d))))
+      (unless (< (abs det) 1d-12)
+        (list (/ e det) (/ (- b) det) (/ (- (* b f) (* c e)) det)
+              (/ (- d) det) (/ a det) (/ (- (* c d) (* a f)) det))))))
+
+(defun transform-pixels! (layer matrix)
+  "Free Transform committed: raster LAYER's selected pixels (all without
+a selection) through MATRIX (a b c d e f), each destination pixel being
+what the cut leaves with the resampled copy over it; the selection goes
+through the same matrix.  The whole layer on the undo list; returns it
+as the rectangle."
+  (unless (eql (the-object layer kind) :raster)
+    (error "~a is not a raster layer." (the-object layer layer-name)))
+  (let* ((doc (the-object layer parent))
+         (w (the-object doc doc-width))
+         (h (the-object doc doc-height))
+         (inv (or (affine-inverse matrix) (error "The transform is singular.")))
+         (pixels (the-object layer (ensure-own-pixels!)))
+         (src (copy-seq pixels))
+         (selection (the-object doc selection))
+         (sel (and selection (getf selection :mask)))
+         (new-mask (and sel (make-gray w h)))
+         (decode *srgb-decode*))
+    (declare (type (simple-array (unsigned-byte 8) (*)) pixels src)
+             (type (simple-array double-float (256)) decode)
+             (type fixnum w h))
+    (destructuring-bind (ia ib ic id ie iff) inv
+      (declare (type double-float ia ib ic id ie iff))
+      (push-undo! doc (list (the-object layer index) :layer 0 0 w h src))
+      (flet ((sample (qx qy)
+               ;; premultiplied linear (r g b a) and the selection at the source point
+               (let* ((fx (- qx 0.5d0)) (fy (- qy 0.5d0))
+                      (bx (floor fx)) (by (floor fy))
+                      (tx (- fx bx)) (ty (- fy by))
+                      (r 0d0) (g 0d0) (b 0d0) (a 0d0) (s 0d0))
+                 (declare (type double-float fx fy tx ty r g b a s) (type fixnum bx by))
+                 (dotimes (j 2)
+                   (dotimes (k 2)
+                     (let ((cx (+ bx k)) (cy (+ by j))
+                           (wgt (* (if (= k 0) (- 1d0 tx) tx) (if (= j 0) (- 1d0 ty) ty))))
+                       (when (and (<= 0 cx) (< cx w) (<= 0 cy) (< cy h))
+                         (let* ((i (+ cx (* cy w)))
+                                (o (* 4 i))
+                                (sv (if sel (/ (float (aref sel i) 1d0) 255d0) 1d0))
+                                (pa (* (/ (float (aref src (+ o 3)) 1d0) 255d0) sv)))
+                           (incf r (* (aref decode (aref src o)) pa wgt))
+                           (incf g (* (aref decode (aref src (+ o 1))) pa wgt))
+                           (incf b (* (aref decode (aref src (+ o 2))) pa wgt))
+                           (incf a (* pa wgt))
+                           (incf s (* sv wgt)))))))
+                 (values r g b a s))))
+        (dotimes (y h)
+          (dotimes (x w)
+            (let* ((i (+ x (* y w)))
+                   (o (* 4 i))
+                   (px (+ x 0.5d0)) (py (+ y 0.5d0))
+                   (qx (+ (* ia px) (* ib py) ic))
+                   (qy (+ (* id px) (* ie py) iff))
+                   (sh (if sel (/ (float (aref sel i) 1d0) 255d0) 1d0))
+                   (ba (* (/ (float (aref src (+ o 3)) 1d0) 255d0) (- 1d0 sh))))
+              (multiple-value-bind (mr mg mb ma ms) (sample qx qy)
+                (let ((na (+ ma (* ba (- 1d0 ma)))))
+                  (if (> na 0d0)
+                      (flet ((channel (m k) (/ (+ m (* (aref decode (aref src (+ o k))) ba (- 1d0 ma))) na)))
+                        (setf (aref pixels o) (unit->byte (linear->srgb (channel mr 0)))
+                              (aref pixels (+ o 1)) (unit->byte (linear->srgb (channel mg 1)))
+                              (aref pixels (+ o 2)) (unit->byte (linear->srgb (channel mb 2)))
+                              (aref pixels (+ o 3)) (unit->byte na)))
+                      (setf (aref pixels o) 0 (aref pixels (+ o 1)) 0
+                            (aref pixels (+ o 2)) 0 (aref pixels (+ o 3)) 0)))
+                (when new-mask (setf (aref new-mask i) (unit->byte ms))))))))
+      (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
+      (when new-mask
+        (the-object doc (set-slot! :selection (make-selection new-mask w h))))
+      (list 0 0 w h))))
+
 (defvar *clipboard* nil
   "Plist (:pixels rgba :w :h :x :y): what Copy or Cut took, with where it
 came from, shared by every document as an editor's clipboard is.")

@@ -121,6 +121,17 @@ masks on their own scale) or placed on the new canvas around an
 anchor, and the page reloads. A cropped document renders as exactly
 that rectangle of the original, edits and all.
 
+Free Transform (Ctrl+T) is the same floating stage with a matrix in
+place of the offset: a box with eight handles around the selection or
+the layer; drag inside to move, a handle to scale about the center
+(Shift keeps the proportions), outside to turn; Enter or a
+double-click commits, Escape cancels. The preview samples the copy
+through the inverse matrix, bilinear over four texels in premultiplied
+linear light with the selection as a weight, and the server resamples
+the same way on commit (`transform-pixels!`), taking the selection
+through the matrix too. The Move tool keeps its exact whole-pixel
+path.
+
 Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
 Reveal All or Hide All makes a white or black one; Delete takes it
 away); clicking the mask's thumbnail in the Layers panel makes it the
@@ -149,8 +160,8 @@ with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
-Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5) and
-Clear (Delete); Image ▸ Adjustments ▸ Levels
+Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5),
+Clear (Delete) and Free Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
@@ -218,6 +229,7 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
 | `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
+| `POST /stratum/api/transform?doc=N` | `{layer, matrix: [a, b, c, d, e, f]}` (x′ = ax + by + c, y′ = dx + ey + f): the selected pixels resampled through it; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
@@ -260,6 +272,10 @@ It checks:
   those pixels only and the selection with them, undo, Copy and
   Paste putting the bytes back where they were on a new layer, Cut
   clearing them and undoing;
+- transforms: the identity leaves the layer as it is, a whole-pixel
+  translation transforms as a move does, a singular matrix is refused,
+  the selection goes through the matrix, and a 2× scale keeps the
+  interior opaque while the edge feathers;
 - sizes: placing pads and crops, resampling leaves the same size
   unchanged and keeps the ends in place when doubling, a mask
   resamples on its own scale, a cropped document renders as that
@@ -332,6 +348,9 @@ The self-test checks:
   preview with the selection moving along, parity, undo; Copy and
   Paste making a layer above with the same bytes where they came from;
   Cut clearing them; undo;
+- Free Transform: a rectangle scaled, turned and moved, previewed and
+  committed within two levels, the selection following, parity, undo,
+  and Escape leaving the picture alone;
 - sizes, on a throwaway document opened from a small image: Crop,
   Image Size and Canvas Size each remake it at the new size; the
   Image Size dialog opens and cancels.

@@ -450,6 +450,48 @@ to alter the pictures."
                        (progn (undo-stroke! doc)
                               (equalp (the-object doc (layer 0) pixels) before)))))))
 
+(defun test-transform ()
+  (let* ((image (let ((p (make-rgba 4 3)))
+                  (dotimes (i 12 p)
+                    (let ((o (* 4 i)))
+                      (setf (aref p o) (* 20 i) (aref p (+ o 1)) 100 (aref p (+ o 2)) 50 (aref p (+ o 3)) 255)))))
+         (doc (make-file-document "xform" 4 3 image))
+         (before (copy-seq (the-object doc (layer 0) pixels))))
+    (check "the identity transform leaves the layer as it is"
+           (progn (transform-pixels! (the-object doc (layer 0)) '(1 0 0 0 1 0))
+                  (equalp (the-object doc (layer 0) pixels) before)))
+    (check "an integer translation transforms as a move does"
+           (progn (undo-stroke! doc)
+                  (transform-pixels! (the-object doc (layer 0)) '(1 0 1 0 1 0))
+                  (let ((transformed (copy-seq (the-object doc (layer 0) pixels))))
+                    (undo-stroke! doc)
+                    (move-pixels! (the-object doc (layer 0)) 1 0)
+                    (equalp transformed (the-object doc (layer 0) pixels)))))
+    (check "a singular transform is refused"
+           (handler-case (progn (transform-pixels! (the-object doc (layer 0)) '(0 0 0 0 0 0)) nil)
+             (error () t)))
+    (check "a transform under a selection takes the selection with it"
+           (progn (undo-stroke! doc)
+                  (select-rect! doc 0 0 2 3)
+                  (transform-pixels! (the-object doc (layer 0)) '(1 0 2 0 1 0))
+                  (equal (getf (the-object doc selection) :rect) '(2 0 2 3)))
+           (getf (the-object doc selection) :rect))
+    ;; A 2x scale about the origin: every interior pixel samples four
+    ;; source texels inside the picture, so it stays opaque, and holds
+    ;; a mix of its sources; the edge row and column sample half a pixel
+    ;; past the picture's edge and feather, as bilinear sampling does.
+    (check "a scale about the origin doubles the picture's reach"
+           (progn (undo-stroke! doc)
+                  (select-none! doc)
+                  (transform-pixels! (the-object doc (layer 0)) '(2 0 0 0 2 0))
+                  (let ((p (the-object doc (layer 0) pixels)))
+                    (and (loop for y from 1 below 3
+                               always (loop for x from 1 below 4
+                                            always (= 255 (aref p (+ 3 (* 4 (+ x (* 4 y))))))))
+                         (<= 0 (aref p (* 4 (+ 2 (* 4 1)))) 100)
+                         (< (aref p (+ 3 (* 4 0))) 255))))
+           (the-object doc (layer 0) pixels))))
+
 (defun test-resize ()
   (let ((image (let ((p (make-rgba 4 3)))
                  (dotimes (i 12 p)
@@ -594,7 +636,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-selection test-floating test-resize
+                  test-brush test-masks test-adjust test-selection test-floating test-transform test-resize
                   test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)

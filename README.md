@@ -173,6 +173,19 @@ stroke stage samples the layer texture at the offset for its preview,
 and the server's `composite-clone-stroke!` is its twin, reading from a
 copy of the source rectangle taken before the stroke lands.
 
+The Healing Brush (J) is the stamp's sampling with the destination's
+tone kept: the paint at each pixel is the destination's blur plus what
+the source rises above its own blur, in linear light, so a blemish
+painted over from clean skin nearby takes the skin's grain and keeps
+the local shading, where the stamp would paste the source's color as
+it is. The blur's sigma is half the brush radius, at least one pixel.
+The viewer blurs the whole layer once at the stroke's start, with the
+filter shader's blur passes, and the live stroke stage samples that
+texture for its preview; the server blurs just the two rectangles,
+each widened by the kernel's reach, and `composite-heal-stroke!`
+(`source/heal.lisp`) is the stage's twin. Without float render targets
+the stroke shows when the pointer lifts.
+
 Free Transform (Ctrl+T) is the same floating stage with a matrix in
 place of the offset: a box with eight handles around the selection or
 the layer; drag inside to move, a handle to scale about the center
@@ -235,8 +248,8 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
 Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Crop, Eyedropper,
-Brush, Clone Stamp, Eraser, Gradient, Hand and Zoom; the rest are
-drawn dimmed and refuse to be picked. The Crop tool's drag leaves a box with everything outside
+Healing Brush, Brush, Clone Stamp, Eraser, Gradient, Hand and Zoom;
+the rest are drawn dimmed and refuse to be picked. The Crop tool's drag leaves a box with everything outside
 it darkened; Enter or a double-click crops, Escape drops it. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
@@ -300,7 +313,7 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
-| `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
+| `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null, heal: true or false}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
 | `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
@@ -347,6 +360,12 @@ It checks:
   offset inside its rectangle only and rebuilds nothing, a stroke over
   its own source reads the pixels as they were, a source beyond the
   layer paints nothing, and undo gives the layer back;
+- the Healing Brush: the rectangle blur equals the whole layer's blur
+  bit for bit and is zero beyond the layer, healing from a dark flat
+  onto a light flat keeps the light tone where a clone pastes the dark,
+  a bright pixel's texture carries onto its destination, a healing
+  stroke on the Sky ramp keeps the destination's tone inside its
+  rectangle only and rebuilds nothing, and undo gives the layer back;
 - masks: a stroke on a mask is refused where there is none, lowers the
   mask inside its rectangle only and rebuilds nothing, shows in the
   CPU render, and undoes exactly; Hide All, Reveal All and Delete; a
@@ -493,7 +512,11 @@ The self-test checks:
   source, a stroke carries the offset and is committed within two
   levels of its preview, its first dab takes the pixel at its source,
   parity, Aligned keeps the offset for a second stroke, and undo twice
-  gives the layer back;
+  gives the layer back; then the Healing Brush from the same source:
+  the stroke carries the heal flag and is committed within two levels
+  of its preview, on the parity document's Sky ramp the healed pixel
+  keeps the destination's tone rather than the source's, parity, and
+  undo gives the layer back;
 - merging, on a throwaway document: an image placed on another and
   merged down leaves one raster layer with the lower name, and a
   curves layer added then flattened leaves one Background;

@@ -58,6 +58,7 @@ uniform int u_float_layer;
 uniform mat3 u_float_inv;
 uniform sampler2D u_replace;
 uniform int u_replace_layer;
+uniform sampler2D u_blur;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -84,6 +85,18 @@ vec4 clone_px(int i, vec2 p) {
   vec2 q = p + u_stroke_offset;
   if (q.x < 0.0 || q.y < 0.0 || q.x >= u_doc_size.x || q.y >= u_doc_size.y) return vec4(0.0);
   return layer_px(i, q);
+}
+// What the Healing Brush paints at p: the source's texture on the
+// destination's tone, blur(destination) + source - blur(source), the
+// blur being u_blur, the layer blurred by the brush's sigma at the
+// stroke's start (heal-stroke!, composite-heal-stroke!).
+vec4 heal_px(int i, vec2 p) {
+  vec2 q = p + u_stroke_offset;
+  if (q.x < 0.0 || q.y < 0.0 || q.x >= u_doc_size.x || q.y >= u_doc_size.y) return vec4(0.0);
+  vec4 src = layer_px(i, q);
+  vec3 bs = texelFetch(u_blur, ivec2(q), 0).rgb;
+  vec3 bd = texelFetch(u_blur, ivec2(p), 0).rgb;
+  return vec4(clamp(bd + src.rgb - bs, 0.0, 1.0), src.a);
 }
 // The selection at q, with everything beyond the document unselected,
 // so a selection touching the edge shows its ants there.
@@ -234,7 +247,8 @@ void main() {
     if (cv > 0.0) {
       if (u_stroke_erase == 1) s.a = s.a * (1.0 - cv);
       else {
-        vec4 paint = u_stroke_clone == 1 ? clone_px(~:*~d, p) : vec4(u_stroke_color.rgb, 1.0);
+        vec4 paint = u_stroke_clone == 2 ? heal_px(~:*~d, p)
+                   : u_stroke_clone == 1 ? clone_px(~:*~d, p) : vec4(u_stroke_color.rgb, 1.0);
         float pa = cv * paint.a;
         if (pa > 0.0) {
           float na = pa + s.a * (1.0 - pa);

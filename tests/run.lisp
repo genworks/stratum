@@ -352,6 +352,72 @@ to alter the pictures."
              (progn (undo-stroke! doc) (undo-stroke! doc) (undo-stroke! doc)
                     (equalp before (the-object sky pixels)))))))
 
+(defun test-heal ()
+  (let* ((doc (make-sample-document "parity"))
+         (discs (the-object doc (layer 4)))
+         (pixels (the-object discs pixels)))
+    (check "blur-rect-straight gives the whole layer's blur at the rectangle, bit for bit"
+           (let* ((whole (gaussian-blur-premul (decode-premul pixels 320 200) 320 200 2.5d0))
+                  (part (blur-rect-straight pixels 320 200 100 60 30 20 2.5d0)))
+             (loop for row below 20
+                   always (loop for col below 30
+                                always (let* ((wo (* 4 (+ 100 col (* 320 (+ 60 row)))))
+                                              (po (* 4 (+ col (* 30 row))))
+                                              (a (aref whole (+ wo 3))))
+                                         (and (= a (aref part (+ po 3)))
+                                              (or (= a 0f0)
+                                                  (and (= (/ (aref whole wo) a) (aref part po))
+                                                       (= (/ (aref whole (+ wo 2)) a) (aref part (+ po 2)))))))))))
+    (check "a rectangle beyond the layer blurs to zero there"
+           (let ((part (blur-rect-straight pixels 320 200 310 190 20 20 2d0)))
+             (and (= 0f0 (aref part (+ 3 (* 4 (+ 15 (* 20 15))))))
+                  (> (aref part (+ 3 (* 4 (+ 5 (* 20 5))))) 0f0)))))
+  (flet ((flat (w h v) (let ((p (make-rgba w h)))
+                         (dotimes (i (* w h) p)
+                           (let ((o (* 4 i))) (setf (aref p o) v (aref p (+ o 1)) v (aref p (+ o 2)) v (aref p (+ o 3)) 255)))))
+         (gray (p w x y) (aref p (* 4 (+ x (* w y)))))
+         (cov (w h) (make-array (* w h) :element-type 'double-float :initial-element 1d0)))
+    ;; Two tones side by side: healing from the dark half onto the light
+    ;; half keeps the light tone, where a clone pastes the dark one.
+    (let ((two (flat 40 20 180)))
+      (dotimes (y 20) (dotimes (x 20) (let ((o (* 4 (+ x (* 40 y))))) (setf (aref two o) 60 (aref two (+ o 1)) 60 (aref two (+ o 2)) 60))))
+      (let ((healed (copy-seq two)) (cloned (copy-seq two)))
+        (heal-stroke! healed 40 20 (cov 5 5) 28 8 5 5 -20 0 4 1d0)
+        (composite-clone-stroke! cloned 40 (cov 5 5) 28 8 5 5 (clone-source-rect two 40 20 8 8 5 5) 1d0)
+        (check "healing from a dark flat onto a light flat keeps the light tone; a clone pastes the dark"
+               (and (<= 179 (gray healed 40 30 10) 181) (= 60 (gray cloned 40 30 10)))
+               (list (gray healed 40 30 10) (gray cloned 40 30 10)))))
+    ;; Texture carries: a single bright pixel in a flat field, healed
+    ;; onto flat field elsewhere, brightens its destination.
+    (let ((field (flat 40 20 120)))
+      (let ((o (* 4 (+ 10 (* 40 10))))) (setf (aref field o) 255 (aref field (+ o 1)) 255 (aref field (+ o 2)) 255))
+      (let ((healed (copy-seq field)))
+        (heal-stroke! healed 40 20 (cov 5 5) 28 8 5 5 -20 0 4 1d0)
+        (check "healing carries the source's texture onto the destination"
+               (and (> (gray healed 40 30 10) 150) (= 120 (gray healed 40 20 10)))
+               (gray healed 40 30 10)))))
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0)))
+         (w 320)
+         (before (copy-seq (the-object sky pixels))))
+    (demand doc)
+    (flet ((px (pixels x y) (let ((o (* 4 (+ x (* w y))))) (list (aref pixels o) (aref pixels (+ o 1)) (aref pixels (+ o 2)) (aref pixels (+ o 3)))))
+           (within (a b n) (every (lambda (p q) (<= (abs (- p q)) n)) a b)))
+      (check "a healing stroke on the Sky ramp keeps the destination's tone inside its rectangle only, and rebuilds nothing"
+             (let ((rect (apply-brush-stroke sky (list :points '((150 100 1)) :clone '(-100 -40) :heal t
+                                                        :radius 6 :hardness 1 :spacing 0.25 :flow 1 :opacity 1)))
+                   (after (the-object sky pixels)))
+               (and rect
+                    (within (px after 150 100) (px before 150 100) 3)
+                    (not (within (px before 50 60) (px before 150 100) 8))
+                    (loop for i below (length before)
+                          for x = (mod (floor i 4) w) for y = (floor (floor i 4) w)
+                          always (or (and (<= 143 x 157) (<= 93 y 107)) (= (aref before i) (aref after i))))
+                    (equal (demand doc) '(1 1))))
+             (list (px (the-object sky pixels) 150 100) (px before 150 100) (px before 50 60)))
+      (check "undo gives the layer back after a healing stroke"
+             (and (undo-stroke! doc) (equalp before (the-object sky pixels)))))))
+
 (defun test-masks ()
   (let* ((doc (make-sample-document "parity"))
          (w (the-object doc doc-width))
@@ -943,7 +1009,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
+                  test-brush test-clone test-heal test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
                   test-layers test-files
                   test-threads test-golden))

@@ -421,7 +421,8 @@ pixels; :radius; :hardness; :spacing (a fraction of the radius); :flow;
 a mask takes the color's luminance either way); :clone, (dx dy) for the
 Clone Stamp: the paint at each pixel is the layer's own pixel dx, dy
 away, as it was before the stroke, transparent beyond the layer; only
-the pixels take it, not a mask.
+the pixels take it, not a mask.  With :heal as well, the Healing Brush:
+the source's texture on the destination's tone (heal-stroke!).
 
 Dabs are placed and rasterized by the dual functions place-dabs and
 paint-dab, which the browser's preview also runs, and composited once by
@@ -451,12 +452,16 @@ renders see the change; the plan is untouched."
                    (clone (getf stroke :clone)))
                (push-undo! doc (list (the-object layer index) :layer x y w h
                                      (rgba-rect pixels width height x y w h 4)))
-               (if (and clone (not erase?))
-                   (let ((source (clone-source-rect pixels width height
-                                                    (+ x (round (first clone))) (+ y (round (second clone))) w h)))
-                     (composite-clone-stroke! pixels width coverage x y w h source opacity))
-                   (destructuring-bind (r g b) (stroke-color-linear stroke)
-                     (composite-stroke! pixels width coverage x y w h r g b opacity erase?)))
+               (cond ((and clone (not erase?) (getf stroke :heal))
+                      (heal-stroke! pixels width height coverage x y w h
+                                    (round (first clone)) (round (second clone))
+                                    (stroke-number stroke :radius) opacity))
+                     ((and clone (not erase?))
+                      (let ((source (clone-source-rect pixels width height
+                                                       (+ x (round (first clone))) (+ y (round (second clone))) w h)))
+                        (composite-clone-stroke! pixels width coverage x y w h source opacity)))
+                     (t (destructuring-bind (r g b) (stroke-color-linear stroke)
+                          (composite-stroke! pixels width coverage x y w h r g b opacity erase?))))
                (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))))
             (:mask
              (let ((mask (the-object layer (ensure-own-mask!))))

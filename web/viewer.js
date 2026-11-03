@@ -81,7 +81,7 @@
      'u_stroke_clone', 'u_stroke_offset',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
      'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv',
-     'u_replace', 'u_replace_layer'].forEach(function (n) {
+     'u_replace', 'u_replace_layer', 'u_blur'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -256,6 +256,9 @@
     gl.bindTexture(gl.TEXTURE_2D, replace.layer >= 0 ? replace.texture : texIdle);
     gl.uniform1i(uni.u_replace, 5);
     gl.uniform1i(uni.u_replace_layer, replace.layer);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, preview.clone === 2 && blurTex[1] ? blurTex[1] : texIdle);
+    gl.uniform1i(uni.u_blur, 6);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -345,9 +348,12 @@
   var spaceHeld = false;
 
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
-  function paints(tool) { return tool === 'brush' || tool === 'eraser' || tool === 'stamp'; }
+  function paints(tool) { return tool === 'brush' || tool === 'eraser' || samples(tool); }
+  // The tools that paint from an Alt-clicked source.
+  function samples(tool) { return tool === 'stamp' || tool === 'healing'; }
 
-  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', stamp: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
+  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', stamp: 'crosshair', healing: 'crosshair',
+                  eyedropper: 'crosshair', zoom: 'zoom-in',
                   marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair',
                   gradient: 'crosshair' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso' || tool === 'crop'; }
@@ -596,10 +602,10 @@
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       if (S.transforming) { S.transforming.down(e); return; }
       var tool = effectiveTool();
-      if (tool === 'stamp' && e.altKey) {
+      if (samples(tool) && e.altKey) {
         var sp = docPoint(e);
         S.setCloneSource(sp[0], sp[1]);
-      } else if (tool === 'stamp' && !S.cloneSource) {
+      } else if (samples(tool) && !S.cloneSource) {
         status('Alt-click to set the clone source');
       } else if (paints(tool)) {
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
@@ -957,9 +963,18 @@
       preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
       preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
     }
-    preview.clone = stroke.clone ? 1 : 0;
+    preview.clone = stroke.heal ? 2 : (stroke.clone ? 1 : 0);
     preview.offset = stroke.clone || [0, 0];
+    if (stroke.heal && !healBlur(stroke.texIndex, healSigma(stroke.brush.radius))) {
+      // no float render targets: nothing to blur into, so no preview;
+      // the commit still heals
+      preview.layer = -1;
+      status('no float render targets here: the healing shows when the pointer lifts');
+    }
   }
+
+  // The healing blur's sigma for a brush radius: heal-sigma's rule.
+  function healSigma(radius) { return Math.max(1, radius / 2); }
 
   function clearPreview() {
     if (strokeDirty) {
@@ -979,6 +994,7 @@
   function strokeBody(stroke) {
     return JSON.stringify({
       layer: stroke.layer, target: stroke.target, brush: stroke.brush, clone: stroke.clone || null,
+      heal: !!stroke.heal,
       samples: stroke.samples.map(function (s) { return [s.x, s.y, s.pressure]; })
     });
   }
@@ -1030,16 +1046,19 @@
       if (S.maskTarget && L && L.mask) {
         stroke.target = 'mask';
         stroke.maskIndex = L.maskIndex;
-        stroke.texIndex = stroke.tool === 'stamp' ? -1 : 0;
+        stroke.texIndex = samples(stroke.tool) ? -1 : 0;
         stroke.brush.mode = 'paint';
         if (stroke.tool === 'eraser') stroke.brush.color = S.background.slice();
       } else {
         stroke.target = 'layer';
         stroke.texIndex = texIndexOf(stroke.layer);
         stroke.brush.mode = stroke.tool === 'eraser' ? 'erase' : 'paint';
-        if (stroke.tool === 'stamp') {
+        if (samples(stroke.tool)) {
           if (!S.cloneSource) stroke.texIndex = -1;
-          else stroke.clone = cloneOffsetFor(stroke.samples[0]);
+          else {
+            stroke.clone = cloneOffsetFor(stroke.samples[0]);
+            stroke.heal = stroke.tool === 'healing';
+          }
         }
       }
     }
@@ -1055,8 +1074,8 @@
   S.onStroke = function (stroke) {
     S.lastStroke = stroke;
     if (!(stroke.texIndex >= 0)) {
-      status(stroke.tool === 'stamp' ? 'the Clone Stamp paints a raster layer\'s pixels, from an Alt-clicked source'
-                                     : 'pick a raster layer, or a mask, to paint on');
+      status(samples(stroke.tool) ? 'this tool paints a raster layer\'s pixels, from an Alt-clicked source'
+                                  : 'pick a raster layer, or a mask, to paint on');
       return;
     }
     strokeChain = strokeChain.then(function () { return commitStroke(stroke); });
@@ -1354,7 +1373,7 @@
     { id: 'crop', key: 'C', label: 'Crop Tool', built: true },
     { id: 'eyedropper', key: 'I', label: 'Eyedropper Tool', built: true },
     '-',
-    { id: 'healing', key: 'J', label: 'Healing Brush Tool' },
+    { id: 'healing', key: 'J', label: 'Healing Brush Tool', built: true },
     { id: 'brush', key: 'B', label: 'Brush Tool', built: true },
     { id: 'stamp', key: 'S', label: 'Clone Stamp Tool', built: true },
     { id: 'history', key: 'Y', label: 'History Brush Tool' },
@@ -1486,7 +1505,7 @@
     reverse.addEventListener('change', function () { S.gradient.reverse = reverse.checked; });
     grad.appendChild(el('div', { 'class': 'st-row' }, [reverse, el('span', { text: 'Reverse' })]));
     // The Clone Stamp's alignment, under that.
-    var stamp = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Clone Stamp' })])]);
+    var stamp = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Clone Stamp, Healing Brush' })])]);
     var aligned = el('input', { type: 'checkbox' });
     aligned.checked = S.clone.aligned;
     aligned.addEventListener('change', function () { S.clone.aligned = aligned.checked; S.cloneOffset = null; });
@@ -2525,6 +2544,22 @@
     return true;
   }
 
+  // The Healing Brush's blur of layer TEXINDEX by SIGMA, into the second
+  // blur texture, which the main shader samples as u_blur while the
+  // stroke is previewed: the twin of blur-rect-straight over the whole
+  // layer.  False without float render targets.
+  function healBlur(texIndex, sigma) {
+    if (!ensureBlur()) return false;
+    gl.useProgram(blurProg);
+    gl.bindVertexArray(vao);
+    gl.viewport(0, 0, doc.width, doc.height);
+    var s = { sigma: sigma };
+    filterPass(0, 0, texIdle, texIndex, s);
+    filterPass(1, 1, blurTex[0], texIndex, s);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return true;
+  }
+
   var gradientWarned = false;
   function previewGradient(g) {
     if (!runGradient(g.texIndex, gradientBody(g)) && !gradientWarned) {
@@ -3014,7 +3049,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('healing') && S.tool === saved.tool;
+      var refused = !S.setTool('history') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -3634,8 +3669,46 @@
           return S.strokesSettled().then(function () { return S.undo(); }).then(function () { return S.undo(); });
         }).then(function () {
           check('undo gives the layer back after two stamp strokes', renderDiff(before, S.renderExact()).maxDiff === 0);
-          restore();
-        });
+          // The Healing Brush from the same source onto the same spot:
+          // the stroke carries the heal flag, previews through the blur
+          // sampler and commits within two levels of the preview; on the
+          // parity document's Sky, a smooth ramp, the healed pixel keeps
+          // the destination's tone where a clone would paste the
+          // source's; parity; undo.
+          S.setTool('healing');
+          S.cloneOffset = null;
+          canvas.dispatchEvent(new PointerEvent('pointerdown', at(dx, dy)));
+          canvas.dispatchEvent(new PointerEvent('pointermove', at(dx + 20, dy + 8)));
+          canvas.dispatchEvent(new PointerEvent('pointerup', at(dx + 20, dy + 8)));
+          var healed = S.lastStroke;
+          check('a healing stroke carries the offset and the heal flag',
+                healed && healed.heal && healed.clone && healed.clone[0] === sx - dx && healed.clone[1] === sy - dy,
+                healed && healed.clone);
+          if (!healed || !healed.previewed) return null;
+          return healed.previewed.then(function () {
+            var shown = S.renderExact();
+            return S.strokesSettled().then(function () {
+              var after = S.renderExact(), kept = renderDiff(shown, after);
+              check('the healing stroke changed the picture and the commit matches its preview',
+                    renderDiff(before, after).maxDiff > 0 && (!S.filterPreviewSupported || kept.maxDiff <= 2), kept);
+              return fetchBytes(api('raster?i=' + L.texIndex));
+            });
+          }).then(function (px) {
+            var painted = px4(px, dx, dy), dest = px4(bytesBefore, dx, dy), source = px4(bytesBefore, sx, sy);
+            var fromDest = Math.max.apply(null, painted.map(function (v, i) { return Math.abs(v - dest[i]); }));
+            var fromSource = Math.max.apply(null, source.map(function (v, i) { return Math.abs(v - dest[i]); }));
+            if (doc.name === 'parity') {
+              check('on a smooth ramp the healed pixel keeps the destination\'s tone, not the source\'s',
+                    fromDest <= 4 && fromSource > 8, { painted: painted, dest: dest, source: source });
+            }
+            return S.parity();
+          }).then(function (p) {
+            check('parity after a healing stroke', p.maxDiff <= 1, p);
+            return S.undo();
+          }).then(function () {
+            check('undo gives the layer back after a healing stroke', renderDiff(before, S.renderExact()).maxDiff === 0);
+          });
+        }).then(restore, function (e) { restore(); throw e; });
       });
     }).then(function () {
       // Merge Down and Flatten on a throwaway document: an image opened,

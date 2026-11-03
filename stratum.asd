@@ -12,5 +12,5 @@
   (:file "source/generators") (:file "source/glsl")
   (:file "source/cpu") (:file "source/document")
   (:file "source/brush") (:file "source/selection")
-  (:file "source/samples") (:file "source/png") (:file "source/web")
-  (:file "source/stubs")))
+  (:file "source/resize") (:file "source/samples")
+  (:file "source/png") (:file "source/web") (:file "source/stubs")))

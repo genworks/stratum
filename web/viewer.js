@@ -537,6 +537,10 @@
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
       else if (mod && key === 'o') { e.preventDefault(); chooseFile(S.openFile); }
+      else if (mod && e.altKey && key === 'i') { e.preventDefault(); S.openImageSize(); }
+      else if (mod && e.altKey && key === 'c') { e.preventDefault(); S.openCanvasSize(); }
+      else if (e.key === 'Escape' && S.sizeDialog) S.sizeDialog.cancel();
+      else if (e.key === 'Enter' && S.sizeDialog) S.sizeDialog.ok();
       else if (mod && key === 'l') { e.preventDefault(); S.openAdjust('levels'); }
       else if (mod && key === 'm') { e.preventDefault(); S.openAdjust('curves'); }
       else if (mod && key === 'u') { e.preventDefault(); S.openAdjust('hue-saturation'); }
@@ -1398,6 +1402,103 @@
     return strokeChain;
   };
 
+  // ---- Image > Crop, Image Size, Canvas Size ------------------------------
+  //
+  // Each remakes the document at a new size on the server (resize.lisp)
+  // and reloads the page, since every texture here is the document's size.
+
+  S.resize = function (body) {
+    return S.strokesSettled().then(function () {
+      return postJSON('resize', JSON.stringify(body));
+    }).then(function (res) {
+      if (S.noReload) return res;
+      location.reload();
+      return res;
+    }, function (e) { status('resize failed: ' + e.message); return null; });
+  };
+
+  function numberField(label, value, onChange) {
+    var input = el('input', { type: 'number', min: '1', max: '16384', value: String(value) });
+    input.style.width = '80px';
+    input.addEventListener('input', function () { onChange(Number(input.value)); });
+    return { row: el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: label }), input, el('span', { text: 'px' })]),
+             input: input };
+  }
+
+  function sizeDialog(title, body) {
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: title })]);
+    body.forEach(function (e) { box.appendChild(e); });
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    return { box: box, cancel: cancel, ok: ok };
+  }
+
+  // Image Size: width and height, proportions constrained by default.
+  S.openImageSize = function () {
+    if (S.sizeDialog) S.sizeDialog.cancel();
+    var state = { width: doc.width, height: doc.height, constrain: true };
+    var w = numberField('width', state.width, function (v) {
+      state.width = v;
+      if (state.constrain) { state.height = Math.max(1, Math.round(v * doc.height / doc.width)); h.input.value = String(state.height); }
+    });
+    var h = numberField('height', state.height, function (v) {
+      state.height = v;
+      if (state.constrain) { state.width = Math.max(1, Math.round(v * doc.width / doc.height)); w.input.value = String(state.width); }
+    });
+    var constrain = el('input', { type: 'checkbox' });
+    constrain.checked = true;
+    constrain.addEventListener('change', function () { state.constrain = constrain.checked; });
+    var d = sizeDialog('Image Size', [w.row, h.row,
+      el('div', { 'class': 'st-row' }, [constrain, el('span', { text: 'Constrain Proportions' })])]);
+    var dialog = S.sizeDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); w.input.value = String(state.width); h.input.value = String(state.height); },
+      cancel: function () { d.box.remove(); S.sizeDialog = null; },
+      ok: function () { d.box.remove(); S.sizeDialog = null; return S.resize({ op: 'image-size', width: state.width, height: state.height }); }
+    };
+    d.cancel.addEventListener('click', dialog.cancel);
+    d.ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
+  // Canvas Size: width, height and a nine-way anchor.
+  S.openCanvasSize = function () {
+    if (S.sizeDialog) S.sizeDialog.cancel();
+    var state = { width: doc.width, height: doc.height, anchor: [0.5, 0.5] };
+    var w = numberField('width', state.width, function (v) { state.width = v; });
+    var h = numberField('height', state.height, function (v) { state.height = v; });
+    var grid = el('div', { 'class': 'st-anchor' });
+    var cells = [];
+    [0, 0.5, 1].forEach(function (ay) {
+      [0, 0.5, 1].forEach(function (ax) {
+        var c = el('div', { 'class': 'st-anchor-cell' + (ax === 0.5 && ay === 0.5 ? ' st-on' : '') });
+        c.addEventListener('click', function () {
+          state.anchor = [ax, ay];
+          cells.forEach(function (k) { k.classList.toggle('st-on', k === c); });
+        });
+        cells.push(c);
+        grid.appendChild(c);
+      });
+    });
+    var d = sizeDialog('Canvas Size', [w.row, h.row,
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'anchor' }), grid])]);
+    var dialog = S.sizeDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); w.input.value = String(state.width); h.input.value = String(state.height); },
+      cancel: function () { d.box.remove(); S.sizeDialog = null; },
+      ok: function () {
+        d.box.remove();
+        S.sizeDialog = null;
+        return S.resize({ op: 'canvas-size', width: state.width, height: state.height, anchor: state.anchor });
+      }
+    };
+    d.cancel.addEventListener('click', dialog.cancel);
+    d.ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
   // The ants crawl while something is selected.
   setInterval(function () {
     if (selectionMask) { antsPhase = (antsPhase + 1) % 8; requestDraw(); }
@@ -1546,8 +1647,10 @@
           { label: 'Hue/Saturation...', key: 'Ctrl+U', enabled: rasterActive,
             run: function () { S.openAdjust('hue-saturation'); } }] },
         '-',
-        { label: 'Image Size...', key: 'Ctrl+Alt+I' },
-        { label: 'Canvas Size...', key: 'Ctrl+Alt+C' }] },
+        { label: 'Image Size...', key: 'Ctrl+Alt+I', run: function () { S.openImageSize(); } },
+        { label: 'Canvas Size...', key: 'Ctrl+Alt+C', run: function () { S.openCanvasSize(); } },
+        '-',
+        { label: 'Crop', enabled: function () { return !!S.selection; }, run: function () { S.resize({ op: 'crop' }); } }] },
       { title: 'Layer', items: [
         { label: 'New', sub: [{ label: 'Layer...', key: 'Ctrl+Shift+N', run: addLayer('raster') }] },
         { label: 'Duplicate Layer...', key: 'Ctrl+J', enabled: activeL,
@@ -2474,6 +2577,40 @@
           check('undo gives the picture back after a cut', renderDiff(before, S.renderExact()).maxDiff === 0);
           return S.select({ op: 'none' });
         }).then(function () { S.setActiveLayer(active, false); });
+    }).then(function () {
+      // Crop, Image Size and Canvas Size on a throwaway document opened
+      // from a small image, through the endpoint the dialogs use (this
+      // page cannot reload mid-test): each answers the new size, and
+      // the document says so afterwards.  The dialogs open and close.
+      var w = 40, h = 24, c2 = el('canvas', { width: String(w), height: String(h) });
+      var ctx = c2.getContext('2d');
+      ctx.fillStyle = '#4080c0';
+      ctx.fillRect(0, 0, w, h);
+      var name = null;
+      function sized(d) { return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(d)).then(function (j) { return [j.width, j.height]; }); }
+      function resize(body) {
+        return fetchJSON('/stratum/api/resize?doc=' + encodeURIComponent(name),
+                         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      }
+      var dialog = S.openImageSize();
+      dialog.set({ width: 100, height: 50 });
+      var opened = !!document.querySelector('.st-dialog');
+      dialog.cancel();
+      check('the Image Size dialog opens and cancels', opened && !document.querySelector('.st-dialog') && !S.sizeDialog);
+      return new Promise(function (r) { c2.toBlob(r, 'image/png'); }).then(S.decodeImage).then(function (img) {
+        return S.openImage(img, 'sizetest');
+      }).then(function (res) {
+        name = res.doc;
+        return fetchJSON('/stratum/api/select?doc=' + encodeURIComponent(name),
+                         { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ op: 'rect', x: 10, y: 4, w: 20, h: 16 }) });
+      }).then(function () { return resize({ op: 'crop' }); })
+        .then(function (r) { return sized(name).then(function (s) { check('Crop remakes the document as the selection', r.width === 20 && r.height === 16 && s[0] === 20 && s[1] === 16, s); }); })
+        .then(function () { return resize({ op: 'image-size', width: 60, height: 48 }); })
+        .then(function () { return sized(name).then(function (s) { check('Image Size remakes the document at the new size', s[0] === 60 && s[1] === 48, s); }); })
+        .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
+        .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
+        .then(function () { return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' }); });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {

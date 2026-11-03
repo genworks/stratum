@@ -112,6 +112,15 @@ server's clipboard, shared by every document; Paste makes a new layer
 of them above the active one, where they came from, or centered when
 they do not fit.
 
+Image ▸ Crop, Image Size and Canvas Size change the document's size,
+which is an input of its whole tree, so each remakes the document
+under its name (`source/resize.lisp`): every layer is first
+materialized, its pixels and its mask as they are now, then cropped
+to the selection, resampled (bilinear, in premultiplied linear light,
+masks on their own scale) or placed on the new canvas around an
+anchor, and the page reloads. A cropped document renders as exactly
+that rectangle of the original, edits and all.
+
 Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
 Reveal All or Hide All makes a white or black one; Delete takes it
 away); clicking the mask's thumbnail in the Layers panel makes it the
@@ -144,7 +153,8 @@ Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5) and
 Clear (Delete); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
-layer's pixels on OK; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
+layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
+(Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
 Inverse (Ctrl+Shift+I); Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
@@ -209,6 +219,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
 | `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
+| `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
@@ -249,6 +260,12 @@ It checks:
   those pixels only and the selection with them, undo, Copy and
   Paste putting the bytes back where they were on a new layer, Cut
   clearing them and undoing;
+- sizes: placing pads and crops, resampling leaves the same size
+  unchanged and keeps the ends in place when doubling, a mask
+  resamples on its own scale, a cropped document renders as that
+  rectangle of the original with its edits, a same-size Image Size
+  renders the same, a larger canvas keeps the picture centered on a
+  white border, a smaller one anchored top-left is that corner;
 - the stack: a layer added above another, deleted, moved and
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
@@ -314,7 +331,10 @@ The self-test checks:
   previewed through the shader and committed within two levels of the
   preview with the selection moving along, parity, undo; Copy and
   Paste making a layer above with the same bytes where they came from;
-  Cut clearing them; undo.
+  Cut clearing them; undo;
+- sizes, on a throwaway document opened from a small image: Crop,
+  Image Size and Canvas Size each remake it at the new size; the
+  Image Size dialog opens and cancels.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

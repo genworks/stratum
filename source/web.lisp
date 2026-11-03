@@ -264,6 +264,33 @@ Paste the new layer as handle-layers does."
                            "layerCount" (length (the-object doc layer-list)))))
            (t (error "Unknown clipboard operation ~s." op))))))
 
+(defun handle-resize (req)
+  "Image > Crop, Image Size and Canvas Size: {op: \"crop\"} (to the
+selection), {op: \"image-size\", width, height} or {op: \"canvas-size\",
+width, height, anchor: [ax, ay]}.  The document is remade under its
+name; answers {width, height} and the page reloads."
+  (let* ((name (or (net.aserve:request-query-value "doc" req) "demo"))
+         (doc (find-document name))
+         (body (parse-json-body req))
+         (op (gethash "op" body)))
+    (flet ((size (key) (let ((v (round (gethash key body))))
+                         (unless (and (<= 1 v) (<= v 16384)) (error "Bad size ~a." v))
+                         v)))
+      (let ((new (cond ((equal op "crop")
+                        (let ((selection (the-object doc selection)))
+                          (unless selection (error "Nothing is selected to crop to."))
+                          (apply #'crop-document doc (getf selection :rect))))
+                       ((equal op "image-size")
+                        (resize-document doc (size "width") (size "height")))
+                       ((equal op "canvas-size")
+                        (let ((anchor (or (gethash "anchor" body) '(0.5 0.5))))
+                          (canvas-size-document doc (size "width") (size "height")
+                                                (float (first anchor) 1d0) (float (second anchor) 1d0))))
+                       (t (error "Unknown resize operation ~s." op)))))
+        (setf (gethash name *documents*) new)
+        (json-string (json-object "width" (the-object new doc-width)
+                                  "height" (the-object new doc-height)))))))
+
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
 \"hue-saturation\", settings: {name: value}, curves: {channel: points}}
@@ -394,6 +421,9 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   z-index: 20; }
 .st-dialog h2 { font-size: 13px; margin: 0 0 8px; }
 .st-dialog-buttons { justify-content: flex-end; margin-top: 10px; }
+.st-anchor { display: grid; grid-template-columns: repeat(3, 22px); gap: 3px; }
+.st-anchor-cell { width: 22px; height: 22px; background: #3a3e45; border-radius: 2px; cursor: pointer; }
+.st-anchor-cell.st-on { background: #6c9ce0; }
 #stratum-menubar { height: 26px; display: flex; align-items: stretch; background: #2a2d33;
   border-bottom: 1px solid #3a3e45; user-select: none; position: relative; z-index: 5; }
 .st-menu { position: relative; }
@@ -604,6 +634,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/fill" "application/json" #'handle-fill)
       (pub "/stratum/api/move" "application/json" #'handle-move)
       (pub "/stratum/api/clipboard" "application/json" #'handle-clipboard)
+      (pub "/stratum/api/resize" "application/json" #'handle-resize)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
       (pub "/stratum/api/close" "application/json" #'handle-close))))

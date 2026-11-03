@@ -450,6 +450,54 @@ to alter the pictures."
                        (progn (undo-stroke! doc)
                               (equalp (the-object doc (layer 0) pixels) before)))))))
 
+(defun test-resize ()
+  (let ((image (let ((p (make-rgba 4 3)))
+                 (dotimes (i 12 p)
+                   (let ((o (* 4 i)))
+                     (setf (aref p o) (* 20 i) (aref p (+ o 1)) 100 (aref p (+ o 2)) 50 (aref p (+ o 3)) 255))))))
+    (check "place-rgba pads with transparency and crops with a negative offset"
+           (let ((padded (place-rgba image 4 3 6 5 1 1))
+                 (cropped (place-rgba image 4 3 2 2 -1 -1)))
+             (and (= 0 (aref padded 3))
+                  (equalp (subseq padded (* 4 (+ 1 (* 6 1))) (* 4 (+ 5 (* 6 1)))) (subseq image 0 16))
+                  (equalp cropped (rgba-rect image 4 3 1 1 2 2)))))
+    (check "resampling to the same size changes nothing"
+           (equalp (resample-rgba image 4 3 4 3) image))
+    (check "resampling doubles and halves with the ends in place"
+           (let ((up (resample-rgba image 4 3 8 6))
+                 (down (resample-rgba image 4 3 2 1)))
+             (and (= (length up) (* 4 8 6)) (= (length down) (* 4 2 1))
+                  (= (aref up 0) (aref image 0))
+                  (= (aref up (* 4 (+ 7 (* 8 5)))) (aref image (* 4 11)))
+                  (every (lambda (i) (= 255 (aref up (+ 3 (* 4 i))))) (loop for i below 48 collect i)))))
+    (check "a mask resamples on its own scale"
+           (let ((m (resample-gray (coerce #(0 255) '(vector (unsigned-byte 8))) 2 1 4 1)))
+             (and (= (aref m 0) 0) (= (aref m 3) 255) (< (aref m 0) (aref m 1) (aref m 2) (aref m 3))))))
+  (let* ((doc (make-sample-document "parity"))
+         (render (progn (the-object doc (layer 1) (set-slot! :opacity 0.3d0))
+                        (apply-brush-stroke (the-object doc (layer 0)) *test-stroke*)
+                        (the-object doc (render-cpu)))))
+    (let ((cropped (crop-document doc 50 40 120 90)))
+      (check "a cropped document renders as that rectangle of the original, edits and all"
+             (and (= 120 (the-object cropped doc-width)) (= 90 (the-object cropped doc-height))
+                  (equalp (the-object cropped (render-cpu)) (rgba-rect render 320 200 50 40 120 90))
+                  (= (the-object cropped (layer 1) opacity) 0.3d0))))
+    (let ((sized (resize-document doc 320 200)))
+      (check "an image size of the same size renders the same" (equalp (the-object sized (render-cpu)) render)))
+    (let ((bigger (resize-document doc 640 400)))
+      (check "an image size of twice the size is twice the size"
+             (and (= 640 (the-object bigger doc-width)) (= 400 (the-object bigger doc-height))
+                  (= (length (the-object bigger (render-cpu))) (* 4 640 400)))))
+    (let ((canvas (canvas-size-document doc 340 220 0.5d0 0.5d0)))
+      (check "a larger canvas keeps the picture centered on a white border"
+             (let ((r (the-object canvas (render-cpu))))
+               (and (= 340 (the-object canvas doc-width))
+                    (equalp (rgba-rect r 340 220 10 10 320 200) render)
+                    (= 255 (aref r 0) (aref r 1) (aref r 2))))))
+    (let ((canvas (canvas-size-document doc 200 100 0d0 0d0)))
+      (check "a smaller canvas anchored top-left is the top-left corner"
+             (equalp (the-object canvas (render-cpu)) (rgba-rect render 320 200 0 0 200 100))))))
+
 (defun test-adjust ()
   (let* ((doc (make-sample-document "parity"))
          (sky (the-object doc (layer 0)))
@@ -546,7 +594,8 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-selection test-floating test-layers test-files
+                  test-brush test-masks test-adjust test-selection test-floating test-resize
+                  test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

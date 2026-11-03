@@ -14,14 +14,14 @@
 ;;;   (load "/projects/gw/stratum/dev.lisp")
 ;;;
 ;;; then browse /stratum/ on that image's HTTP port (?doc=demo,
-;;; ?doc=parity, ?doc=stress).  zpng and salza2 come from the
+;;; ?doc=parity, ?doc=stress).  zpng, salza2 and chipz come from the
 ;;; genworks/quicklisp checkout when the image does not carry them.
 ;;;
 
 (in-package :cl-user)
 
 (let ((software #p"/projects/gw/quicklisp/dists/quicklisp/software/"))
-  (dolist (pattern '("zpng-*/" "salza2-*/"))
+  (dolist (pattern '("zpng-*/" "salza2-*/" "chipz-*/"))
     (dolist (dir (directory (merge-pathnames pattern software)))
       (pushnew dir asdf:*central-registry* :test #'equal))))
 

@@ -417,6 +417,16 @@ size; answers as handle-layers does."
                                   "active" active
                                   "layerCount" (length (the-object doc layer-list))))))))
 
+(defun handle-load (req)
+  "File > Open of a .stratum file: the body is the file; a new document
+under its name (?name=); answers {doc, width, height}."
+  (let* ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled")))
+         (doc (read-document-octets (request-octets req) name)))
+    (setf (gethash name *documents*) doc)
+    (json-string (json-object "doc" name
+                              "width" (the-object doc doc-width)
+                              "height" (the-object doc doc-height)))))
+
 (defun handle-close (req)
   "Forget the named document; a sample is remade on its next request."
   (let ((name (net.aserve:request-query-value "doc" req)))
@@ -649,4 +659,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/resize" "application/json" #'handle-resize)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
-      (pub "/stratum/api/close" "application/json" #'handle-close))))
+      (pub "/stratum/api/close" "application/json" #'handle-close)
+      (pub "/stratum/api/save" "application/octet-stream"
+           (lambda (req) (document-octets (request-doc req))))
+      (pub "/stratum/api/load" "application/json" #'handle-load))))

@@ -492,6 +492,34 @@ to alter the pictures."
                          (< (aref p (+ 3 (* 4 0))) 255))))
            (the-object doc (layer 0) pixels))))
 
+(defun test-file-format ()
+  (let ((doc (make-sample-document "parity")))
+    (the-object doc (layer 1) (set-slot! :opacity 0.3d0))
+    (the-object doc (layer 2) (set-slot! :master '((0 0) (0.4 0.5) (1 1))))
+    (apply-brush-stroke (the-object doc (layer 0)) *test-stroke*)
+    (the-object doc (layer 6) (set-mask! '(:flat :value 128)))
+    (apply-brush-stroke (the-object doc (layer 6)) *test-stroke* :target :mask)
+    (let* ((render (the-object doc (render-cpu)))
+           (octets (document-octets doc))
+           (back (read-document-octets octets "back")))
+      (check "a saved document loads back and renders the same: edits, strokes and masks included"
+             (and (equalp (the-object back (render-cpu)) render)
+                  (equal (layer-names back) (layer-names doc))
+                  (= (the-object back (layer 1) opacity) 0.3d0)
+                  (the-object back (layer 6) has-mask?)))
+      (check "the file is smaller than the pixels it holds"
+             (< (length octets) (* 4 320 200 (length (the-object doc raster-layers))))
+             (length octets))
+      (check "a file that is not a Stratum file is refused"
+             (handler-case (progn (read-document-octets (string-octets "PNG, not us") "x") nil)
+               (error () t)))
+      (check "a header that tries to evaluate is refused"
+             (handler-case (progn (read-document-octets
+                                   (string-octets (format nil "STRATUM1~%20~%#.(list :stratum 1) "))
+                                   "x")
+                                  nil)
+               (error () t))))))
+
 (defun test-resize ()
   (let ((image (let ((p (make-rgba 4 3)))
                  (dotimes (i 12 p)
@@ -637,6 +665,7 @@ to alter the pictures."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-masks test-adjust test-selection test-floating test-transform test-resize
+                  test-file-format
                   test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)

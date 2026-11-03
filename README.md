@@ -159,7 +159,8 @@ The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
-Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
+Sample, Place, Save (Ctrl+S), Save As PNG (Ctrl+Shift+S), Export As
+PNG and Close; Edit ▸
 Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5),
 Clear (Delete) and Free Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
@@ -197,9 +198,18 @@ knows, and exactly: an ImageBitmap with no premultiplication and no
 color conversion, read back through a texture, so the bytes the server
 gets are the file's. Open makes a new document of them, one Background
 layer; Place adds them as a layer of the current document, centered
-and cropped or padded to its size. Save As and Export write the
-flattened picture as a PNG on the server (`zpng`). A layered native
-file format is still to come.
+and cropped or padded to its size. Save As PNG and Export write the
+flattened picture as a PNG on the server (`zpng`).
+
+Save writes the document itself as a `.stratum` file, and Open reads
+one back (`source/file.lisp`). The file is a line `STRATUM1`, a line
+with the header's length, the header, one s-expression holding the
+materialized layer specs with the pixel and mask bytes replaced by
+blob references, and then the blobs, each a zlib stream (`salza2` to
+write, `chipz` to read). The header is read with `*read-eval*` off.
+Nothing else goes in: no undo, no selection, no clipboard. A saved
+document loads back rendering byte for byte the same, edits, strokes
+and masks included.
 
 A change of the stack (a layer added, deleted, moved or duplicated)
 goes through the document's `layer-specs`, which makes every layer
@@ -225,6 +235,8 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
+| `/stratum/api/save?doc=N` | the document as a `.stratum` file |
+| `POST /stratum/api/load?name=` | body: a `.stratum` file; a new document; answers `{doc, width, height}` |
 | `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`; answers `{selection: {x, y, w, h} or null}` |
 | `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
@@ -276,6 +288,10 @@ It checks:
   translation transforms as a move does, a singular matrix is refused,
   the selection goes through the matrix, and a 2× scale keeps the
   interior opaque while the edge feathers;
+- the native file: a saved document loads back rendering the same with
+  its edits, strokes and masks, is smaller than its pixels, and a file
+  that is not a Stratum file or a header that tries to evaluate is
+  refused;
 - sizes: placing pads and crops, resampling leaves the same size
   unchanged and keeps the ends in place when doubling, a mask
   resamples on its own scale, a cropped document renders as that
@@ -353,7 +369,10 @@ The self-test checks:
   and Escape leaving the picture alone;
 - sizes, on a throwaway document opened from a small image: Crop,
   Image Size and Canvas Size each remake it at the new size; the
-  Image Size dialog opens and cancels.
+  Image Size dialog opens and cancels;
+- the native file: Save brings a Stratum file of the document, and
+  loaded back as a new document it has the same stack and renders
+  byte for byte the same on the server.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports
@@ -388,10 +407,9 @@ rectangles until the tile store exists; and the dab is a round, soft
 disc, with no texture, tilt or scatter yet.
 
 Smaller items still to do: per-session documents (today one document is
-shared per name), a layered native file format and a server-side PNG
-reader for files on disk (`chipz` is in the Gendl images), and
-premultiplying before mipmap generation to remove edge fringes when
-zoomed out.  The CPU render runs on
+shared per name), a server-side PNG reader for files on disk (`chipz`
+is loaded now), and premultiplying before mipmap generation to remove
+edge fringes when zoomed out.  The CPU render runs on
 `*render-threads*` threads (8 by default): 2 s for the 4K twenty-layer
 document, against 10 s on one thread.
 

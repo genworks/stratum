@@ -561,6 +561,7 @@
       else if (e.key === 'Escape' && S.adjustDialog) S.adjustDialog.cancel();
       else if (e.key === 'Enter' && S.adjustDialog) S.adjustDialog.ok();
       else if (mod && e.shiftKey && key === 's') { e.preventDefault(); S.saveAs(); }
+      else if (mod && key === 's') { e.preventDefault(); S.saveDocument(); }
       else if (mod && e.shiftKey && key === 'n') { e.preventDefault(); S.layerOp({ op: 'add', kind: 'raster' }); }
       else if (mod && key === 'j') { e.preventDefault(); S.layerOp({ op: 'duplicate' }); }
       else if (mod && e.key === ']') { e.preventDefault(); S.layerOp({ op: 'move', delta: 1 }); }
@@ -1701,11 +1702,25 @@
     return postBytes('open?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height, img.bytes);
   };
 
+  // A .stratum file goes to the server whole (its own format); anything
+  // else is an image the browser decodes.
   S.openFile = function (file) {
     status('opening ' + (file.name || 'image') + '...');
-    return S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); })
-      .then(function (res) { location.search = '?doc=' + encodeURIComponent(res.doc); })
+    var opened = /\.stratum$/i.test(file.name || '')
+      ? file.arrayBuffer().then(function (buf) {
+          return postBytes('load?name=' + encodeURIComponent(baseName(file)), new Uint8Array(buf));
+        })
+      : S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); });
+    return opened.then(function (res) { location.search = '?doc=' + encodeURIComponent(res.doc); })
       .catch(function (e) { status('open failed: ' + e.message); });
+  };
+
+  // File > Save: the document as a .stratum file, downloaded.
+  S.saveDocument = function () {
+    var a = el('a', { href: api('save'), download: doc.name + '.stratum' });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   S.placeImage = function (img, name) {
@@ -1737,7 +1752,7 @@
   };
 
   function chooseFile(then) {
-    var input = el('input', { type: 'file', accept: 'image/*' });
+    var input = el('input', { type: 'file', accept: 'image/*,.stratum' });
     input.style.display = 'none';
     input.addEventListener('change', function () {
       if (input.files[0]) then(input.files[0]);
@@ -1775,8 +1790,8 @@
         '-',
         { label: 'Place...', run: function () { chooseFile(S.placeFile); } },
         '-',
-        { label: 'Save', key: 'Ctrl+S' },
-        { label: 'Save As...', key: 'Ctrl+Shift+S', run: S.saveAs },
+        { label: 'Save', key: 'Ctrl+S', run: function () { S.saveDocument(); } },
+        { label: 'Save As PNG...', key: 'Ctrl+Shift+S', run: S.saveAs },
         { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(api('export.png')); } }] },
         '-',
         { label: 'Close', run: S.closeDocument }] },
@@ -2799,6 +2814,29 @@
         .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
         .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
         .then(function () { return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' }); });
+    }).then(function () {
+      // The native file: Save brings a .stratum file of this document;
+      // loaded back as a new document it has the same size and stack
+      // and renders byte for byte the same on the server.
+      var loaded = null;
+      return fetchBytes(api('save')).then(function (bytes) {
+        var magic = String.fromCharCode.apply(null, bytes.subarray(0, 8));
+        check('Save brings a Stratum file', magic === 'STRATUM1' && bytes.length > 1000, { bytes: bytes.length });
+        return postBytes('load?name=roundtrip', bytes);
+      }).then(function (res) {
+        loaded = res.doc;
+        return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(loaded));
+      }).then(function (d) {
+        var same = d.width === doc.width && d.height === doc.height && d.layers.length === doc.layers.length &&
+          d.layers.every(function (L, k) { return L.name === doc.layers[k].name && L.kind === doc.layers[k].kind; });
+        check('loaded back, it is the same stack', same, { width: d.width, height: d.height, layers: d.layers.length });
+        return Promise.all([fetchBytes(api('cpu')), fetchBytes('/stratum/api/cpu?doc=' + encodeURIComponent(loaded))]);
+      }).then(function (pair) {
+        var same = pair[0].length === pair[1].length;
+        for (var k = 0; same && k < pair[0].length; k++) if (pair[0][k] !== pair[1][k]) same = false;
+        check('loaded back, it renders byte for byte the same', same, { bytes: pair[0].length });
+        return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(loaded), { method: 'POST' });
+      });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {

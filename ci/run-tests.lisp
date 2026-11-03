@@ -49,7 +49,7 @@
 
 (handler-case
     (let ((warnings '()))
-      (ql:quickload :zpng :silent t)
+      (ql:quickload '(:zpng :chipz) :silent t)
       (pushnew *stratum-dir* asdf:*central-registry* :test #'equal)
       (handler-bind ((warning (lambda (w)
                                 (unless (typep w 'style-warning)

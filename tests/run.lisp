@@ -352,6 +352,62 @@ to alter the pictures."
                   (equalp (the-object doc (render-cpu)) opaque))
              (list (the-object doc (render-cpu)) opaque)))))
 
+(defun test-selection ()
+  (check "a rectangle selection covers its pixels and reports its bounds"
+         (let ((doc (make-sample-document "parity")))
+           (select-rect! doc 10 20 30 40)
+           (let* ((sel (the-object doc selection)) (mask (getf sel :mask)))
+             (and (equal (getf sel :rect) '(10 20 30 40))
+                  (= 255 (aref mask (+ 10 (* 320 20))) (aref mask (+ 39 (* 320 59))))
+                  (= 0 (aref mask (+ 9 (* 320 20))) (aref mask (+ 40 (* 320 59))) (aref mask (+ 10 (* 320 60))))
+                  (= (count 255 mask) (* 30 40))))))
+  (check "a square lasso equals the same rectangle"
+         (equalp (rasterize-polygon 50 50 '((10 10) (30 10) (30 25) (10 25)))
+                 (rasterize-rect 50 50 10 10 20 15)))
+  (check "a triangle lasso fills by pixel centers, even-odd"
+         (let ((m (rasterize-polygon 20 20 '((0 0) (20 0) (0 20)))))
+           (and (= 255 (aref m 0)) (= 255 (aref m (+ 5 (* 20 5)))) (= 0 (aref m (+ 19 (* 20 19))))
+                (= 0 (aref m (+ 15 (* 20 15)))))))
+  (let ((doc (make-sample-document "parity")))
+    (check "an empty rectangle selects nothing; inverse of nothing is all"
+           (progn (select-rect! doc 400 400 10 10)
+                  (and (null (the-object doc selection))
+                       (progn (select-inverse! doc)
+                              (equal (getf (the-object doc selection) :rect) '(0 0 320 200))))))
+    (check "inverse of a rectangle is everything else, and deselect clears it"
+           (progn (select-rect! doc 0 0 100 200)
+                  (select-inverse! doc)
+                  (and (equal (getf (the-object doc selection) :rect) '(100 0 220 200))
+                       (progn (select-none! doc) (null (the-object doc selection))))))
+    (let* ((sky (the-object doc (layer 0)))
+           (w 320)
+           (before (copy-seq (the-object sky pixels))))
+      (demand doc)
+      (select-rect! doc 100 60 60 40)
+      (check "a stroke under a selection changes pixels inside it only"
+             (let ((rect (apply-brush-stroke sky *test-stroke*))
+                   (after (the-object sky pixels)))
+               (and rect
+                    (not (equalp before after))
+                    (loop for i below (length before)
+                          for px = (mod (floor i 4) w) for py = (floor (floor i 4) w)
+                          always (or (and (<= 100 px 159) (<= 60 py 99))
+                                     (= (aref before i) (aref after i)))))))
+      (check "clipping is the same arithmetic as the browser's"
+             (let ((cov (make-array 4 :element-type 'double-float :initial-contents '(1d0 0.5d0 0.25d0 1d0))))
+               (clip-coverage! cov 100 60 2 2 (the-object doc selection) w)
+               (every (lambda (c s) (= c (* c (/ (float s 1d0) 255d0))))
+                      cov (list 255 255 255 255))))
+      (check "Fill paints the selection only, Clear empties it, undo gives both back"
+             (let ((white (progn (fill-selection! sky '(255 255 255) 1) (copy-seq (the-object sky pixels)))))
+               (and (= 255 (aref white (* 4 (+ 120 (* w 80)))) (aref white (+ 1 (* 4 (+ 120 (* w 80))))))
+                    (= (aref white (* 4 (+ 50 (* w 80)))) (aref before (* 4 (+ 50 (* w 80)))))
+                    (progn (fill-selection! sky '(0 0 0) 1 t)
+                           (= 0 (aref (the-object sky pixels) (+ 3 (* 4 (+ 120 (* w 80)))))))
+                    (progn (undo-stroke! doc) (undo-stroke! doc) (undo-stroke! doc)
+                           (equalp (the-object sky pixels) before)))))
+      (check "a selection rebuilds nothing" (equal (demand doc) '(1 1)) (counts doc)))))
+
 (defun test-adjust ()
   (let* ((doc (make-sample-document "parity"))
          (sky (the-object doc (layer 0)))
@@ -448,7 +504,8 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-layers test-files test-threads test-golden))
+                  test-brush test-masks test-adjust test-selection test-layers test-files
+                  test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))
   (let ((checks (reverse *checks*)))

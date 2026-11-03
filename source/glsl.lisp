@@ -49,6 +49,9 @@ uniform int u_adjust_layer;
 uniform int u_adjust_kind;
 uniform int u_adjust_row;
 uniform vec4 u_adjust_params;
+uniform sampler2D u_selection;
+uniform int u_selection_on;
+uniform float u_ants;
 out vec4 o_color;
 
 vec3 srgb_decode(vec3 c) {
@@ -68,6 +71,12 @@ float mask_px(int i, vec2 p) {
 }
 float stroke_px(vec2 p) {
   return texelFetch(u_stroke, ivec2(p), 0).r;
+}
+// The selection at q, with everything beyond the document unselected,
+// so a selection touching the edge shows its ants there.
+float selected(vec2 q) {
+  if (q.x < 0.0 || q.y < 0.0 || q.x >= u_doc_size.x || q.y >= u_doc_size.y) return 0.0;
+  return texelFetch(u_selection, ivec2(q), 0).r;
 }
 // Mask i at p, with the live stroke painted on it when the stroke is on
 // that mask: the mask moves toward the stroke's gray (u_stroke_color.r)
@@ -208,7 +217,20 @@ bottom first."
   (with-output-to-string (s)
     (format s *glsl-prelude* (max 1 (length plan)))
     (dolist (entry plan) (write-string (glsl-entry entry) s))
+    ;; The marching ants: where the selection changes between a pixel and
+    ;; its neighbor one screen pixel away, a black-and-white dash that
+    ;; u_ants moves along.  Never in an exact render: a selection is
+    ;; not part of the picture.
     (write-string "  vec3 c = ao > 0.0 ? co / ao : vec3(0.0);
   o_color = vec4(srgb_encode(c), ao);
+  if (u_selection_on == 1 && u_exact == 0) {
+    float d = 1.0 / u_view_scale;
+    bool in0 = selected(p) >= 0.5;
+    if ((selected(p + vec2(d, 0.0)) >= 0.5) != in0 || (selected(p - vec2(d, 0.0)) >= 0.5) != in0 ||
+        (selected(p + vec2(0.0, d)) >= 0.5) != in0 || (selected(p - vec2(0.0, d)) >= 0.5) != in0) {
+      float t = mod(gl_FragCoord.x + gl_FragCoord.y + u_ants, 8.0);
+      o_color = vec4(vec3(t < 4.0 ? 0.0 : 1.0), 1.0);
+    }
+  }
 }
 " s)))

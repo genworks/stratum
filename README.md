@@ -89,6 +89,18 @@ hue/saturation parameters), and OK sends the settings to the server,
 which bakes them into the bytes (`adjust-layer!`), puts the whole
 layer on the undo list and answers it for re-upload.
 
+A selection is an 8-bit coverage over the document with its bounding
+rectangle, made on the server from a marquee rectangle, a lasso
+polygon, All or Inverse (`source/selection.lisp`); nothing selected
+paints everywhere. A stroke's coverage and a fill are multiplied by
+it, on the server and in the browser with the same arithmetic, so
+painting under a selection stays bit-exact between the two. The
+shader draws the marching ants from the same bytes, never in an exact
+render, since a selection is not part of the picture; the gesture
+itself is drawn on a 2D overlay while the pointer is down. Edit ▸
+Fill paints the selection with the foreground, background, black,
+white or gray at an opacity, and Clear empties it.
+
 Masks paint the same way. Any layer can have one (Layer ▸ Layer Mask ▸
 Reveal All or Hide All makes a white or black one; Delete takes it
 away); clicking the mask's thumbnail in the Layers panel makes it the
@@ -117,9 +129,11 @@ with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save As (Ctrl+Shift+S), Export As PNG and Close; Edit ▸
-Undo; Image ▸ Adjustments ▸ Levels (Ctrl+L), Curves (Ctrl+M) and
-Hue/Saturation (Ctrl+U), each a dialog with a live preview that bakes
-the adjustment into the active raster layer's pixels on OK; Layer ▸ New ▸ Layer, Duplicate Layer,
+Undo, Fill (Shift+F5) and Clear (Delete); Image ▸ Adjustments ▸ Levels
+(Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
+with a live preview that bakes the adjustment into the active raster
+layer's pixels on OK; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
+Inverse (Ctrl+Shift+I); Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
 Send Backward); View ▸ Zoom In, Zoom Out,
@@ -130,8 +144,8 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 (W), Crop (C), Eyedropper (I), Healing Brush (J), Brush (B), Clone
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
-Zoom (Z). Built: Eyedropper, Brush, Eraser, Hand and Zoom; the rest
-are drawn dimmed and refuse to be picked. The foreground and
+Zoom (Z). Built: Marquee, Lasso, Eyedropper, Brush, Eraser, Hand and
+Zoom; the rest are drawn dimmed and refuse to be picked. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
 eye for visibility, a thumbnail of the layer and of its mask, its name
@@ -178,6 +192,9 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
+| `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`; answers `{selection: {x, y, w, h} or null}` |
+| `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
+| `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
 
@@ -207,6 +224,12 @@ It checks:
   the pixels and leave alpha alone, saturation -1 makes gray, an
   adjustment layer is refused, undo is exact, and the undo list keeps
   within its byte budget;
+- selections: a rectangle's pixels and bounds, a square lasso equal
+  to the rectangle, a triangle filled by pixel centers, an empty
+  rectangle selecting nothing, Inverse and Deselect, a stroke under a
+  selection changing pixels inside it only, clipping as the browser
+  does it, Fill and Clear inside the selection with exact undo, and no
+  rebuild;
 - the stack: a layer added above another, deleted, moved and
   duplicated, with painted pixels and edits surviving each change, a
   duplicate's pixels its own, a new layer transparent, and the
@@ -264,7 +287,10 @@ The self-test checks:
   gives the picture back;
 - adjustments: Levels on the bottom layer previews on that layer
   alone, OK bakes what the preview showed, parity holds, and undo is
-  exact.
+  exact;
+- selections: a marquee rectangle through the tool, a stroke under it
+  matching the server's coverage to the last bit and changing nothing
+  outside it, Fill inside it, undo, Inverse and Deselect.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

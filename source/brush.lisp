@@ -170,11 +170,12 @@ can touch, clipped to WIDTH x HEIGHT; nil when they all fall outside."
       (when (and (<= x0 x1) (<= y0 y1))
         (list x0 y0 (1+ (- x1 x0)) (1+ (- y1 y0)))))))
 
-(defun stroke-coverage (stroke width height)
+(defun stroke-coverage (stroke width height &optional selection)
   "STROKE rasterized: (values coverage x y w h), a W x H double-float
 buffer at X, Y of a WIDTH x HEIGHT document, or nil when the stroke
 touches no pixel.  Only the dual functions touch pixels here, so the
-browser's preview buffer holds the same numbers."
+browser's preview buffer holds the same numbers; a SELECTION multiplies
+the result as the browser multiplies its own (clip-coverage!)."
   (let* ((dabs (stroke-dabs stroke))
          (radius (stroke-number stroke :radius))
          (hardness (max 0d0 (min 1d0 (stroke-number stroke :hardness))))
@@ -186,6 +187,7 @@ browser's preview buffer holds the same numbers."
           (loop for k from 0 below (length dabs) by 3
                 do (paint-dab coverage w h x y (aref dabs k) (aref dabs (+ k 1))
                               (* radius (aref dabs (+ k 2))) hardness flow))
+          (clip-coverage! coverage x y w h selection width)
           (values coverage x y w h))))))
 
 (defun composite-stroke! (pixels width coverage x y w h r g b opacity erase?)
@@ -370,11 +372,12 @@ renders see the change; the plan is untouched."
     (:mask (unless (the-object layer has-mask?)
              (error "~a has no mask." (the-object layer layer-name)))))
   (let ((width (the-object layer doc-width))
-        (height (the-object layer doc-height)))
-    (multiple-value-bind (coverage x y w h) (stroke-coverage stroke width height)
+        (height (the-object layer doc-height))
+        (doc (the-object layer parent)))
+    (multiple-value-bind (coverage x y w h)
+        (stroke-coverage stroke width height (the-object doc selection))
       (when coverage
-        (let ((doc (the-object layer parent))
-              (opacity (max 0d0 (min 1d0 (stroke-number stroke :opacity)))))
+        (let ((opacity (max 0d0 (min 1d0 (stroke-number stroke :opacity)))))
           (ecase target
             (:layer
              (let ((pixels (the-object layer (ensure-own-pixels!)))

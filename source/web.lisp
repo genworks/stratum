@@ -92,6 +92,7 @@
    "maskCount" (length (the-object doc masked-layers))
    "lutRows" (the-object doc lut-rows)
    "undoDepth" (length (the-object doc undo-entries))
+   "selection" (selection-json doc)
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
 
@@ -176,7 +177,8 @@ own."
     (json-string
      (if (net.aserve:request-query-value "dry" req)
          (multiple-value-bind (coverage x y w h)
-             (stroke-coverage stroke (the-object doc doc-width) (the-object doc doc-height))
+             (stroke-coverage stroke (the-object doc doc-width) (the-object doc doc-height)
+                              (the-object doc selection))
            (if coverage
                (json-object "x" x "y" y "w" w "h" h "coverage" (coerce coverage 'list))
                (json-object "empty" 'yason:true)))
@@ -192,6 +194,43 @@ handle-stroke does; {empty: true} when there was nothing to undo."
      (if entry
          (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
          (json-object "empty" 'yason:true)))))
+
+(defun selection-json (doc)
+  (let ((selection (the-object doc selection)))
+    (if selection
+        (destructuring-bind (x y w h) (getf selection :rect)
+          (json-object "x" x "y" y "w" w "h" h))
+        :null)))
+
+(defun handle-select (req)
+  "The selection: {op: \"rect\", x, y, w, h}, {op: \"polygon\", points:
+[[x, y], ...]}, {op: \"all\"}, {op: \"none\"} or {op: \"inverse\"};
+answers {selection: {x, y, w, h} or null}.  GET selection brings the
+bytes."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (op (gethash "op" body)))
+    (flet ((n (key) (round (gethash key body))))
+      (cond ((equal op "rect") (select-rect! doc (n "x") (n "y") (n "w") (n "h")))
+            ((equal op "polygon") (select-polygon! doc (gethash "points" body)))
+            ((equal op "all") (select-all! doc))
+            ((equal op "none") (select-none! doc))
+            ((equal op "inverse") (select-inverse! doc))
+            (t (error "Unknown selection operation ~s." op))))
+    (json-string (json-object "selection" (selection-json doc)))))
+
+(defun handle-fill (req)
+  "Edit > Fill or Clear: {layer, color: [r, g, b], opacity, mode: \"paint\"
+or \"erase\"} inside the selection; answers the rectangle as
+handle-stroke does."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (layer (the-object doc (layer (gethash "layer" body)))))
+    (json-string
+     (rect-json doc layer :layer
+                (fill-selection! layer (or (gethash "color" body) '(0 0 0))
+                                 (or (gethash "opacity" body) 1)
+                                 (equal (gethash "mode" body) "erase"))))))
 
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |
@@ -343,8 +382,10 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-sep { border-top: 1px solid #3a3e45; margin: 4px 0; }
 .st-item.st-sub > .st-menu-list { top: -5px; left: 100%; }
 .st-item.st-sub:hover > .st-menu-list { display: block; }
-#stratum-canvas { flex: 1; min-width: 0; height: 100%; display: block;
-  cursor: grab; touch-action: none; }
+#stratum-view { flex: 1; min-width: 0; position: relative; }
+#stratum-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#stratum-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  pointer-events: none; }
 #stratum-panel { width: 300px; flex: none; overflow-y: auto; box-sizing: border-box;
   padding: 12px 14px; border-left: 1px solid #33363c; background: #222429; }
 #stratum-panel h1 { font-size: 15px; margin: 0 0 6px; letter-spacing: .02em; }
@@ -404,7 +445,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   border: 1px solid #3a3e45; cursor: crosshair; touch-action: none; }
 @media (max-width: 700px) {
   #stratum-app { flex-direction: column; }
-  #stratum-canvas { height: 60vh; flex: none; width: 100%; }
+  #stratum-view { height: 60vh; flex: none; width: 100%; }
   #stratum-panel { width: 100%; border-left: none; border-top: 1px solid #33363c; }
 }
 ")
@@ -425,7 +466,9 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
            (:div :id "stratum-menubar" "")
            (:div :id "stratum-app"
              (:div :id "stratum-tools" "")
-             (:canvas :id "stratum-canvas" "")
+             (:div :id "stratum-view"
+               (:canvas :id "stratum-canvas" "")
+               (:canvas :id "stratum-overlay" ""))
              (:aside :id "stratum-panel"
                (:h1 "Stratum")
                (:div :id "stratum-status" "Loading...")
@@ -521,6 +564,12 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/undo" "application/json" #'handle-undo)
       (pub "/stratum/api/layers" "application/json" #'handle-layers)
       (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
+      (pub "/stratum/api/select" "application/json" #'handle-select)
+      (pub "/stratum/api/selection" "application/octet-stream"
+           (lambda (req)
+             (let ((selection (the-object (request-doc req) selection)))
+               (if selection (getf selection :mask) (make-array 0 :element-type '(unsigned-byte 8))))))
+      (pub "/stratum/api/fill" "application/json" #'handle-fill)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
       (pub "/stratum/api/close" "application/json" #'handle-close))))

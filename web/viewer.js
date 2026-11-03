@@ -39,7 +39,7 @@
     'const vec2 P[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n' +
     'void main() { gl_Position = vec4(P[gl_VertexID], 0.0, 1.0); }\n';
 
-  var canvas, gl, vao, prog = null, uni = {}, doc = null;
+  var canvas, overlay, gl, vao, prog = null, uni = {}, doc = null;
   var texLayers = null, texMasks = null, texLuts = null;
   var opacity = null, params = null, lutData = null;
   var view = { scale: 1, ox: 0, oy: 0 };
@@ -78,7 +78,8 @@
     ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
      'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
-     'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params'].forEach(function (n) {
+     'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
+     'u_selection', 'u_selection_on', 'u_ants'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -240,6 +241,11 @@
     gl.uniform1i(uni.u_adjust_kind, adjust.kind);
     gl.uniform1i(uni.u_adjust_row, Math.max(1, doc.lutRows));
     gl.uniform4fv(uni.u_adjust_params, adjust.params);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, texSelection);
+    gl.uniform1i(uni.u_selection, 4);
+    gl.uniform1i(uni.u_selection_on, selectionMask ? 1 : 0);
+    gl.uniform1f(uni.u_ants, antsPhase);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -308,6 +314,7 @@
       var cy = view.oy + canvas.height / (2 * view.scale);
       canvas.width = w;
       canvas.height = h;
+      if (overlay) { overlay.width = w; overlay.height = h; }
       view.ox = cx - w / (2 * view.scale);
       view.oy = cy - h / (2 * view.scale);
       requestDraw();
@@ -330,7 +337,9 @@
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
-  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in' };
+  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
+                  marquee: 'crosshair', lasso: 'crosshair' };
+  function selects(tool) { return tool === 'marquee' || tool === 'lasso'; }
 
   function setCursor(dragging) {
     canvas.style.cursor = CURSORS[effectiveTool()] || (dragging ? 'grabbing' : 'grab');
@@ -396,8 +405,53 @@
     return list.length ? list : [e];
   }
 
+  // A marquee or lasso gesture: its points in document pixels, drawn on
+  // the overlay while the pointer is down, sent to the server when it
+  // lifts.
+  function docPoint(e) {
+    var s = strokeSample(e);
+    return [s.x, s.y];
+  }
+
+  function toCanvas(p) {
+    var dpr = window.devicePixelRatio || 1;
+    return [(p[0] - view.ox) * view.scale, (p[1] - view.oy) * view.scale];
+  }
+
+  function drawGesture(g) {
+    if (!overlay) return;
+    var ctx = overlay.getContext('2d');
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!g) return;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (g.tool === 'marquee') {
+      var a = toCanvas(g.points[0]), b = toCanvas(g.points[g.points.length - 1]);
+      ctx.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+    } else {
+      g.points.forEach(function (p, k) { var c = toCanvas(p); if (k === 0) ctx.moveTo(c[0], c[1]); else ctx.lineTo(c[0], c[1]); });
+    }
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+    ctx.lineDashOffset = 4;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  }
+
+  function finishGesture(g) {
+    drawGesture(null);
+    if (g.tool === 'marquee') {
+      var a = g.points[0], b = g.points[g.points.length - 1];
+      var x = Math.round(Math.min(a[0], b[0])), y = Math.round(Math.min(a[1], b[1]));
+      var w = Math.round(Math.max(a[0], b[0])) - x, h = Math.round(Math.max(a[1], b[1])) - y;
+      return S.select(w > 0 && h > 0 ? { op: 'rect', x: x, y: y, w: w, h: h } : { op: 'none' });
+    }
+    return S.select(g.points.length >= 3 ? { op: 'polygon', points: g.points } : { op: 'none' });
+  }
+
   function installNavigation() {
-    var drag = null, stroke = null;
+    var drag = null, stroke = null, gesture = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       var tool = effectiveTool();
@@ -405,6 +459,9 @@
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
                    samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
+      } else if (selects(tool)) {
+        gesture = { tool: tool, points: [docPoint(e)] };
+        drawGesture(gesture);
       } else if (tool === 'eyedropper') {
         pickColor(e);
       } else if (tool === 'zoom') {
@@ -421,6 +478,12 @@
         S.onStrokeSamples(stroke, fresh);
         return;
       }
+      if (gesture) {
+        if (gesture.tool === 'marquee') gesture.points = [gesture.points[0], docPoint(e)];
+        else gesture.points.push(docPoint(e));
+        drawGesture(gesture);
+        return;
+      }
       if (!drag) return;
       var dpr = window.devicePixelRatio || 1;
       view.ox -= (e.clientX - drag.x) * dpr / view.scale;
@@ -433,6 +496,11 @@
         var done = stroke;
         stroke = null;
         if (e.type === 'pointerup') S.onStroke(done);
+      }
+      if (gesture) {
+        var g = gesture;
+        gesture = null;
+        if (e.type === 'pointerup') finishGesture(g); else drawGesture(null);
       }
       drag = null;
       setCursor(false);
@@ -448,6 +516,13 @@
       else if (mod && key === 'l') { e.preventDefault(); S.openAdjust('levels'); }
       else if (mod && key === 'm') { e.preventDefault(); S.openAdjust('curves'); }
       else if (mod && key === 'u') { e.preventDefault(); S.openAdjust('hue-saturation'); }
+      else if (mod && !e.shiftKey && key === 'a') { e.preventDefault(); S.select({ op: 'all' }); }
+      else if (mod && key === 'd') { e.preventDefault(); S.select({ op: 'none' }); }
+      else if (mod && e.shiftKey && key === 'i') { e.preventDefault(); S.select({ op: 'inverse' }); }
+      else if (e.shiftKey && e.key === 'F5') { e.preventDefault(); S.openFill(); }
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) { e.preventDefault(); S.clear(); }
+      else if (e.key === 'Escape' && S.fillDialog) S.fillDialog.cancel();
+      else if (e.key === 'Enter' && S.fillDialog) S.fillDialog.ok();
       else if (e.key === 'Escape' && S.adjustDialog) S.adjustDialog.cancel();
       else if (e.key === 'Enter' && S.adjustDialog) S.adjustDialog.ok();
       else if (mod && e.shiftKey && key === 's') { e.preventDefault(); S.saveAs(); }
@@ -581,13 +656,17 @@
     strokeTexture(doc.width, doc.height);
   }
 
-  // Rectangle R of strokeBuf into the stroke texture (float32 there).
+  // Rectangle R of strokeBuf into the stroke texture (float32 there),
+  // multiplied by the selection on the way, as the server multiplies
+  // its coverage (clip-coverage!): the buffer itself stays unclipped,
+  // since later dabs still accumulate into it.
   function uploadStrokeRect(r) {
     var sub = new Float32Array(r.w * r.h);
     for (var j = 0; j < r.h; j++) {
       var src = (r.y + j) * doc.width + r.x, dst = j * r.w;
       for (var i = 0; i < r.w; i++) sub[dst + i] = strokeBuf[src + i];
     }
+    clipCoverage(sub, r.w, r.h, r.x, r.y);
     gl.bindTexture(gl.TEXTURE_2D, texStroke);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RED, gl.FLOAT, sub);
     S.stats.strokeUploads++;
@@ -778,6 +857,7 @@
         paintDab(buf, res.w, res.h, res.x, res.y, dabs[3 * k], dabs[3 * k + 1],
                  B.radius * dabs[3 * k + 2], B.hardness, B.flow);
       }
+      clipCoverage(buf, res.w, res.h, res.x, res.y);
       var max = 0, unequal = 0;
       for (var i = 0; i < buf.length; i++) {
         var d = Math.abs(buf[i] - res.coverage[i]);
@@ -1020,8 +1100,8 @@
 
   var TOOLS = [
     { id: 'move', key: 'V', label: 'Move Tool' },
-    { id: 'marquee', key: 'M', label: 'Rectangular Marquee Tool' },
-    { id: 'lasso', key: 'L', label: 'Lasso Tool' },
+    { id: 'marquee', key: 'M', label: 'Rectangular Marquee Tool', built: true },
+    { id: 'lasso', key: 'L', label: 'Lasso Tool', built: true },
     { id: 'wand', key: 'W', label: 'Magic Wand Tool' },
     '-',
     { id: 'crop', key: 'C', label: 'Crop Tool' },
@@ -1143,6 +1223,119 @@
   function hexColor(c) {
     return '#' + c.map(function (v) { return ('0' + Math.round(v).toString(16)).slice(-2); }).join('');
   }
+
+  // ---- the selection ------------------------------------------------------
+  //
+  // An 8-bit coverage over the document with its bounding rectangle,
+  // made on the server (selection.lisp) from a marquee rectangle, a
+  // lasso polygon, All or Inverse, and fetched here whole: the shader
+  // draws the marching ants from it, and a stroke's coverage is
+  // multiplied by it on the way to the stroke texture, as the server
+  // multiplies its own, so painting under a selection stays bit-exact
+  // between the two.  No selection paints everywhere.
+
+  S.selection = null;
+  var selectionMask = null, texSelection = null, antsPhase = 0;
+
+  function selectionTexture(w, h) {
+    if (texSelection) gl.deleteTexture(texSelection);
+    texSelection = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texSelection);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+
+  // COVERAGE (W x H at X, Y of the document) times the selection, byte
+  // over 255; nothing without one.  The twin of clip-coverage!.
+  function clipCoverage(coverage, w, h, x, y) {
+    if (!selectionMask) return coverage;
+    for (var j = 0; j < h; j++) {
+      var src = (y + j) * doc.width + x, dst = j * w;
+      for (var i = 0; i < w; i++) coverage[dst + i] = coverage[dst + i] * (selectionMask[src + i] / 255);
+    }
+    return coverage;
+  }
+
+  function loadSelection(rect) {
+    S.selection = rect || null;
+    if (!rect) { selectionMask = null; requestDraw(); return Promise.resolve(null); }
+    return fetchBytes(api('selection')).then(function (bytes) {
+      if (bytes.length !== doc.width * doc.height) throw new Error('selection: ' + bytes.length + ' bytes');
+      selectionMask = bytes;
+      if (!texSelection || texSelection.docWidth !== doc.width || texSelection.docHeight !== doc.height) {
+        selectionTexture(doc.width, doc.height);
+        texSelection.docWidth = doc.width;
+        texSelection.docHeight = doc.height;
+      }
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.bindTexture(gl.TEXTURE_2D, texSelection);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, doc.width, doc.height, gl.RED, gl.UNSIGNED_BYTE, bytes);
+      requestDraw();
+      return rect;
+    });
+  }
+
+  // {op: 'rect', x, y, w, h}, {op: 'polygon', points}, {op: 'all'},
+  // {op: 'none'} or {op: 'inverse'}; resolves to the selection's
+  // rectangle, or null.
+  S.select = function (body) {
+    return S.strokesSettled().then(function () {
+      return postJSON('select', JSON.stringify(body));
+    }).then(function (res) { return loadSelection(res.selection); })
+      .then(function (rect) { status(); return rect; },
+            function (e) { status('selection failed: ' + e.message); return null; });
+  };
+
+  // Edit > Fill and Clear: the selection (or the whole layer) filled
+  // with a color at an opacity, or emptied.
+  S.fill = function (body) {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer to fill'); return Promise.resolve(null); }
+    body.layer = L.index;
+    strokeChain = strokeChain.then(function () {
+      return postJSON('fill', JSON.stringify(body)).then(tookRect).then(function () { status(); })
+        .catch(function (e) { status('fill failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
+
+  S.openFill = function () {
+    var L = activeL();
+    if (!L || L.kind !== 'raster') { status('pick a raster layer to fill'); return null; }
+    var choices = { Foreground: function () { return S.brush.color; }, Background: function () { return S.background; },
+                    Black: function () { return [0, 0, 0]; }, White: function () { return [255, 255, 255]; },
+                    '50% Gray': function () { return [128, 128, 128]; } };
+    var sel = el('select');
+    Object.keys(choices).forEach(function (k) { sel.appendChild(el('option', { value: k, text: k })); });
+    var settings = { opacity: 1 };
+    var box = el('div', { 'class': 'st-dialog' }, [
+      el('h2', { text: 'Fill: ' + L.name }),
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'contents' }), sel]),
+      settingSlider(settings, 'opacity', function () {})]);
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.fillDialog = {
+      cancel: function () { box.remove(); S.fillDialog = null; },
+      ok: function () {
+        box.remove();
+        S.fillDialog = null;
+        return S.fill({ color: choices[sel.value](), opacity: settings.opacity, mode: 'paint' });
+      }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
+  S.clear = function () { return S.fill({ color: [0, 0, 0], opacity: 1, mode: 'erase' }); };
+
+  // The ants crawl while something is selected.
+  setInterval(function () {
+    if (selectionMask) { antsPhase = (antsPhase + 1) % 8; requestDraw(); }
+  }, 120);
 
   // ---- files --------------------------------------------------------------
   //
@@ -1272,7 +1465,9 @@
         '-',
         { label: 'Cut', key: 'Ctrl+X' }, { label: 'Copy', key: 'Ctrl+C' }, { label: 'Paste', key: 'Ctrl+V' },
         '-',
-        { label: 'Fill...', key: 'Shift+F5' },
+        { label: 'Fill...', key: 'Shift+F5', enabled: rasterActive, run: function () { S.openFill(); } },
+        { label: 'Clear', key: 'Delete', enabled: rasterActive, run: function () { S.clear(); } },
+        '-',
         { label: 'Free Transform', key: 'Ctrl+T' }] },
       { title: 'Image', items: [
         { label: 'Mode', sub: [{ label: 'RGB Color', check: true }, { label: 'Grayscale' }, { label: 'CMYK Color' }] },
@@ -1312,8 +1507,13 @@
         { label: 'Merge Down', key: 'Ctrl+E' },
         { label: 'Flatten Image' }] },
       { title: 'Select', items: [
-        { label: 'All', key: 'Ctrl+A' }, { label: 'Deselect', key: 'Ctrl+D' },
-        { label: 'Inverse', key: 'Ctrl+Shift+I' }] },
+        { label: 'All', key: 'Ctrl+A', run: function () { S.select({ op: 'all' }); } },
+        { label: 'Deselect', key: 'Ctrl+D', enabled: function () { return !!S.selection; },
+          run: function () { S.select({ op: 'none' }); } },
+        { label: 'Inverse', key: 'Ctrl+Shift+I', run: function () { S.select({ op: 'inverse' }); } },
+        '-',
+        { label: 'Color Range...' },
+        { label: 'Feather...', key: 'Shift+F6' }] },
       { title: 'Filter', items: [
         { label: 'Blur', sub: [{ label: 'Gaussian Blur...' }] },
         { label: 'Sharpen', sub: [{ label: 'Unsharp Mask...' }] },
@@ -1930,7 +2130,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('lasso') && S.tool === saved.tool;
+      var refused = !S.setTool('move') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -2077,6 +2277,74 @@
         S.setActiveLayer(active, false);
       });
     }).then(function () {
+      // The selection: a marquee rectangle through the tool, a stroke
+      // under it that changes nothing outside it and still matches the
+      // server's coverage to the last bit, Fill inside it, undo, Inverse
+      // and Deselect.  Exact renders carry no ants.
+      var active = S.activeLayer;
+      S.setActiveLayer(0, false);
+      var W = doc.width, H = doc.height, before = S.renderExact();
+      var rx = Math.floor(W * 0.3), ry = Math.floor(H * 0.3), rw = Math.floor(W * 0.3), rh = Math.floor(H * 0.3);
+      var saved = { tool: S.tool, brush: S.brush };
+      S.setTool('marquee');
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      function at(x, y) {
+        return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                 pointerId: 45, pointerType: 'mouse', bubbles: true };
+      }
+      canvas.dispatchEvent(new PointerEvent('pointerdown', at(rx, ry)));
+      canvas.dispatchEvent(new PointerEvent('pointermove', at(rx + rw, ry + rh)));
+      canvas.dispatchEvent(new PointerEvent('pointerup', at(rx + rw, ry + rh)));
+      S.setTool(saved.tool);
+      function outsideChanged(a, b, rect) {
+        var n = 0;
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+          if (x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) continue;
+          var o = ((H - 1 - y) * W + x) * 4;
+          if (a[o] !== b[o] || a[o + 1] !== b[o + 1] || a[o + 2] !== b[o + 2] || a[o + 3] !== b[o + 3]) n++;
+        }
+        return n;
+      }
+      return S.strokesSettled().then(function () {
+        return new Promise(function (res) { var t = 0; (function w() { if (S.selection || t++ > 200) res(); else setTimeout(w, 20); })(); });
+      }).then(function () {
+        var sel = S.selection;
+        check('the marquee selects its rectangle', sel && Math.abs(sel.x - rx) <= 1 && Math.abs(sel.y - ry) <= 1 &&
+              Math.abs(sel.w - rw) <= 2 && Math.abs(sel.h - rh) <= 2, sel);
+        S.brush = { radius: Math.max(8, Math.floor(W / 20)), hardness: 0.7, spacing: 0.25, flow: 1, opacity: 1, color: [20, 200, 90], mode: 'paint' };
+        S.setTool('brush');
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(rx - rw / 2, ry + rh / 2)));
+        canvas.dispatchEvent(new PointerEvent('pointermove', at(rx + rw / 2, ry + rh / 2)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(rx + rw / 2, ry + rh / 2)));
+        S.setTool(saved.tool);
+        S.brush = saved.brush;
+        var got = S.lastStroke;
+        return got.previewed.then(function () { return S.strokeCheck(got); });
+      }).then(function (c) {
+        check('under a selection the browser still paints the coverage the server paints, to the last bit',
+              !c.empty && c.maxDiff === 0, c);
+        return S.strokesSettled();
+      }).then(function () {
+        var after = S.renderExact(), sel = S.selection;
+        check('a stroke under a selection changes nothing outside it',
+              renderDiff(before, after).maxDiff > 0 && outsideChanged(before, after, sel) === 0,
+              { outside: outsideChanged(before, after, sel) });
+        return S.fill({ color: [255, 255, 255], opacity: 1, mode: 'paint' });
+      }).then(function () {
+        var filled = S.renderExact(), sel = S.selection;
+        check('Fill paints the selection only', outsideChanged(before, filled, sel) === 0 && renderDiff(before, filled).maxDiff > 0);
+        return S.undo().then(function () { return S.undo(); });
+      }).then(function () {
+        check('undo gives the picture back through the fill and the stroke', renderDiff(before, S.renderExact()).maxDiff === 0);
+        return S.select({ op: 'inverse' });
+      }).then(function (rect) {
+        check('Inverse selects everything else', rect && rect.w === W && rect.h === H, rect);
+        return S.select({ op: 'none' });
+      }).then(function (rect) {
+        check('Deselect clears the selection', rect === null && !S.selection);
+        S.setActiveLayer(active, false);
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -2114,16 +2382,19 @@
 
   function start() {
     canvas = document.getElementById('stratum-canvas');
+    overlay = document.getElementById('stratum-overlay');
     statusEl = document.getElementById('stratum-status');
     layersEl = document.getElementById('stratum-layers');
     gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
     if (!gl) { status('WebGL 2 is not available in this browser.'); S.error = 'no webgl2'; return; }
     vao = gl.createVertexArray();
     strokeTexture(1, 1);
+    selectionTexture(1, 1);
     installNavigation();
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
     canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (overlay) { overlay.width = canvas.width; overlay.height = canvas.height; }
     fetchJSON(api('doc')).then(function (d) {
       doc = d;
       fitView();
@@ -2132,6 +2403,8 @@
       uploadLuts();
       buildPanel();
       return uploadPixels();
+    }).then(function () {
+      return loadSelection(doc.selection);
     }).then(function () {
       status();
       draw();

@@ -561,20 +561,44 @@ to alter the pictures."
          (before (copy-seq (the-object discs pixels))))
     (demand doc)
     (check "a blur changes the layer and rebuilds nothing"
-           (progn (filter-layer! discs :gaussian-blur :radius 2)
+           (progn (filter-layer! discs :gaussian-blur :settings '(:radius 2))
                   (and (not (equalp before (the-object discs pixels)))
                        (equal (demand doc) '(1 1)))))
     (check "undo gives the layer back after a blur"
            (and (undo-stroke! doc) (equalp before (the-object discs pixels))))
     (check "under a selection a blur changes the selected pixels only"
            (progn (select-rect! doc 100 60 60 40)
-                  (filter-layer! discs :gaussian-blur :radius 2)
+                  (filter-layer! discs :gaussian-blur :settings '(:radius 2))
                   (let ((after (the-object discs pixels)))
                     (and (not (equalp before after))
                          (loop for i below (length before)
                                for px = (mod (floor i 4) w) for py = (floor (floor i 4) w)
                                always (or (and (<= 100 px 159) (<= 60 py 99))
-                                          (= (aref before i) (aref after i))))))))))
+                                          (= (aref before i) (aref after i)))))))))
+  (let ((step (let ((p (make-rgba 8 1)))
+                (dotimes (x 8 p)
+                  (let ((o (* 4 x)) (v (if (< x 4) 60 180)))
+                    (setf (aref p o) v (aref p (+ o 1)) v (aref p (+ o 2)) v (aref p (+ o 3)) 255))))))
+    (check "Unsharp Mask at no amount changes nothing"
+           (equalp (unsharp-mask-rgba step 8 1 1 0 0) step))
+    (check "Unsharp Mask pushes the two sides of an edge apart and leaves the flat ends"
+           (let ((s (unsharp-mask-rgba step 8 1 1 1 0)))
+             (and (< (aref s (* 4 3)) 60) (> (aref s (* 4 4)) 180)
+                  (= (aref s 0) 60) (= (aref s (* 4 7)) 180))))
+    (check "a threshold above the edge's difference leaves it alone"
+           (equalp (unsharp-mask-rgba step 8 1 1 1 200) step))
+    (check "noise-hash is in [0, 1) and differs by pixel, channel and seed"
+           (let ((a (noise-hash 3 4 0 1)) (b (noise-hash 4 4 0 1)) (c (noise-hash 3 4 1 1)) (d (noise-hash 3 4 0 2)))
+             (and (<= 0 a) (< a 1) (/= a b) (/= a c) (/= a d))))
+    (check "Add Noise at no amount changes nothing, and draws the same numbers for a seed"
+           (and (equalp (add-noise-rgba step 8 1 0 nil 1) step)
+                (equalp (add-noise-rgba step 8 1 0.2 nil 5) (add-noise-rgba step 8 1 0.2 nil 5))
+                (not (equalp (add-noise-rgba step 8 1 0.2 nil 5) (add-noise-rgba step 8 1 0.2 nil 6)))))
+    (check "monochromatic noise moves the three channels together"
+           (let ((n (add-noise-rgba step 8 1 0.2 t 3)))
+             (loop for x below 8
+                   for o = (* 4 x)
+                   always (= (aref n o) (aref n (+ o 1)) (aref n (+ o 2))))))))
 
 (defun max-byte-diff (a b)
   (loop for x across a for y across b maximize (abs (- x y))))

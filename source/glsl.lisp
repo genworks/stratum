@@ -261,7 +261,7 @@ void main() {
 "
                param param (glsl-mask mask) param)))))
 
-(defparameter *blur-glsl* "#version 300 es
+(defparameter *filter-glsl* "#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
@@ -273,11 +273,21 @@ uniform int u_pass;
 uniform vec2 u_size;
 uniform float u_sigma;
 uniform int u_extent;
+uniform float u_amount;
+uniform float u_threshold;
+uniform int u_mono;
+uniform int u_seed;
 out vec4 o_color;
-// Pass 0 reads the layer's texels as premultiplied linear and blurs
-// along rows; pass 1 reads pass 0's output and blurs along columns,
-// giving straight linear RGBA.  Edges are clamped.  The twin of
-// gaussian-blur-rgba (filter.lisp).
+// The filter passes the viewer runs for a preview, each the twin of a
+// function in filter.lisp.  Pass 0 reads the layer's texels as
+// premultiplied linear and blurs along rows; pass 1 reads pass 0's
+// output and blurs along columns, giving straight linear RGBA (a
+// Gaussian Blur ends here).  Pass 2 reads the layer and the blur
+// (u_src, from pass 1) and sharpens: the premultiplied color moved
+// away from its blur by u_amount of the difference where that exceeds
+// u_threshold (unsharp-mask-rgba).  Pass 3 adds uniform noise to the
+// encoded color channels from an integer hash of pixel, channel and
+// seed (noise-hash, add-noise-rgba).  Edges are clamped.
 vec4 fetch(ivec2 c) {
   c = clamp(c, ivec2(0), ivec2(u_size) - 1);
   if (u_pass == 0) {
@@ -286,8 +296,43 @@ vec4 fetch(ivec2 c) {
   }
   return texelFetch(u_src, c, 0);
 }
+vec3 encode(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+vec3 decode(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+float noise_hash(int x, int y, int c, int seed) {
+  uint h = uint(x) * 374761393u + uint(y) * 668265263u + uint(c) * 1274126177u + uint(seed) * 2246822519u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  h = h ^ (h >> 16);
+  return float(h & 0xFFFFFFu) / 16777216.0;
+}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
+  if (u_pass == 2) {
+    vec4 px = texelFetch(u_layers, ivec3(p, u_layer), 0);
+    vec4 orig = vec4(px.rgb * px.a, px.a);
+    vec4 b = texelFetch(u_src, p, 0);
+    vec3 d = orig.rgb - b.rgb * b.a;
+    bool on = max(abs(d.r), max(abs(d.g), abs(d.b))) > u_threshold / 255.0;
+    vec3 pm = on ? max(orig.rgb + u_amount * d, vec3(0.0)) : orig.rgb;
+    // clamped as the bake's encoding clamps it: a sharpened color at
+    // low alpha can overshoot white once unpremultiplied
+    o_color = vec4(orig.a > 0.0 ? clamp(pm / orig.a, 0.0, 1.0) : vec3(0.0), orig.a);
+    return;
+  }
+  if (u_pass == 3) {
+    vec4 px = texelFetch(u_layers, ivec3(p, u_layer), 0);
+    vec3 e = encode(px.rgb) * 255.0;
+    for (int c = 0; c < 3; c++) {
+      float r = noise_hash(p.x, p.y, u_mono == 1 ? 0 : c, u_seed);
+      e[c] = clamp(e[c] + 255.0 * u_amount * (2.0 * r - 1.0), 0.0, 255.0);
+    }
+    o_color = vec4(decode(e / 255.0), px.a);
+    return;
+  }
   vec4 acc = vec4(0.0);
   float wsum = 0.0;
   for (int i = -u_extent; i <= u_extent; i++) {
@@ -299,7 +344,7 @@ void main() {
   o_color = u_pass == 0 ? acc : vec4(acc.a > 0.0 ? acc.rgb / acc.a : vec3(0.0), acc.a);
 }
 "
-  "The separable Gaussian blur the viewer runs for a filter preview.")
+  "The filter passes the viewer runs for a preview: blur, sharpen, noise.")
 
 (defun plan->glsl (plan)
   "The fragment shader that composites PLAN, a list of plan entries

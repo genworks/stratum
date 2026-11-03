@@ -132,8 +132,14 @@ server's blur shader in two passes into float textures, rows then
 columns, and the server's `gaussian-blur-rgba` is its twin: the same
 discrete kernel over three sigmas, premultiplied linear light, edges
 clamped, the intermediate in single floats as the GPU keeps it,
-threaded across rows and then columns. A browser without float render
-targets gets no preview and still bakes the filter on OK.
+threaded across rows and then columns. Unsharp Mask adds a pass over
+that blur: each color channel moved away from its blur by the amount
+of the difference, where the difference exceeds the threshold. Add
+Noise draws uniform noise for each pixel from an integer hash of its
+coordinates, channel and a seed, written the same way in the shader
+and in Lisp, so the preview and the bake draw the same numbers;
+monochromatic noise uses one draw per pixel. A browser without float
+render targets gets no preview and still bakes the filter on OK.
 
 Free Transform (Ctrl+T) is the same floating stage with a matrix in
 place of the offset: a box with eight handles around the selection or
@@ -182,7 +188,8 @@ Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
 (Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
-Inverse (Ctrl+Shift+I); Filter ▸ Blur ▸ Gaussian Blur; Layer ▸ New ▸ Layer, Duplicate Layer,
+Inverse (Ctrl+Shift+I); Filter ▸ Blur ▸ Gaussian Blur, Sharpen ▸
+Unsharp Mask and Noise ▸ Add Noise; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete), Arrange (Bring Forward,
 Send Backward), Merge Down (Ctrl+E) and Flatten Image; View ▸ Zoom In,
@@ -270,7 +277,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/transform?doc=N` | `{layer, matrix: [a, b, c, d, e, f]}` (x′ = ax + by + c, y′ = dx + ey + f): the selected pixels resampled through it; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
-| `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", radius}` baked into the layer inside the selection; answers the whole layer as a rectangle |
+| `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", "unsharp-mask" or "add-noise", settings: {radius, amount, threshold, monochrome, seed}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}`, `{op: "mask", layer, value: "reveal", "hide" or "delete"}`, `{op: "merge", layer}` or `{op: "flatten"}`; answers the new plan version and the layer to work on |
 
@@ -321,7 +328,12 @@ It checks:
 - filters: a blurred dot spreads symmetrically with its center the
   brightest, a uniform layer blurs to itself, a blur changes the layer
   and rebuilds nothing, undoes exactly, and under a selection changes
-  the selected pixels only;
+  the selected pixels only; Unsharp Mask at no amount changes nothing,
+  pushes the two sides of an edge apart and leaves the flat ends, and
+  a threshold above the edge leaves it alone; the noise hash is in
+  [0, 1) and differs by pixel, channel and seed; Add Noise at no
+  amount changes nothing, draws the same numbers for a seed, and
+  monochromatic noise moves the three channels together;
 - merging: Merge Down folds a screened layer into the opaque one below
   within two levels of the picture and an adjustment layer into the
   raster below within three (the merged layer's one rounding to 8 bits
@@ -407,7 +419,9 @@ The self-test checks:
   Cut clearing them; undo;
 - Gaussian Blur on the Discs layer: previewed through the blur passes
   and the replacement stage, OK baking what the preview showed within
-  two levels, parity, undo exact;
+  two levels, parity, undo exact; then Unsharp Mask and monochromatic
+  Add Noise on the same layer, each baked within two levels of its
+  preview, parity, undo exact;
 - Free Transform: a rectangle scaled, turned and moved, previewed and
   committed within two levels, the selection following, parity, undo,
   and Escape leaving the picture alone;

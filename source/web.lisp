@@ -86,7 +86,7 @@
    "height" (the-object doc doc-height)
    "planVersion" (the-object doc plan-version)
    "shader" (the-object doc shader-source)
-   "blurShader" *blur-glsl*
+   "filterShader" *filter-glsl*
    "shaderBuilds" (aref (the-object doc build-counts) 0)
    "kernelBuilds" (aref (the-object doc build-counts) 1)
    "rasterCount" (length (the-object doc raster-layers))
@@ -316,15 +316,19 @@ name; answers {width, height} and the page reloads."
                                   "height" (the-object new doc-height)))))))
 
 (defun handle-filter (req)
-  "Filter > ...: {layer, kind: \"gaussian-blur\", radius} baked into the
-layer inside the selection; answers the whole layer as a rectangle."
+  "Filter > ...: {layer, kind: \"gaussian-blur\" | \"unsharp-mask\" |
+\"add-noise\", settings: {name: value}} baked into the layer inside
+the selection; answers the whole layer as a rectangle."
   (let* ((doc (request-doc req))
          (body (parse-json-body req))
          (layer (the-object doc (layer (gethash "layer" body))))
-         (kind (find (gethash "kind" body) '(:gaussian-blur) :test #'string-equal)))
+         (kind (find (gethash "kind" body) '(:gaussian-blur :unsharp-mask :add-noise) :test #'string-equal))
+         (settings (let ((h (gethash "settings" body)))
+                     (when h (loop for k being the hash-keys of h using (hash-value v)
+                                   collect (intern (string-upcase k) :keyword)
+                                   collect (if (numberp v) (float v 1d0) (and v (not (eql v 'yason:false)))))))))
     (unless kind (error "Unknown filter ~s." (gethash "kind" body)))
-    (json-string (rect-json doc layer :layer
-                            (filter-layer! layer kind :radius (or (gethash "radius" body) 1))))))
+    (json-string (rect-json doc layer :layer (filter-layer! layer kind :settings settings)))))
 
 (defun handle-adjust (req)
   "Image > Adjustments: {layer, kind: \"levels\" | \"curves\" |

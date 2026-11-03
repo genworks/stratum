@@ -1881,8 +1881,10 @@
       { title: 'Filter', items: [
         { label: 'Blur', sub: [{ label: 'Gaussian Blur...', enabled: rasterActive,
                                  run: function () { S.openFilter('gaussian-blur'); } }] },
-        { label: 'Sharpen', sub: [{ label: 'Unsharp Mask...' }] },
-        { label: 'Noise', sub: [{ label: 'Add Noise...' }] }] },
+        { label: 'Sharpen', sub: [{ label: 'Unsharp Mask...', enabled: rasterActive,
+                                    run: function () { S.openFilter('unsharp-mask'); } }] },
+        { label: 'Noise', sub: [{ label: 'Add Noise...', enabled: rasterActive,
+                                  run: function () { S.openFilter('add-noise'); } }] }] },
       { title: 'View', items: [
         { label: 'Zoom In', key: 'Ctrl++', run: S.zoomIn },
         { label: 'Zoom Out', key: 'Ctrl+-', run: S.zoomOut },
@@ -2025,7 +2027,7 @@
     'in-black': [0, 1, 0.005], 'in-white': [0, 1, 0.005], gamma: [0.2, 4, 0.01],
     'out-black': [0, 1, 0.005], 'out-white': [0, 1, 0.005],
     hue: [-180, 180, 1], saturation: [-1, 1, 0.01], lightness: [-1, 1, 0.01],
-    radius: [0.1, 100, 0.1]
+    radius: [0.1, 100, 0.1], amount: [0, 500, 1], threshold: [0, 255, 1]
   };
 
   // One slider for a levels or hue/saturation setting.  A move changes
@@ -2159,15 +2161,16 @@
     if (!floatRenderable) return false;
     if (!blurProg) {
       var p = gl.createProgram();
-      var vs = compileShader(gl.VERTEX_SHADER, VERT), fs = compileShader(gl.FRAGMENT_SHADER, doc.blurShader);
+      var vs = compileShader(gl.VERTEX_SHADER, VERT), fs = compileShader(gl.FRAGMENT_SHADER, doc.filterShader);
       gl.attachShader(p, vs);
       gl.attachShader(p, fs);
       gl.linkProgram(p);
       gl.deleteShader(vs);
       gl.deleteShader(fs);
-      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('blur link: ' + gl.getProgramInfoLog(p));
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('filter link: ' + gl.getProgramInfoLog(p));
       blurProg = p;
-      ['u_layers', 'u_src', 'u_layer', 'u_pass', 'u_size', 'u_sigma', 'u_extent'].forEach(function (n) {
+      ['u_layers', 'u_src', 'u_layer', 'u_pass', 'u_size', 'u_sigma', 'u_extent',
+       'u_amount', 'u_threshold', 'u_mono', 'u_seed'].forEach(function (n) {
         blurUni[n] = gl.getUniformLocation(p, n);
       });
     }
@@ -2192,30 +2195,52 @@
     return true;
   }
 
-  // Blur layer TEXINDEX by SIGMA into the replacement texture.
-  function runBlur(texIndex, sigma) {
+  // One filter pass of the filter program into target texture T,
+  // reading layer TEXINDEX and SRC.
+  function filterPass(pass, target, src, texIndex, s) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo[target]);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
+    gl.uniform1i(blurUni.u_layers, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.uniform1i(blurUni.u_src, 1);
+    gl.uniform1i(blurUni.u_layer, texIndex);
+    gl.uniform1i(blurUni.u_pass, pass);
+    gl.uniform2f(blurUni.u_size, doc.width, doc.height);
+    gl.uniform1f(blurUni.u_sigma, s.sigma || 1);
+    gl.uniform1i(blurUni.u_extent, Math.max(1, Math.ceil(3 * (s.sigma || 1))));
+    gl.uniform1f(blurUni.u_amount, s.amount || 0);
+    gl.uniform1f(blurUni.u_threshold, s.threshold || 0);
+    gl.uniform1i(blurUni.u_mono, s.mono ? 1 : 0);
+    gl.uniform1i(blurUni.u_seed, s.seed || 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  // Filter layer TEXINDEX into the replacement texture: a blur is
+  // passes 0 and 1; a sharpening adds pass 2 over the blur; noise is
+  // pass 3 alone.
+  function runFilter(kind, texIndex, state) {
     if (!ensureBlur()) return false;
-    var extent = Math.max(1, Math.ceil(3 * sigma));
     gl.useProgram(blurProg);
     gl.bindVertexArray(vao);
     gl.viewport(0, 0, doc.width, doc.height);
-    for (var pass = 0; pass < 2; pass++) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo[pass]);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
-      gl.uniform1i(blurUni.u_layers, 0);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, pass === 0 ? texIdle : blurTex[0]);
-      gl.uniform1i(blurUni.u_src, 1);
-      gl.uniform1i(blurUni.u_layer, texIndex);
-      gl.uniform1i(blurUni.u_pass, pass);
-      gl.uniform2f(blurUni.u_size, doc.width, doc.height);
-      gl.uniform1f(blurUni.u_sigma, sigma);
-      gl.uniform1i(blurUni.u_extent, extent);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    var out;
+    if (kind === 'add-noise') {
+      filterPass(3, 1, texIdle, texIndex, { amount: state.amount / 100, mono: state.monochrome, seed: state.seed });
+      out = 1;
+    } else {
+      var s = { sigma: Math.max(0.1, state.radius) };
+      filterPass(0, 0, texIdle, texIndex, s);
+      filterPass(1, 1, blurTex[0], texIndex, s);
+      out = 1;
+      if (kind === 'unsharp-mask') {
+        filterPass(2, 0, blurTex[1], texIndex, { amount: state.amount / 100, threshold: state.threshold });
+        out = 0;
+      }
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    replace.texture = blurTex[1];
+    replace.texture = blurTex[out];
     replace.layer = texIndex;
     requestDraw();
     return true;
@@ -2226,23 +2251,37 @@
     requestDraw();
   }
 
-  var FILTER_TITLES = { 'gaussian-blur': 'Gaussian Blur' };
+  var FILTERS = {
+    'gaussian-blur': { title: 'Gaussian Blur', defaults: { radius: 4 } },
+    'unsharp-mask': { title: 'Unsharp Mask', defaults: { amount: 100, radius: 2, threshold: 0 } },
+    'add-noise': { title: 'Add Noise', defaults: { amount: 10, monochrome: false, seed: 1 } }
+  };
 
   S.openFilter = function (kind) {
     var L = activeL();
     if (!L || L.kind !== 'raster') { status('pick a raster layer to filter'); return null; }
     if (S.filterDialog) S.filterDialog.cancel();
-    var state = { radius: 4 };
+    var spec = FILTERS[kind], state = Object.assign({}, spec.defaults);
     var controls = el('div');
-    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: FILTER_TITLES[kind] + ': ' + L.name }), controls]);
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: spec.title + ': ' + L.name }), controls]);
     function refresh() {
-      if (!runBlur(L.texIndex, Math.max(0.1, state.radius))) {
+      if (!runFilter(kind, L.texIndex, state)) {
         status('no float render targets here: the preview is off, OK still applies the filter');
       }
     }
     function buildControls() {
       controls.textContent = '';
-      controls.appendChild(settingSlider(state, 'radius', refresh));
+      Object.keys(state).forEach(function (name) {
+        if (name === 'seed') return;
+        if (typeof state[name] === 'boolean') {
+          var box2 = el('input', { type: 'checkbox' });
+          box2.checked = state[name];
+          box2.addEventListener('change', function () { state[name] = box2.checked; refresh(); });
+          controls.appendChild(el('div', { 'class': 'st-row' }, [box2, el('span', { text: name })]));
+        } else {
+          controls.appendChild(settingSlider(state, name, refresh));
+        }
+      });
     }
     buildControls();
     var cancel = el('button', { type: 'button', text: 'Cancel' });
@@ -2257,7 +2296,7 @@
         box.remove();
         S.filterDialog = null;
         return S.strokesSettled().then(function () {
-          return postJSON('filter', JSON.stringify({ layer: L.index, kind: kind, radius: state.radius }));
+          return postJSON('filter', JSON.stringify({ layer: L.index, kind: kind, settings: state }));
         }).then(tookRect)
           .then(function () { clearReplace(); status(); },
                 function (e) { clearReplace(); status('filter failed: ' + e.message); });
@@ -2820,7 +2859,34 @@
         return S.undo();
       }).then(function () {
         check('undo gives the layer back after a blur', renderDiff(before, S.renderExact()).maxDiff === 0);
-        S.setActiveLayer(active, false);
+        // Unsharp Mask on the same layer, then Add Noise, monochrome,
+        // each previewed and baked within two levels of the preview.
+        var d2 = S.openFilter('unsharp-mask');
+        d2.set({ amount: 150, radius: 2, threshold: 0 });
+        var sharpPreview = S.renderExact();
+        return d2.ok().then(function () {
+          var after = S.renderExact(), d = renderDiff(sharpPreview, after);
+          check('Unsharp Mask changes the picture', renderDiff(before, after).maxDiff > 0);
+          if (previews) check('OK bakes what the sharpening preview showed', d.maxDiff <= 2, d);
+          return S.undo();
+        }).then(function () {
+          check('undo gives the layer back after a sharpening', renderDiff(before, S.renderExact()).maxDiff === 0);
+          var d3 = S.openFilter('add-noise');
+          d3.set({ amount: 20, monochrome: true, seed: 7 });
+          var noisePreview = S.renderExact();
+          return d3.ok().then(function () {
+            var after = S.renderExact(), d = renderDiff(noisePreview, after);
+            check('Add Noise changes the picture', renderDiff(before, after).maxDiff > 0);
+            if (previews) check('OK bakes the noise the preview drew', d.maxDiff <= 2, d);
+            return S.parity();
+          });
+        }).then(function (p) {
+          check('parity after noise', p.maxDiff <= 1, p);
+          return S.undo();
+        }).then(function () {
+          check('undo gives the layer back after noise', renderDiff(before, S.renderExact()).maxDiff === 0);
+          S.setActiveLayer(active, false);
+        });
       });
     }).then(function () {
       // The selection: a marquee rectangle through the tool, a stroke

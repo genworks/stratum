@@ -466,6 +466,135 @@ to alter the pictures."
                   (and (not (the-object doc (layer 0) has-mask?))
                        (equalp (the-object doc (render-cpu)) render-before))))))
 
+;;; A PNG built by hand for the reader's tests: PIXEL is a function of
+;;; (x y) giving the channel samples at DEPTH; FILTERS a list of filter
+;;; types used in turn, row by row; INTERLACE writes Adam7 passes.
+(defun build-png (width height depth color-type pixel &key palette trns (filters '(0)) interlace)
+  (let* ((channels (ecase color-type (0 1) (2 3) (3 1) (4 2) (6 4)))
+         (bpp (max 1 (floor (* channels depth) 8)))
+         (raw (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+         (row-count 0))
+    (labels ((emit (v) (vector-push-extend v raw))
+             (pack-row (xs y xstep pw)
+               (let* ((stride (ceiling (* pw channels depth) 8))
+                      (row (make-array stride :element-type '(unsigned-byte 8) :initial-element 0)))
+                 (dotimes (px pw row)
+                   (let ((samples (funcall pixel (+ xs (* px xstep)) y)))
+                     (loop for s in samples for k from 0
+                           for index = (+ (* px channels) k)
+                           do (case depth
+                                (8 (setf (aref row index) s))
+                                (16 (setf (aref row (* 2 index)) (ash s -8) (aref row (1+ (* 2 index))) (logand s 255)))
+                                (t (let ((bit (* index depth)))
+                                     (setf (ldb (byte depth (- 8 depth (mod bit 8))) (aref row (floor bit 8))) s)))))))))
+             (filter-row (row prior filter)
+               (let ((out (copy-seq row)))
+                 (dotimes (i (length row) out)
+                   (let ((a (if (>= i bpp) (aref row (- i bpp)) 0))
+                         (b (aref prior i))
+                         (c (if (>= i bpp) (aref prior (- i bpp)) 0)))
+                     (setf (aref out i)
+                           (logand #xff (- (aref row i)
+                                           (ecase filter
+                                             (0 0) (1 a) (2 b) (3 (floor (+ a b) 2))
+                                             (4 (let* ((p (- (+ a b) c)) (pa (abs (- p a))) (pb (abs (- p b))) (pc (abs (- p c))))
+                                                  (cond ((and (<= pa pb) (<= pa pc)) a) ((<= pb pc) b) (t c))))))))))))
+             (pass (xs ys xstep ystep)
+               (let ((pw (if (< xs width) (ceiling (- width xs) xstep) 0))
+                     (ph (if (< ys height) (ceiling (- height ys) ystep) 0)))
+                 (when (and (plusp pw) (plusp ph))
+                   (let ((prior (make-array (ceiling (* pw channels depth) 8) :element-type '(unsigned-byte 8) :initial-element 0)))
+                     (dotimes (py ph)
+                       (let* ((y (+ ys (* py ystep)))
+                              (row (pack-row xs y xstep pw))
+                              (filter (nth (mod row-count (length filters)) filters)))
+                         (incf row-count)
+                         (emit filter)
+                         (map nil #'emit (filter-row row prior filter))
+                         (setf prior row))))))))
+      (if interlace
+          (dolist (p *adam7-passes*) (apply #'pass p))
+          (pass 0 0 1 1)))
+    (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+      (flet ((chunk (type data)
+               (let* ((data (coerce data '(simple-array (unsigned-byte 8) (*))))
+                      (body (concatenate '(simple-array (unsigned-byte 8) (*)) (map 'vector #'char-code type) data))
+                      (crc (crc32 body 0 (length body))))
+                 (loop for s in '(24 16 8 0) do (vector-push-extend (ldb (byte 8 s) (length data)) out))
+                 (map nil (lambda (b) (vector-push-extend b out)) body)
+                 (loop for s in '(24 16 8 0) do (vector-push-extend (ldb (byte 8 s) crc) out)))))
+        (map nil (lambda (b) (vector-push-extend b out)) *png-signature*)
+        (chunk "IHDR" (list (ldb (byte 8 24) width) (ldb (byte 8 16) width) (ldb (byte 8 8) width) (ldb (byte 8 0) width)
+                            (ldb (byte 8 24) height) (ldb (byte 8 16) height) (ldb (byte 8 8) height) (ldb (byte 8 0) height)
+                            depth color-type 0 0 (if interlace 1 0)))
+        (when palette (chunk "PLTE" palette))
+        (when trns (chunk "tRNS" trns))
+        (chunk "IDAT" (deflate-octets (coerce raw '(simple-array (unsigned-byte 8) (*)))))
+        (chunk "IEND" #()))
+      (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+(defun test-png ()
+  (flet ((px (rgba w x y) (let ((o (* 4 (+ x (* w y))))) (list (aref rgba o) (aref rgba (+ o 1)) (aref rgba (+ o 2)) (aref rgba (+ o 3))))))
+    (let* ((doc (make-sample-document "parity"))
+           (rgba (the-object doc (render-cpu))))
+      (check "a PNG written by zpng reads back byte for byte"
+             (multiple-value-bind (back w h) (read-png (png-octets rgba 320 200))
+               (and (= w 320) (= h 200) (equalp back rgba)))))
+    (let ((want (lambda (x y) (list (mod (* 37 (+ x (* 7 y))) 256) (mod (* 91 (+ x y)) 256) (mod (* 13 x y) 256) (if (= 0 (mod (+ x y) 3)) 40 255)))))
+      (check "8-bit RGBA through every filter type reads back"
+             (multiple-value-bind (back w h) (read-png (build-png 7 5 8 6 want :filters '(0 1 2 3 4)))
+               (and (= w 7) (= h 5)
+                    (loop for y below 5 always (loop for x below 7 always (equal (px back 7 x y) (funcall want x y)))))))
+      (check "an Adam7 interlaced RGBA reads back through all seven passes"
+             (multiple-value-bind (back w h) (read-png (build-png 9 9 8 6 want :filters '(4 3 2 1 0) :interlace t))
+               (and (= w 9) (= h 9)
+                    (loop for y below 9 always (loop for x below 9 always (equal (px back 9 x y) (funcall want x y)))))))
+      (check "an interlaced image narrower than a pass's start skips that pass"
+             (multiple-value-bind (back w h) (read-png (build-png 3 2 8 6 want :interlace t))
+               (and (= w 3) (= h 2)
+                    (loop for y below 2 always (loop for x below 3 always (equal (px back 3 x y) (funcall want x y))))))))
+    (check "16-bit RGB rounds each sample to a byte, opaque"
+           (let ((back (read-png (build-png 3 1 16 2 (lambda (x y) (declare (ignore y)) (nth x '((65535 0 32768) (257 254 128) (1 65534 65535))))))))
+             (and (equal (px back 3 0 0) '(255 0 128 255))
+                  (equal (px back 3 1 0) '(1 1 0 255))
+                  (equal (px back 3 2 0) '(0 255 255 255)))))
+    (check "1-bit gray reads bits most significant first, over a width that is not a byte"
+           (let* ((bits '(1 0 1 1 0 0 1 0 1 1))
+                  (back (read-png (build-png 10 2 1 0 (lambda (x y) (list (if (= y 0) (nth x bits) (- 1 (nth x bits)))))))))
+             (and (loop for x below 10 always (equal (px back 10 x 0) (let ((v (* 255 (nth x bits)))) (list v v v 255))))
+                  (equal (px back 10 0 1) '(0 0 0 255)))))
+    (check "4-bit gray scales to 0..255"
+           (let ((back (read-png (build-png 3 1 4 0 (lambda (x y) (declare (ignore y)) (list (nth x '(0 7 15))))))))
+             (and (equal (px back 3 0 0) '(0 0 0 255)) (equal (px back 3 1 0) '(119 119 119 255)) (equal (px back 3 2 0) '(255 255 255 255)))))
+    (check "a 2-bit palette with partial transparency reads colors and alphas"
+           (let ((back (read-png (build-png 5 1 2 3 (lambda (x y) (declare (ignore y)) (list (nth x '(0 1 2 3 1))))
+                                            :palette '(255 0 0 0 255 0 0 0 255 9 8 7) :trns '(0 128)))))
+             (and (equal (px back 5 0 0) '(255 0 0 0)) (equal (px back 5 1 0) '(0 255 0 128))
+                  (equal (px back 5 2 0) '(0 0 255 255)) (equal (px back 5 3 0) '(9 8 7 255)) (equal (px back 5 4 0) '(0 255 0 128)))))
+    (check "8-bit gray with alpha, and a gray key color"
+           (let ((ga (read-png (build-png 2 2 8 4 (lambda (x y) (list (+ 10 x (* 2 y)) (* 60 (+ 1 x y)))))))
+                 (keyed (read-png (build-png 3 1 8 0 (lambda (x y) (declare (ignore y)) (list (nth x '(5 77 200)))) :trns '(0 77)))))
+             (and (equal (px ga 2 1 1) '(13 13 13 180)) (equal (px ga 2 0 0) '(10 10 10 60))
+                  (equal (px keyed 3 0 0) '(5 5 5 255)) (equal (px keyed 3 1 0) '(77 77 77 0)) (equal (px keyed 3 2 0) '(200 200 200 255)))))
+    (check "a chunk with a bad CRC, and a file that is not a PNG, are refused"
+           (let ((png (build-png 2 2 8 6 (lambda (x y) (list x y 0 255)))))
+             (setf (aref png 20) (logxor (aref png 20) 1))
+             (and (handler-case (progn (read-png png) nil) (error () t))
+                  (handler-case (progn (read-png (string-octets "hello")) nil) (error () t))
+                  (not (png-octets-p (string-octets "hello"))))))
+    (check "a PNG file opens as a document under its own name"
+           (let* ((path (merge-pathnames "stratum-test-open.png" (uiop:temporary-directory)))
+                  (png (build-png 6 4 8 2 (lambda (x y) (list (* 40 x) (* 60 y) 7)))))
+             (with-open-file (out path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
+               (write-sequence png out))
+             (unwind-protect
+                  (let ((doc (open-png-file path)))
+                    (and (gethash (the-object doc doc-name) *documents*)
+                         (= 6 (the-object doc doc-width)) (= 4 (the-object doc doc-height))
+                         (equal (px (the-object doc (layer 0) pixels) 6 5 3) '(200 180 7 255))
+                         (progn (remhash (the-object doc doc-name) *documents*) t)))
+               (delete-file path))))))
+
 (defun test-files ()
   (let ((image (let ((p (make-rgba 4 3)))
                  (dotimes (i (length p) p) (setf (aref p i) (+ 1 (mod i 251)))))))
@@ -1011,7 +1140,7 @@ to alter the pictures."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
-                  test-layers test-files
+                  test-layers test-files test-png
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -3086,9 +3086,10 @@
       }
       img.data.set(want);
       ctx.putImageData(img, 0, 0);
-      var active = S.activeLayer, n = doc.layers.length, decoded = null;
+      var active = S.activeLayer, n = doc.layers.length, decoded = null, pngBlob = null;
       function same(a, b) { if (a.length !== b.length) return false; for (var k = 0; k < a.length; k++) if (a[k] !== b[k]) return false; return true; }
       return new Promise(function (r) { c2.toBlob(r, 'image/png'); }).then(function (blob) {
+        pngBlob = blob;
         return S.decodeImage(blob);
       }).then(function (d) {
         decoded = d;
@@ -3113,6 +3114,18 @@
                 d.width === w && d.height === h && d.layers.length === 1 && d.layers[0].name === 'Background',
                 { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
           return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
+        });
+      }).then(function () {
+        // The same PNG file sent whole: the server's own reader decodes
+        // it to the bytes the browser decoded.
+        return pngBlob.arrayBuffer().then(function (buf) {
+          return postBytes('open?name=pngtest', new Uint8Array(buf));
+        }).then(function (res) {
+          return fetchBytes('/stratum/api/raster?doc=' + encodeURIComponent(res.doc) + '&i=0').then(function (b) {
+            check('the server reads a PNG file to the bytes the browser decodes',
+                  res.width === w && res.height === h && same(b, want), { width: res.width, height: res.height, bytes: b.length });
+            return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(res.doc), { method: 'POST' });
+          });
         });
       });
     }).then(function () {

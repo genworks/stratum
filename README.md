@@ -275,6 +275,16 @@ layer; Place adds them as a layer of the current document, centered
 and cropped or padded to its size. Save As PNG and Export write the
 flattened picture as a PNG on the server (`zpng`).
 
+The server reads PNG files itself as well (`read-png` in
+`source/png.lisp`, about two hundred lines over `chipz`): every color
+type at every bit depth, palettes with or without transparency, a
+transparent key color, the five filters and Adam7 interlace, with
+every chunk's CRC checked. Samples come out as the file holds them, 16
+bits rounded to 8 and smaller depths scaled up, with no gamma or
+color conversion, so a file reads the same on both halves. The `open`
+and `place` endpoints take a PNG file whole, and `open-png-file` opens
+one from Lisp.
+
 Save writes the document itself as a `.stratum` file, and Open reads
 one back (`source/file.lisp`). The file is a line `STRATUM1`, a line
 with the header's length, the header, one s-expression holding the
@@ -317,8 +327,8 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
 | `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
-| `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
-| `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
+| `POST /stratum/api/open?name=&w=&h=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new document of one Background layer; answers `{doc, width, height}` |
+| `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
 | `/stratum/api/save?doc=N` | the document as a `.stratum` file |
 | `POST /stratum/api/load?name=` | body: a `.stratum` file; a new document; answers `{doc, width, height}` |
@@ -355,6 +365,13 @@ It checks:
   brings changes back exactly and in order, that a new change empties
   the redo list, and that undo and redo round trip through the whole
   list;
+- the PNG reader: a PNG written by zpng reads back byte for byte; PNGs
+  built by hand read back: 8-bit RGBA through every filter type, Adam7
+  interlace through all seven passes and with passes skipped, 16-bit
+  RGB rounded to bytes, 1-bit and 4-bit gray scaled up, a 2-bit palette
+  with partial transparency, gray with alpha and a gray key color; a
+  bad CRC and a file that is not a PNG are refused; a PNG file opens as
+  a document under its own name;
 - the Clone Stamp: the source rectangle is copied and clear beyond the
   picture, a clone stroke paints the layer's own pixels from the
   offset inside its rectangle only and rebuilds nothing, a stroke over
@@ -470,7 +487,8 @@ The self-test checks:
 - files: an image drawn in the browser and encoded as a PNG decodes
   back byte for byte, lands centered on its own layer when placed and
   reads back from the server byte for byte, and makes a new document
-  of its size when opened;
+  of its size when opened; the same PNG file sent whole is read by the
+  server to the bytes the browser decoded;
 - masks: Hide All on the active layer makes a mask the target and
   hides the layer with parity intact; a white stroke on the mask
   reveals some of it, the preview matching the commit; undo; Delete
@@ -557,8 +575,7 @@ rectangles until the tile store exists; and the dab is a round, soft
 disc, with no texture, tilt or scatter yet.
 
 Smaller items still to do: per-session documents (today one document is
-shared per name), a server-side PNG reader for files on disk (`chipz`
-is loaded now), and premultiplying before mipmap generation to remove
+shared per name), and premultiplying before mipmap generation to remove
 edge fringes when zoomed out.  The CPU render runs on
 `*render-threads*` threads (8 by default): 2 s for the 4K twenty-layer
 document, against 10 s on one thread.

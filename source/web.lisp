@@ -450,13 +450,16 @@ string of one character per byte."
         (coerce body '(simple-array (unsigned-byte 8) (*))))))
 
 (defun request-image (req)
-  "(values pixels w h): the raw RGBA8 image in the body, W x H from the query."
-  (let* ((w (parse-integer (net.aserve:request-query-value "w" req)))
-         (h (parse-integer (net.aserve:request-query-value "h" req)))
-         (pixels (request-octets req)))
-    (unless (and (< 0 w) (< 0 h) (= (length pixels) (* 4 w h)))
-      (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length pixels)))
-    (values pixels w h)))
+  "(values pixels w h): the image in the body -- a PNG file, decoded
+here (read-png), or raw RGBA8 with W x H from the query."
+  (let ((octets (request-octets req)))
+    (if (png-octets-p octets)
+        (read-png octets)
+        (let ((w (parse-integer (or (net.aserve:request-query-value "w" req) "0")))
+              (h (parse-integer (or (net.aserve:request-query-value "h" req) "0"))))
+          (unless (and (< 0 w) (< 0 h) (= (length octets) (* 4 w h)))
+            (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
+          (values octets w h)))))
 
 (defun unique-document-name (name)
   "NAME, or NAME-2, NAME-3 ... when a document or a sample already has it."
@@ -467,17 +470,18 @@ string of one character per byte."
           return candidate))
 
 (defun handle-open (req)
-  "A new document from the raw RGBA8 image in the body (?name=&w=&h=),
-one Background layer; answers {doc, width, height}."
+  "A new document from the image in the body (a PNG file, or raw RGBA8
+with ?w=&h=; ?name=), one Background layer; answers {doc, width,
+height}."
   (multiple-value-bind (pixels w h) (request-image req)
     (let ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled"))))
       (setf (gethash name *documents*) (make-file-document name w h pixels))
       (json-string (json-object "doc" name "width" w "height" h)))))
 
 (defun handle-place (req)
-  "The raw RGBA8 image in the body as a new layer of the document
-(?name=&w=&h=&above=), centered and cropped or padded to the document's
-size; answers as handle-layers does."
+  "The image in the body (a PNG file, or raw RGBA8 with ?w=&h=) as a new
+layer of the document (?name=&above=), centered and cropped or padded
+to the document's size; answers as handle-layers does."
   (let ((doc (request-doc req)))
     (multiple-value-bind (pixels w h) (request-image req)
       (let* ((fitted (fit-rgba pixels w h (the-object doc doc-width) (the-object doc doc-height)))

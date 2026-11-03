@@ -261,19 +261,29 @@ OPACITY.  The twin of the shader's masked()."
   "Integer. The most bytes a document's undo list keeps; the oldest
 entries go first.  A whole 4K layer is 33 MB.")
 
-(defun push-undo! (doc entry)
-  "ENTRY, (layer-index target x y w h bytes), onto DOC's undo list, which
-keeps at most *undo-depth* entries and *undo-bytes* bytes."
-  (let ((entries (cons entry (the-object doc undo-entries)))
-        (bytes 0)
+(defun trimmed-entries (entry entries)
+  "ENTRY in front of ENTRIES, kept to *undo-depth* entries and
+*undo-bytes* bytes."
+  (let ((bytes 0)
         (kept '()))
-    (loop for e in entries
+    (loop for e in (cons entry entries)
           for n from 1
           do (incf bytes (length (seventh e)))
              (when (or (> n *undo-depth*) (and (> n 1) (> bytes *undo-bytes*)))
                (return))
              (push e kept))
-    (the-object doc (set-slot! :undo-entries (nreverse kept)))))
+    (nreverse kept)))
+
+(defun push-undo! (doc entry &key keep-redo)
+  "ENTRY, (layer-index target x y w h bytes), onto DOC's undo list, which
+keeps at most *undo-depth* entries and *undo-bytes* bytes.  A new change
+empties the redo list; an undo being redone (KEEP-REDO) does not."
+  (the-object doc (set-slot! :undo-entries (trimmed-entries entry (the-object doc undo-entries))))
+  (unless keep-redo
+    (the-object doc (set-slot! :redo-entries nil))))
+
+(defun push-redo! (doc entry)
+  (the-object doc (set-slot! :redo-entries (trimmed-entries entry (the-object doc redo-entries)))))
 
 ;;; ---- adjustments baked into a layer ---------------------------------------
 ;;;
@@ -395,20 +405,40 @@ renders see the change; the plan is untouched."
                (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version)))))))
           (list x y w h))))))
 
+(defun swap-entry! (doc entry)
+  "Put ENTRY's bytes back into its layer and return the entry holding
+what they replaced: the mirror image, for the other list."
+  (destructuring-bind (index target x y w h bytes) entry
+    (let* ((layer (the-object doc (layer index)))
+           (width (the-object doc doc-width))
+           (height (the-object doc doc-height)))
+      (ecase target
+        (:layer
+         (let ((now (rgba-rect (the-object layer own-pixels) width height x y w h 4)))
+           (replace-rect! (the-object layer own-pixels) width x y w h bytes 4)
+           (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
+           (list index target x y w h now)))
+        (:mask
+         (let ((now (rgba-rect (the-object layer own-mask) width height x y w h 1)))
+           (replace-rect! (the-object layer own-mask) width x y w h bytes 1)
+           (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version))))
+           (list index target x y w h now)))))))
+
 (defun undo-stroke! (doc)
-  "Put back the bytes the last stroke on DOC overwrote, exactly, and
-return (layer-index target x y w h); nil when nothing is left to undo."
+  "Put back the bytes the last change on DOC overwrote, exactly, keep
+what they replaced for redo, and return (layer-index target x y w h);
+nil when nothing is left to undo."
   (let ((entry (first (the-object doc undo-entries))))
     (when entry
       (the-object doc (set-slot! :undo-entries (rest (the-object doc undo-entries))))
-      (destructuring-bind (index target x y w h bytes) entry
-        (let ((layer (the-object doc (layer index)))
-              (width (the-object doc doc-width)))
-          (ecase target
-            (:layer
-             (replace-rect! (the-object layer own-pixels) width x y w h bytes 4)
-             (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version)))))
-            (:mask
-             (replace-rect! (the-object layer own-mask) width x y w h bytes 1)
-             (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version))))))
-          (list index target x y w h))))))
+      (push-redo! doc (swap-entry! doc entry))
+      (butlast entry))))
+
+(defun redo-stroke! (doc)
+  "Put back what the last undo took away, exactly, and return
+(layer-index target x y w h); nil when nothing is left to redo."
+  (let ((entry (first (the-object doc redo-entries))))
+    (when entry
+      (the-object doc (set-slot! :redo-entries (rest (the-object doc redo-entries))))
+      (push-undo! doc (swap-entry! doc entry) :keep-redo t)
+      (butlast entry))))

@@ -103,7 +103,9 @@ place of what it had, own buffer included.  Mask presence is part of
 the plan, so the programs follow."
     (the (set-slot! :own-mask nil))
     (the (set-slot! :mask-spec spec))
-    (the (set-slot! :mask-version (1+ (the mask-version)))))))
+    (the (set-slot! :mask-version (1+ (the mask-version))))
+    (the parent (set-slot! :undo-entries nil))
+    (the parent (set-slot! :redo-entries nil)))))
 
 (define-object lut-layer (image-layer)
   :documentation
@@ -238,6 +240,10 @@ for the other keys.")
 target x y w h bytes) each, at most *undo-depth* of them.  undo-stroke!
 in brush.lisp pops one and puts the bytes back."
     undo-entries nil :settable)
+   ("List.  What the last undos took away, newest first, in the same
+shape as undo-entries; redo-stroke! pops one and puts it back.  Any new
+change empties it."
+    redo-entries nil :settable)
    ("Plist (:mask bytes :rect (x y w h)), or nil.  The selection: an
 8-bit coverage over the document and its bounds; nil selects nothing,
 which paints everywhere.  selection.lisp makes and uses it."
@@ -311,6 +317,7 @@ which paints everywhere.  selection.lisp makes and uses it."
    (replace-specs!
     (specs)
     (the (set-slot! :undo-entries nil))
+    (the (set-slot! :redo-entries nil))
     (the (set-slot! :layer-specs specs)))
 
    (new-layer-spec

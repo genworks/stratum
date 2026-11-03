@@ -540,6 +540,7 @@
       else if (e.key === 'Escape' && S.transforming) { e.preventDefault(); S.transforming.cancel(); }
       else if (mod && key === 't') { e.preventDefault(); S.beginTransform(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
+      else if (mod && ((e.shiftKey && key === 'z') || key === 'y')) { e.preventDefault(); S.redo(); }
       else if (mod && key === 'o') { e.preventDefault(); chooseFile(S.openFile); }
       else if (mod && e.altKey && key === 'i') { e.preventDefault(); S.openImageSize(); }
       else if (mod && e.altKey && key === 'c') { e.preventDefault(); S.openCanvasSize(); }
@@ -640,6 +641,7 @@
   S.brush = { radius: 24, hardness: 0.8, spacing: 0.25, flow: 1, opacity: 1,
               color: [230, 80, 70], mode: 'paint' };
   S.undoDepth = 0;
+  S.redoDepth = 0;
   var strokeBuf = null, texStroke = null, strokeDirty = null, frameDirty = null;
   var preview = { layer: -1, mask: -1, color: [0, 0, 0, 0], erase: 0 };
   var strokeChain = Promise.resolve();
@@ -814,6 +816,7 @@
 
   function tookRect(res) {
     S.undoDepth = res.undoDepth;
+    S.redoDepth = res.redoDepth || 0;
     if (res.target === 'mask') {
       doc.layers[res.layer].maskVersion = res.maskVersion;
       S.refreshMaskThumb(res.maskIndex);
@@ -873,6 +876,16 @@
         if (res.empty) { status('nothing to undo'); return null; }
         return tookRect(res).then(function () { status(); });
       }).catch(function (e) { status('undo failed: ' + e.message); });
+    });
+    return strokeChain;
+  };
+
+  S.redo = function () {
+    strokeChain = strokeChain.then(function () {
+      return postJSON('redo').then(function (res) {
+        if (res.empty) { status('nothing to redo'); return null; }
+        return tookRect(res).then(function () { status(); });
+      }).catch(function (e) { status('redo failed: ' + e.message); });
     });
     return strokeChain;
   };
@@ -1798,7 +1811,8 @@
       { title: 'Edit', items: [
         { label: 'Undo', key: 'Ctrl+Z', run: function () { S.undo(); },
           enabled: function () { return S.undoDepth > 0; } },
-        { label: 'Redo', key: 'Ctrl+Shift+Z' },
+        { label: 'Redo', key: 'Ctrl+Shift+Z', run: function () { S.redo(); },
+          enabled: function () { return S.redoDepth > 0; } },
         '-',
         { label: 'Cut', key: 'Ctrl+X', enabled: rasterActive, run: function () { S.clipboard('cut'); } },
         { label: 'Copy', key: 'Ctrl+C', enabled: rasterActive, run: function () { S.clipboard('copy'); } },
@@ -2438,6 +2452,20 @@
         return S.parity();
       }).then(function (p) {
         check('parity after undo', p.maxDiff <= 1, p);
+        // Redo brings the stroke back exactly as committed; undo again.
+        var committed = null;
+        return S.redo().then(function () {
+          committed = S.renderExact();
+          check('redo brings the stroke back', renderDiff(before, committed).maxDiff > 0 && S.redoDepth === 0 && S.undoDepth > 0,
+                { undo: S.undoDepth, redo: S.redoDepth });
+          return S.undo();
+        }).then(function () {
+          check('undo after redo gives the picture back exactly', renderDiff(before, S.renderExact()).maxDiff === 0);
+          return S.redo();
+        }).then(function () {
+          check('redo is exact', renderDiff(committed, S.renderExact()).maxDiff === 0);
+          return S.undo();
+        });
       });
     }).then(function () {
       // The stack through the menus: Layer > New Adjustment Layer >

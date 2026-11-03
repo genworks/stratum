@@ -280,7 +280,25 @@ to alter the pictures."
              (and (equal (undo-stroke! doc) (list* 0 :layer rect))
                   (equalp (the-object layer pixels) before)
                   (equalp (the-object doc (render-cpu)) render-before)))
-      (check "nothing is left to undo" (null (undo-stroke! doc))))))
+      (check "nothing is left to undo" (null (undo-stroke! doc)))
+      (check "redo brings the erase and the stroke back exactly, in order"
+             (let ((stroked after))
+               (and (equal (redo-stroke! doc) (list* 0 :layer rect))
+                    (equalp (the-object layer pixels) stroked)
+                    (redo-stroke! doc)
+                    (< (aref (the-object layer pixels) (+ 3 (* 4 (+ 120 (* w 90)))))
+                       (aref stroked (+ 3 (* 4 (+ 120 (* w 90))))))
+                    (null (redo-stroke! doc)))))
+      (check "a new change after an undo empties the redo list"
+             (progn (undo-stroke! doc)
+                    (apply-brush-stroke layer *test-stroke*)
+                    (and (null (the-object doc redo-entries))
+                         (null (redo-stroke! doc)))))
+      (check "undo and redo round trip through the whole list"
+             (progn (loop while (undo-stroke! doc))
+                    (loop while (redo-stroke! doc))
+                    (and (null (the-object doc redo-entries))
+                         (= 2 (length (the-object doc undo-entries)))))))))
 
 (defun test-masks ()
   (let* ((doc (make-sample-document "parity"))

@@ -92,6 +92,7 @@
    "maskCount" (length (the-object doc masked-layers))
    "lutRows" (the-object doc lut-rows)
    "undoDepth" (length (the-object doc undo-entries))
+   "redoDepth" (length (the-object doc redo-entries))
    "selection" (selection-json doc)
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
@@ -160,7 +161,8 @@ mask index)."
                "x" (first rect) "y" (second rect) "w" (third rect) "h" (fourth rect)
                "paintVersion" (if (eql (the-object layer kind) :raster) (the-object layer paint-version) 0)
                "maskVersion" (the-object layer mask-version)
-               "undoDepth" (length (the-object doc undo-entries))))
+               "undoDepth" (length (the-object doc undo-entries))
+               "redoDepth" (length (the-object doc redo-entries))))
 
 (defun handle-stroke (req)
   "Commit one stroke -- {layer, target, samples, brush}, target \"layer\"
@@ -186,10 +188,20 @@ own."
            (if rect (rect-json doc layer target rect) (json-object "empty" 'yason:true)))))))
 
 (defun handle-undo (req)
-  "Undo the document's last stroke and answer the rectangle put back, as
+  "Undo the document's last change and answer the rectangle put back, as
 handle-stroke does; {empty: true} when there was nothing to undo."
   (let* ((doc (request-doc req))
          (entry (undo-stroke! doc)))
+    (json-string
+     (if entry
+         (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
+         (json-object "empty" 'yason:true)))))
+
+(defun handle-redo (req)
+  "Redo the document's last undo and answer the rectangle put back, as
+handle-stroke does; {empty: true} when there was nothing to redo."
+  (let* ((doc (request-doc req))
+         (entry (redo-stroke! doc)))
     (json-string
      (if entry
          (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
@@ -645,6 +657,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/set" "application/json" #'handle-set)
       (pub "/stratum/api/stroke" "application/json" #'handle-stroke)
       (pub "/stratum/api/undo" "application/json" #'handle-undo)
+      (pub "/stratum/api/redo" "application/json" #'handle-redo)
       (pub "/stratum/api/layers" "application/json" #'handle-layers)
       (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
       (pub "/stratum/api/select" "application/json" #'handle-select)

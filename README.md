@@ -78,7 +78,9 @@ A painted layer gets its own pixel buffer on its first stroke, so the
 shared procedural pixels are never painted, and a `paint-version` slot
 signals that the buffer changed: it feeds the layer's `pixels` and so
 the CPU render, and never the plan. Undo keeps the rectangle each
-stroke overwrote and puts the bytes back.
+change overwrote and puts the bytes back; it keeps what they replaced
+for Redo, and any new change empties the redo list. A change of the
+stack forgets both lists, since their layer indices would be stale.
 
 Image ▸ Adjustments are the destructive versions of the three
 adjustment layers: the same arithmetic, done once to one raster
@@ -161,8 +163,9 @@ Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
 Sample, Place, Save (Ctrl+S), Save As PNG (Ctrl+Shift+S), Export As
 PNG and Close; Edit ▸
-Undo, Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5),
-Clear (Delete) and Free Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
+Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
+(Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5), Clear (Delete) and Free
+Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
@@ -231,7 +234,8 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 | `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
-| `POST /stratum/api/undo?doc=N` | undoes the last stroke; answers the rectangle put back |
+| `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back |
+| `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
@@ -264,7 +268,10 @@ It checks:
 - the brush: dab spacing, a dab's shape and flow, the rectangle form of
   `paint-dab` against the whole-buffer form, that a stroke changes its
   rectangle only and rebuilds nothing, that the shared pixels are never
-  painted, erasing, and that undo gives the layer back exactly;
+  painted, erasing, that undo gives the layer back exactly, that redo
+  brings changes back exactly and in order, that a new change empties
+  the redo list, and that undo and redo round trip through the whole
+  list;
 - masks: a stroke on a mask is refused where there is none, lowers the
   mask inside its rectangle only and rebuilds nothing, shows in the
   CPU render, and undoes exactly; Hide All, Reveal All and Delete; a
@@ -337,8 +344,9 @@ The self-test checks:
   browser's coverage equal to the server's (`stroke?dry=1`) to the
   last bit; the preview must match the committed picture within two
   levels (the commit rounds the layer to 8 bits once, which the
-  preview did not); parity must hold afterwards; and undo must give
-  the picture back byte for byte;
+  preview did not); parity must hold afterwards; undo must give the
+  picture back byte for byte; and redo must bring the stroke back
+  exactly;
 - the stack through the menus: Layer ▸ New Adjustment Layer ▸ Curves
   and then Delete Layer, each a new plan with parity intact, and the
   stack as found;

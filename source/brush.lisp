@@ -225,6 +225,59 @@ that much alpha.  The twin of the live-stroke block in glsl-entry."
                           (aref pixels (+ o 3)) (unit->byte na)))))))))
     pixels))
 
+(defun clone-source-rect (pixels width height sx sy w h)
+  "The W x H rectangle of PIXELS (RGBA8, WIDTH x HEIGHT) at SX, SY as a
+fresh buffer, transparent black wherever it reaches beyond the image:
+what the Clone Stamp paints from, copied before the stroke lands so a
+stroke over its own source reads the pixels as they were."
+  (declare (type (simple-array (unsigned-byte 8) (*)) pixels)
+           (type fixnum width height sx sy w h))
+  (let ((out (make-array (* 4 w h) :element-type '(unsigned-byte 8) :initial-element 0)))
+    (dotimes (row h out)
+      (let ((y (+ sy row)))
+        (when (and (<= 0 y) (< y height))
+          (let ((x0 (max 0 sx)) (x1 (min width (+ sx w))))
+            (when (< x0 x1)
+              (replace out pixels
+                       :start1 (* 4 (+ (- x0 sx) (* w row)))
+                       :start2 (* 4 (+ x0 (* width y)))
+                       :end2 (* 4 (+ x1 (* width y)))))))))))
+
+(defun composite-clone-stroke! (pixels width coverage x y w h source opacity)
+  "Composite a Clone Stamp stroke into PIXELS as composite-stroke! does,
+the paint at each pixel being SOURCE's pixel there (a W x H RGBA8
+buffer from clone-source-rect) in place of one color: its alpha times
+the coverage times OPACITY over the pixel, in premultiplied linear
+light.  The twin of the clone branch of the live-stroke block in
+glsl-entry."
+  (declare (type (simple-array (unsigned-byte 8) (*)) pixels source)
+           (type (simple-array double-float (*)) coverage)
+           (type fixnum width x y w h)
+           (type double-float opacity)
+           (optimize (speed 3) (safety 1)))
+  (let ((decode *srgb-decode*))
+    (declare (type (simple-array double-float (256)) decode))
+    (dotimes (row h)
+      (dotimes (col w)
+        (let* ((i (+ col (* row w)))
+               (s (* 4 i))
+               (a (* (aref coverage i) opacity (/ (float (aref source (+ s 3)) 1.0) 255.0))))
+          (declare (type fixnum i s) (type double-float a))
+          (when (> a 0.0)
+            (let* ((o (* 4 (+ x col (* width (+ y row)))))
+                   (la (/ (float (aref pixels (+ o 3)) 1.0) 255.0))
+                   (keep (* la (- 1.0 a)))
+                   (na (+ a keep))
+                   (nr (/ (+ (* (aref decode (aref source s)) a) (* (aref decode (aref pixels o)) keep)) na))
+                   (ng (/ (+ (* (aref decode (aref source (+ s 1))) a) (* (aref decode (aref pixels (+ o 1))) keep)) na))
+                   (nb (/ (+ (* (aref decode (aref source (+ s 2))) a) (* (aref decode (aref pixels (+ o 2))) keep)) na)))
+              (declare (type fixnum o) (type double-float la keep na nr ng nb))
+              (setf (aref pixels o) (unit->byte (linear->srgb nr))
+                    (aref pixels (+ o 1)) (unit->byte (linear->srgb ng))
+                    (aref pixels (+ o 2)) (unit->byte (linear->srgb nb))
+                    (aref pixels (+ o 3)) (unit->byte na)))))))
+    pixels))
+
 (defun stroke-color-linear (stroke)
   "The stroke's :color (sRGB 0-255) as three linear doubles."
   (let ((color (getf stroke :color (getf *default-brush* :color))))
@@ -365,7 +418,10 @@ rectangle (x y w h), or nil when the stroke touched no pixel.  STROKE is
 a plist: :points, a sequence of (x y pressure ...) samples in document
 pixels; :radius; :hardness; :spacing (a fraction of the radius); :flow;
 :opacity; :color (sRGB 0-255); :mode (:paint or :erase, for the pixels;
-a mask takes the color's luminance either way).
+a mask takes the color's luminance either way); :clone, (dx dy) for the
+Clone Stamp: the paint at each pixel is the layer's own pixel dx, dy
+away, as it was before the stroke, transparent beyond the layer; only
+the pixels take it, not a mask.
 
 Dabs are placed and rasterized by the dual functions place-dabs and
 paint-dab, which the browser's preview also runs, and composited once by
@@ -391,11 +447,16 @@ renders see the change; the plan is untouched."
           (ecase target
             (:layer
              (let ((pixels (the-object layer (ensure-own-pixels!)))
-                   (erase? (eql (getf stroke :mode :paint) :erase)))
+                   (erase? (eql (getf stroke :mode :paint) :erase))
+                   (clone (getf stroke :clone)))
                (push-undo! doc (list (the-object layer index) :layer x y w h
                                      (rgba-rect pixels width height x y w h 4)))
-               (destructuring-bind (r g b) (stroke-color-linear stroke)
-                 (composite-stroke! pixels width coverage x y w h r g b opacity erase?))
+               (if (and clone (not erase?))
+                   (let ((source (clone-source-rect pixels width height
+                                                    (+ x (round (first clone))) (+ y (round (second clone))) w h)))
+                     (composite-clone-stroke! pixels width coverage x y w h source opacity))
+                   (destructuring-bind (r g b) (stroke-color-linear stroke)
+                     (composite-stroke! pixels width coverage x y w h r g b opacity erase?)))
                (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))))
             (:mask
              (let ((mask (the-object layer (ensure-own-mask!))))

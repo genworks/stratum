@@ -300,6 +300,58 @@ to alter the pictures."
                     (and (null (the-object doc redo-entries))
                          (= 2 (length (the-object doc undo-entries)))))))))
 
+(defun test-clone ()
+  ;; An 8 x 4 picture, its left half opaque red, its right half clear.
+  (let ((pic (let ((p (make-rgba 8 4)))
+               (dotimes (y 4 p)
+                 (dotimes (x 4)
+                   (let ((o (* 4 (+ x (* 8 y)))))
+                     (setf (aref p o) 255 (aref p (+ o 3)) 255)))))))
+    (check "clone-source-rect copies the rectangle and is clear beyond the picture"
+           (let ((s (clone-source-rect pic 8 4 2 1 4 4)))
+             (and (= 255 (aref s 0) (aref s 3))                   ; (2,1): red
+                  (= 255 (aref s (* 4 1)))                         ; (3,1): red
+                  (= 0 (aref s (+ 3 (* 4 2))))                     ; (4,1): clear
+                  (= 255 (aref s (+ 3 (* 4 (+ 1 (* 4 2))))))       ; row 2 = y 3, col 1 = x 3: red
+                  (= 0 (aref s (+ 3 (* 4 (* 4 3)))))))             ; row 3 = y 4: beyond
+           (coerce (clone-source-rect pic 8 4 2 1 4 4) 'list))
+    (check "a source rectangle starting before the picture is clear there"
+           (let ((s (clone-source-rect pic 8 4 -2 -1 4 4)))
+             (and (= 0 (aref s 3)) (= 0 (aref s (+ 3 (* 4 (+ 2 (* 4 0))))))
+                  (= 255 (aref s (+ 3 (* 4 (+ 2 (* 4 1))))))))))
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0)))
+         (w 320)
+         (before (copy-seq (the-object sky pixels)))
+         (brush '(:radius 6 :hardness 1 :spacing 0.25 :flow 1 :opacity 1)))
+    (demand doc)
+    (flet ((px (pixels x y) (let ((o (* 4 (+ x (* w y))))) (list (aref pixels o) (aref pixels (+ o 1)) (aref pixels (+ o 2)) (aref pixels (+ o 3)))))
+           (near (a b) (every (lambda (p q) (<= (abs (- p q)) 1)) a b)))
+      (check "a clone stroke paints the layer's own pixels from the offset, inside its rectangle only, and rebuilds nothing"
+             (let ((rect (apply-brush-stroke sky (list* :points '((150 100 1)) :clone '(-100 -40) brush)))
+                   (after (the-object sky pixels)))
+               (and rect
+                    (near (px after 150 100) (px before 50 60))
+                    (not (equalp before after))
+                    (loop for i below (length before)
+                          for x = (mod (floor i 4) w) for y = (floor (floor i 4) w)
+                          always (or (and (<= 143 x 157) (<= 93 y 107)) (= (aref before i) (aref after i))))
+                    (equal (demand doc) '(1 1))))
+             (list (px (the-object sky pixels) 150 100) (px before 50 60)))
+      (check "a stroke over its own source reads the pixels as they were"
+             (let ((now (copy-seq (the-object sky pixels))))
+               (apply-brush-stroke sky (list* :points '((200 50 1)) :clone '(1 0) brush))
+               (let ((after (the-object sky pixels)))
+                 (and (near (px after 200 50) (px now 201 50))
+                      (near (px after 197 50) (px now 198 50))))))
+      (check "a clone from beyond the layer paints nothing"
+             (let ((now (copy-seq (the-object sky pixels))))
+               (and (apply-brush-stroke sky (list* :points '((5 5 1)) :clone '(-100 -100) brush))
+                    (equalp now (the-object sky pixels)))))
+      (check "undo gives the layer back after the clone strokes"
+             (progn (undo-stroke! doc) (undo-stroke! doc) (undo-stroke! doc)
+                    (equalp before (the-object sky pixels)))))))
+
 (defun test-masks ()
   (let* ((doc (make-sample-document "parity"))
          (w (the-object doc doc-width))
@@ -891,7 +943,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
+                  test-brush test-clone test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
                   test-layers test-files
                   test-threads test-golden))

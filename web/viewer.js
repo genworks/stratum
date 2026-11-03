@@ -78,6 +78,7 @@
     ['u_layers', 'u_masks', 'u_luts', 'u_opacity', 'u_params', 'u_background', 'u_doc_size',
      'u_view_offset', 'u_view_scale', 'u_canvas_h', 'u_exact',
      'u_stroke', 'u_stroke_layer', 'u_stroke_color', 'u_stroke_erase', 'u_stroke_mask',
+     'u_stroke_clone', 'u_stroke_offset',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
      'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv',
      'u_replace', 'u_replace_layer'].forEach(function (n) {
@@ -238,6 +239,8 @@
     gl.uniform4fv(uni.u_stroke_color, preview.color);
     gl.uniform1i(uni.u_stroke_erase, preview.erase);
     gl.uniform1i(uni.u_stroke_mask, preview.mask);
+    gl.uniform1i(uni.u_stroke_clone, preview.clone);
+    gl.uniform2f(uni.u_stroke_offset, preview.offset[0], preview.offset[1]);
     gl.uniform1i(uni.u_adjust_layer, adjust.layer);
     gl.uniform1i(uni.u_adjust_kind, adjust.kind);
     gl.uniform1i(uni.u_adjust_row, Math.max(1, doc.lutRows));
@@ -342,9 +345,9 @@
   var spaceHeld = false;
 
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
-  function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
+  function paints(tool) { return tool === 'brush' || tool === 'eraser' || tool === 'stamp'; }
 
-  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
+  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', stamp: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
                   marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair',
                   gradient: 'crosshair' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso' || tool === 'crop'; }
@@ -369,6 +372,48 @@
     var c = GRADIENT_PRESETS[S.gradient.preset]();
     return S.gradient.reverse ? [c[1], c[0]] : c;
   };
+
+  // The Clone Stamp: Alt-click sets the source point on the active
+  // layer; a stroke then paints the layer's own pixels from the source,
+  // offset by the distance from the source to where the stroke began.
+  // Aligned keeps that offset for every later stroke; otherwise each
+  // stroke starts from the source again.
+  S.clone = { aligned: true };
+  S.cloneSource = null;
+  S.cloneOffset = null;
+
+  S.setCloneSource = function (x, y) {
+    S.cloneSource = { x: x, y: y };
+    S.cloneOffset = null;
+    status('clone source set at ' + Math.round(x) + ', ' + Math.round(y));
+  };
+
+  function cloneOffsetFor(p0) {
+    if (S.clone.aligned && S.cloneOffset) return S.cloneOffset;
+    var off = [Math.round(S.cloneSource.x - p0.x), Math.round(S.cloneSource.y - p0.y)];
+    if (S.clone.aligned) S.cloneOffset = off;
+    return off;
+  }
+
+  // The crosshair over the pixels a clone stroke is reading.
+  function drawCloneMark(q) {
+    if (!overlay) return;
+    var ctx = overlay.getContext('2d'), c = toCanvas(q);
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(c[0] - 8, c[1]); ctx.lineTo(c[0] - 3, c[1]);
+    ctx.moveTo(c[0] + 3, c[1]); ctx.lineTo(c[0] + 8, c[1]);
+    ctx.moveTo(c[0], c[1] - 8); ctx.lineTo(c[0], c[1] - 3);
+    ctx.moveTo(c[0], c[1] + 3); ctx.lineTo(c[0], c[1] + 8);
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(c[0], c[1], 5, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
 
   // The drag's end, held to a multiple of 45 degrees with Shift.
   function gradientEnd(a, b, constrain) {
@@ -551,10 +596,16 @@
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       if (S.transforming) { S.transforming.down(e); return; }
       var tool = effectiveTool();
-      if (paints(tool)) {
+      if (tool === 'stamp' && e.altKey) {
+        var sp = docPoint(e);
+        S.setCloneSource(sp[0], sp[1]);
+      } else if (tool === 'stamp' && !S.cloneSource) {
+        status('Alt-click to set the clone source');
+      } else if (paints(tool)) {
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
                    samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
+        if (stroke.clone) drawCloneMark([stroke.samples[0].x + stroke.clone[0], stroke.samples[0].y + stroke.clone[1]]);
       } else if (tool === 'gradient') {
         var GL = activeL();
         if (!GL || GL.kind !== 'raster') { status('pick a raster layer for a gradient'); return; }
@@ -586,6 +637,10 @@
         var fresh = coalesced(e).map(strokeSample);
         Array.prototype.push.apply(stroke.samples, fresh);
         S.onStrokeSamples(stroke, fresh);
+        if (stroke.clone) {
+          var last = stroke.samples[stroke.samples.length - 1];
+          drawCloneMark([last.x + stroke.clone[0], last.y + stroke.clone[1]]);
+        }
         return;
       }
       if (gesture) {
@@ -620,6 +675,10 @@
       if (stroke) {
         var done = stroke;
         stroke = null;
+        if (done.clone) {
+          var cb = S.cropBox;
+          drawGesture(cb ? { tool: 'crop', points: [[cb.x, cb.y], [cb.x + cb.w, cb.y + cb.h]] } : null);
+        }
         if (e.type === 'pointerup') S.onStroke(done);
       }
       if (gesture) {
@@ -769,7 +828,7 @@
   S.undoDepth = 0;
   S.redoDepth = 0;
   var strokeBuf = null, texStroke = null, strokeDirty = null, frameDirty = null;
-  var preview = { layer: -1, mask: -1, color: [0, 0, 0, 0], erase: 0 };
+  var preview = { layer: -1, mask: -1, color: [0, 0, 0, 0], erase: 0, clone: 0, offset: [0, 0] };
   var strokeChain = Promise.resolve();
 
   // Painting on the active layer's mask instead of its pixels: picked by
@@ -898,6 +957,8 @@
       preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
       preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
     }
+    preview.clone = stroke.clone ? 1 : 0;
+    preview.offset = stroke.clone || [0, 0];
   }
 
   function clearPreview() {
@@ -917,7 +978,7 @@
 
   function strokeBody(stroke) {
     return JSON.stringify({
-      layer: stroke.layer, target: stroke.target, brush: stroke.brush,
+      layer: stroke.layer, target: stroke.target, brush: stroke.brush, clone: stroke.clone || null,
       samples: stroke.samples.map(function (s) { return [s.x, s.y, s.pressure]; })
     });
   }
@@ -969,13 +1030,17 @@
       if (S.maskTarget && L && L.mask) {
         stroke.target = 'mask';
         stroke.maskIndex = L.maskIndex;
-        stroke.texIndex = 0;
+        stroke.texIndex = stroke.tool === 'stamp' ? -1 : 0;
         stroke.brush.mode = 'paint';
         if (stroke.tool === 'eraser') stroke.brush.color = S.background.slice();
       } else {
         stroke.target = 'layer';
         stroke.texIndex = texIndexOf(stroke.layer);
         stroke.brush.mode = stroke.tool === 'eraser' ? 'erase' : 'paint';
+        if (stroke.tool === 'stamp') {
+          if (!S.cloneSource) stroke.texIndex = -1;
+          else stroke.clone = cloneOffsetFor(stroke.samples[0]);
+        }
       }
     }
     if (stroke.texIndex < 0) return;
@@ -989,7 +1054,11 @@
 
   S.onStroke = function (stroke) {
     S.lastStroke = stroke;
-    if (!(stroke.texIndex >= 0)) { status('pick a raster layer, or a mask, to paint on'); return; }
+    if (!(stroke.texIndex >= 0)) {
+      status(stroke.tool === 'stamp' ? 'the Clone Stamp paints a raster layer\'s pixels, from an Alt-clicked source'
+                                     : 'pick a raster layer, or a mask, to paint on');
+      return;
+    }
     strokeChain = strokeChain.then(function () { return commitStroke(stroke); });
   };
 
@@ -1287,7 +1356,7 @@
     '-',
     { id: 'healing', key: 'J', label: 'Healing Brush Tool' },
     { id: 'brush', key: 'B', label: 'Brush Tool', built: true },
-    { id: 'stamp', key: 'S', label: 'Clone Stamp Tool' },
+    { id: 'stamp', key: 'S', label: 'Clone Stamp Tool', built: true },
     { id: 'history', key: 'Y', label: 'History Brush Tool' },
     { id: 'eraser', key: 'E', label: 'Eraser Tool', built: true },
     { id: 'gradient', key: 'G', label: 'Gradient Tool', built: true },
@@ -1416,9 +1485,17 @@
     var reverse = el('input', { type: 'checkbox' });
     reverse.addEventListener('change', function () { S.gradient.reverse = reverse.checked; });
     grad.appendChild(el('div', { 'class': 'st-row' }, [reverse, el('span', { text: 'Reverse' })]));
+    // The Clone Stamp's alignment, under that.
+    var stamp = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Clone Stamp' })])]);
+    var aligned = el('input', { type: 'checkbox' });
+    aligned.checked = S.clone.aligned;
+    aligned.addEventListener('change', function () { S.clone.aligned = aligned.checked; S.cloneOffset = null; });
+    stamp.appendChild(el('div', { 'class': 'st-row' }, [aligned, el('span', { text: 'Aligned' })]));
+    stamp.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'Alt-click sets the source' })]));
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
     statusEl.parentNode.insertBefore(wand, box.nextSibling);
     statusEl.parentNode.insertBefore(grad, wand.nextSibling);
+    statusEl.parentNode.insertBefore(stamp, grad.nextSibling);
   }
 
   function hexColor(c) {
@@ -3487,6 +3564,78 @@
         S.background = saved.background;
         Object.assign(S.gradient, saved.options);
         S.setActiveLayer(active, false);
+      });
+    }).then(function () {
+      // The Clone Stamp on the lowest raster layer: Alt-click sets the
+      // source; a stroke paints the layer's own pixels from there,
+      // previewed through the live-stroke stage with the sampled paint
+      // and committed within two levels of the preview; the stroke's
+      // first dab takes the pixel at its source; parity; Aligned keeps
+      // the offset for a second stroke; undo twice gives the layer back.
+      var active = S.activeLayer, L = null;
+      doc.layers.forEach(function (x) { if (!L && x.kind === 'raster') L = x; });
+      if (!L) return null;
+      S.setActiveLayer(L.index, false);
+      var saved = { tool: S.tool, brush: S.brush, aligned: S.clone.aligned, source: S.cloneSource, offset: S.cloneOffset };
+      S.brush = { radius: 12, hardness: 1, spacing: 0.25, flow: 1, opacity: 1, color: [0, 0, 0], mode: 'paint' };
+      S.clone.aligned = true;
+      S.cloneSource = null;
+      S.cloneOffset = null;
+      var W = doc.width, H = doc.height, before = S.renderExact(), bytesBefore = null;
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      function at(x, y, alt) {
+        return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                 pointerId: 49, pointerType: 'mouse', bubbles: true, altKey: !!alt };
+      }
+      function px4(b, x, y) { var o = (y * W + x) * 4; return [b[o], b[o + 1], b[o + 2], b[o + 3]]; }
+      var sx = Math.round(W * 0.2), sy = Math.round(H * 0.25), dx = Math.round(W * 0.6), dy = Math.round(H * 0.6);
+      S.setTool('stamp');
+      function restore() {
+        S.setTool(saved.tool);
+        S.brush = saved.brush;
+        S.clone.aligned = saved.aligned;
+        S.cloneSource = saved.source;
+        S.cloneOffset = saved.offset;
+        S.setActiveLayer(active, false);
+      }
+      return fetchBytes(api('raster?i=' + L.texIndex)).then(function (px) {
+        bytesBefore = px;
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(sx, sy, true)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(sx, sy, true)));
+        check('Alt-click sets the clone source',
+              S.cloneSource && Math.round(S.cloneSource.x) === sx && Math.round(S.cloneSource.y) === sy, S.cloneSource);
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(dx, dy)));
+        canvas.dispatchEvent(new PointerEvent('pointermove', at(dx + 20, dy + 8)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(dx + 20, dy + 8)));
+        var got = S.lastStroke;
+        check('a stamp stroke carries the offset from its start to the source',
+              got && got.clone && got.clone[0] === sx - dx && got.clone[1] === sy - dy, got && got.clone);
+        if (!got || !got.previewed) { restore(); return null; }
+        return got.previewed.then(function () {
+          var shown = S.renderExact();
+          return S.strokesSettled().then(function () {
+            var after = S.renderExact(), kept = renderDiff(shown, after);
+            check('the stamp stroke changed the picture and the commit matches its preview',
+                  renderDiff(before, after).maxDiff > 0 && kept.maxDiff <= 2, kept);
+            return fetchBytes(api('raster?i=' + L.texIndex));
+          });
+        }).then(function (px) {
+          var painted = px4(px, dx, dy), source = px4(bytesBefore, sx, sy);
+          check('the first dab takes the pixel at its source',
+                painted.every(function (v, i) { return Math.abs(v - source[i]) <= 1; }), { painted: painted, source: source });
+          return S.parity();
+        }).then(function (p) {
+          check('parity after a stamp stroke', p.maxDiff <= 1, p);
+          canvas.dispatchEvent(new PointerEvent('pointerdown', at(dx + 40, dy + 30)));
+          canvas.dispatchEvent(new PointerEvent('pointerup', at(dx + 40, dy + 30)));
+          var second = S.lastStroke;
+          check('Aligned keeps the offset for the next stroke',
+                second && second.clone && second.clone[0] === sx - dx && second.clone[1] === sy - dy, second && second.clone);
+          return S.strokesSettled().then(function () { return S.undo(); }).then(function () { return S.undo(); });
+        }).then(function () {
+          check('undo gives the layer back after two stamp strokes', renderDiff(before, S.renderExact()).maxDiff === 0);
+          restore();
+        });
       });
     }).then(function () {
       // Merge Down and Flatten on a throwaway document: an image opened,

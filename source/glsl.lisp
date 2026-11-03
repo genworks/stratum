@@ -45,6 +45,8 @@ uniform int u_stroke_layer;
 uniform vec4 u_stroke_color;
 uniform int u_stroke_erase;
 uniform int u_stroke_mask;
+uniform int u_stroke_clone;
+uniform vec2 u_stroke_offset;
 uniform int u_adjust_layer;
 uniform int u_adjust_kind;
 uniform int u_adjust_row;
@@ -75,6 +77,13 @@ float mask_px(int i, vec2 p) {
 }
 float stroke_px(vec2 p) {
   return texelFetch(u_stroke, ivec2(p), 0).r;
+}
+// What the Clone Stamp paints at p: layer i's own pixel at the stroke's
+// offset, transparent beyond the document (clone-source-rect).
+vec4 clone_px(int i, vec2 p) {
+  vec2 q = p + u_stroke_offset;
+  if (q.x < 0.0 || q.y < 0.0 || q.x >= u_doc_size.x || q.y >= u_doc_size.y) return vec4(0.0);
+  return layer_px(i, q);
 }
 // The selection at q, with everything beyond the document unselected,
 // so a selection touching the edge shows its ants there.
@@ -225,9 +234,13 @@ void main() {
     if (cv > 0.0) {
       if (u_stroke_erase == 1) s.a = s.a * (1.0 - cv);
       else {
-        float na = cv + s.a * (1.0 - cv);
-        s.rgb = (u_stroke_color.rgb * cv + s.rgb * s.a * (1.0 - cv)) / na;
-        s.a = na;
+        vec4 paint = u_stroke_clone == 1 ? clone_px(~:*~d, p) : vec4(u_stroke_color.rgb, 1.0);
+        float pa = cv * paint.a;
+        if (pa > 0.0) {
+          float na = pa + s.a * (1.0 - pa);
+          s.rgb = (paint.rgb * pa + s.rgb * s.a * (1.0 - pa)) / na;
+          s.a = na;
+        }
       }
     }
   }

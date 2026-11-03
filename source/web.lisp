@@ -149,7 +149,10 @@ opacity color mode}; missing brush numbers take *default-brush*."
             :spacing (num "spacing" :spacing) :flow (num "flow" :flow)
             :opacity (num "opacity" :opacity)
             :color (or (and brush (gethash "color" brush)) (getf *default-brush* :color))
-            :mode (if (and brush (equal (gethash "mode" brush) "erase")) :erase :paint)))))
+            :mode (if (and brush (equal (gethash "mode" brush) "erase")) :erase :paint)
+            :clone (let ((c (gethash "clone" body)))
+                     (and (consp c) (= (length c) 2) (every #'realp c)
+                          (list (round (first c)) (round (second c)))))))))
 
 (defun rect-json (doc layer target rect)
   "The rectangle a stroke or an undo changed: on the layer's pixels

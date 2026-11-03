@@ -314,6 +314,13 @@ OPACITY.  The twin of the shader's masked()."
   "Integer. The most bytes a document's undo list keeps; the oldest
 entries go first.  A whole 4K layer is 33 MB.")
 
+(defun entry-bytes (entry)
+  "The bytes an undo ENTRY holds: a layer or mask entry's, or all of a
+mode change's (:mode from to . entries)."
+  (if (eql (first entry) :mode)
+      (reduce #'+ (cdddr entry) :key #'entry-bytes)
+      (length (seventh entry))))
+
 (defun trimmed-entries (entry entries)
   "ENTRY in front of ENTRIES, kept to *undo-depth* entries and
 *undo-bytes* bytes."
@@ -321,7 +328,7 @@ entries go first.  A whole 4K layer is 33 MB.")
         (kept '()))
     (loop for e in (cons entry entries)
           for n from 1
-          do (incf bytes (length (seventh e)))
+          do (incf bytes (entry-bytes e))
              (when (or (> n *undo-depth*) (and (> n 1) (> bytes *undo-bytes*)))
                (return))
              (push e kept))
@@ -460,7 +467,9 @@ renders see the change; the plan is untouched."
                       (let ((source (clone-source-rect pixels width height
                                                        (+ x (round (first clone))) (+ y (round (second clone))) w h)))
                         (composite-clone-stroke! pixels width coverage x y w h source opacity)))
-                     (t (destructuring-bind (r g b) (stroke-color-linear stroke)
+                     (t (destructuring-bind (r g b)
+                            (stroke-color-linear
+                             (list :color (doc-color doc (getf stroke :color (getf *default-brush* :color)))))
                           (composite-stroke! pixels width coverage x y w h r g b opacity erase?))))
                (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))))
             (:mask
@@ -473,7 +482,14 @@ renders see the change; the plan is untouched."
 
 (defun swap-entry! (doc entry)
   "Put ENTRY's bytes back into its layer and return the entry holding
-what they replaced: the mirror image, for the other list."
+what they replaced: the mirror image, for the other list.  A mode
+change's entry, (:mode from to . entries), puts every layer back and
+the mode with them."
+  (when (eql (first entry) :mode)
+    (destructuring-bind (from to &rest entries) (rest entry)
+      (let ((swapped (mapcar (lambda (e) (swap-entry! doc e)) entries)))
+        (the-object doc (set-slot! :color-mode from))
+        (return-from swap-entry! (list* :mode to from swapped)))))
   (destructuring-bind (index target x y w h bytes) entry
     (let* ((layer (the-object doc (layer index)))
            (width (the-object doc doc-width))
@@ -498,7 +514,7 @@ nil when nothing is left to undo."
     (when entry
       (the-object doc (set-slot! :undo-entries (rest (the-object doc undo-entries))))
       (push-redo! doc (swap-entry! doc entry))
-      (butlast entry))))
+      (if (eql (first entry) :mode) entry (butlast entry)))))
 
 (defun redo-stroke! (doc)
   "Put back what the last undo took away, exactly, and return
@@ -507,4 +523,4 @@ nil when nothing is left to undo."
     (when entry
       (the-object doc (set-slot! :redo-entries (rest (the-object doc redo-entries))))
       (push-undo! doc (swap-entry! doc entry) :keep-redo t)
-      (butlast entry))))
+      (if (eql (first entry) :mode) entry (butlast entry)))))

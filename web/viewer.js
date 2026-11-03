@@ -287,7 +287,8 @@
     if (!statusEl) return;
     var lines = [];
     if (doc) {
-      lines.push(doc.name + '  ' + doc.width + ' x ' + doc.height + '  ' + doc.layers.length + ' layers');
+      lines.push(doc.name + ' (' + (doc.mode === 'grayscale' ? 'Gray/8' : 'RGB/8') + ')  ' +
+                 doc.width + ' x ' + doc.height + '  ' + doc.layers.length + ' layers');
       lines.push('zoom ' + Math.round(view.scale * 1000) / 10 + '%  plan ' + doc.planVersion);
       lines.push('shader builds: server ' + doc.shaderBuilds + ', page ' + S.stats.programBuilds);
     }
@@ -1020,6 +1021,12 @@
   function tookRect(res) {
     S.undoDepth = res.undoDepth;
     S.redoDepth = res.redoDepth || 0;
+    if (res.group) {
+      // a mode change, or its undo: the mode, then every layer it turned
+      doc.mode = res.mode;
+      applyMode();
+      return Promise.all(res.group.map(tookRect)).then(function () { status(); });
+    }
     if (res.target === 'mask') {
       doc.layers[res.layer].maskVersion = res.maskVersion;
       S.refreshMaskThumb(res.maskIndex);
@@ -1105,8 +1112,41 @@
   };
 
   S.setBrush = function (changes) {
-    Object.keys(changes).forEach(function (k) { S.brush[k] = changes[k]; });
+    Object.keys(changes).forEach(function (k) { S.brush[k] = k === 'color' ? docColor(changes[k]) : changes[k]; });
     if (S.brushInputs) S.brushInputs.refresh();
+  };
+
+  // ---- Image > Mode -------------------------------------------------------
+  //
+  // Grayscale turns every raster layer gray on the server and, here,
+  // keeps the swatches gray so nothing painted brings color back; RGB
+  // Color lets color in again.  Both are one undo step (a group of
+  // layers with the mode).
+
+  // The gray a color turns into: its luminance in linear light, encoded
+  // (color-gray on the server).
+  function grayOf(c) {
+    var g = Math.round(255 * maskGray(c));
+    return [g, g, g];
+  }
+
+  // A color as the document takes it.
+  function docColor(c) { return doc && doc.mode === 'grayscale' ? grayOf(c) : c; }
+
+  function applyMode() {
+    if (doc.mode === 'grayscale') {
+      S.brush.color = grayOf(S.brush.color);
+      S.background = grayOf(S.background);
+      if (S.brushInputs) S.brushInputs.refresh();
+    }
+  }
+
+  S.setMode = function (mode) {
+    strokeChain = strokeChain.then(function () {
+      return postJSON('mode', JSON.stringify({ mode: mode })).then(tookRect)
+        .catch(function (e) { status('mode change failed: ' + e.message); });
+    });
+    return strokeChain;
   };
 
   // The browser's coverage for STROKE against the server's (POST
@@ -1426,7 +1466,7 @@
     var bgInput = el('input', { type: 'color' });
     bgInput.style.display = 'none';
     bgInput.addEventListener('input', function () {
-      S.background = [1, 3, 5].map(function (i) { return parseInt(bgInput.value.substr(i, 2), 16); });
+      S.background = docColor([1, 3, 5].map(function (i) { return parseInt(bgInput.value.substr(i, 2), 16); }));
       S.swatches.refresh();
     });
     fg.addEventListener('click', function () {
@@ -2130,7 +2170,19 @@
         '-',
         { label: 'Free Transform', key: 'Ctrl+T', enabled: rasterActive, run: function () { S.beginTransform(); } }] },
       { title: 'Image', items: [
-        { label: 'Mode', sub: [{ label: 'RGB Color', check: true }, { label: 'Grayscale' }, { label: 'CMYK Color' }] },
+        { label: 'Mode', sub: [
+          { label: 'Bitmap' },
+          { label: 'Grayscale', check: !!doc && doc.mode === 'grayscale', run: function () { S.setMode('grayscale'); } },
+          { label: 'Duotone' },
+          { label: 'Indexed Color...' },
+          { label: 'RGB Color', check: !doc || doc.mode !== 'grayscale', run: function () { S.setMode('rgb'); } },
+          { label: 'CMYK Color' },
+          { label: 'Lab Color' },
+          { label: 'Multichannel' },
+          '-',
+          { label: '8 Bits/Channel', check: true, run: function () {} },
+          { label: '16 Bits/Channel' },
+          { label: '32 Bits/Channel' }] },
         '-',
         { label: 'Adjustments', sub: [
           { label: 'Levels...', key: 'Ctrl+L', enabled: rasterActive, run: function () { S.openAdjust('levels'); } },
@@ -3722,6 +3774,44 @@
             check('undo gives the layer back after a healing stroke', renderDiff(before, S.renderExact()).maxDiff === 0);
           });
         }).then(restore, function (e) { restore(); throw e; });
+      });
+    }).then(function () {
+      // Image > Mode > Grayscale on the document: every raster layer
+      // turns gray and the swatches with it, parity holds, the Mode
+      // menu shows the check; one undo brings the color and the mode
+      // back exactly.
+      var L = null;
+      doc.layers.forEach(function (x) { if (!L && x.kind === 'raster') L = x; });
+      if (!L) return null;
+      var before = S.renderExact(), mode = doc.mode, saved = { color: S.brush.color, background: S.background };
+      S.setBrush({ color: [200, 30, 30] });
+      S.background = [20, 40, 220];
+      return S.setMode('grayscale').then(function () {
+        return fetchBytes(api('raster?i=' + L.texIndex));
+      }).then(function (px) {
+        var gray = true;
+        for (var o = 0; o < px.length; o += 4) if (px[o] !== px[o + 1] || px[o] !== px[o + 2]) { gray = false; break; }
+        var c = S.brush.color, b = S.background;
+        check('Grayscale turns every pixel of a layer gray, and the swatches',
+              doc.mode === 'grayscale' && gray && c[0] === c[1] && c[1] === c[2] && b[0] === b[1] && b[1] === b[2],
+              { mode: doc.mode, color: c, background: b });
+        var menu = document.querySelector('#stratum-menubar .st-menu[data-menu="Image"]');
+        menu.firstChild.click();
+        var checked = Array.prototype.filter.call(menu.querySelectorAll('.st-item'), function (r) {
+          return r.querySelector('.st-check') && Array.prototype.some.call(r.children, function (k) { return k.textContent === 'Grayscale'; });
+        }).length === 1;
+        closeMenus();
+        check('the Mode menu checks Grayscale', checked);
+        return S.parity();
+      }).then(function (p) {
+        check('parity in Grayscale', p.maxDiff <= 1, p);
+        return S.undo();
+      }).then(function () {
+        check('one undo brings the color and the mode back', doc.mode === mode && renderDiff(before, S.renderExact()).maxDiff === 0,
+              { mode: doc.mode });
+        S.brush.color = saved.color;
+        S.background = saved.background;
+        if (S.brushInputs) S.brushInputs.refresh();
       });
     }).then(function () {
       // Merge Down and Flatten on a throwaway document: an image opened,

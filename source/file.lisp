@@ -60,6 +60,7 @@
                            :width (the-object doc doc-width)
                            :height (the-object doc doc-height)
                            :background (the-object doc background-srgb)
+                           :mode (the-object doc color-mode)
                            :layers layers
                            :blobs (mapcar (lambda (b) (list (length (first b)) (second b))) blobs)))
              (header-octets (string-octets (with-standard-io-syntax (prin1-to-string header))))
@@ -109,4 +110,5 @@
                      :doc-width (getf header :width)
                      :doc-height (getf header :height)
                      :background-srgb (getf header :background)
+                     :color-mode (or (getf header :mode) :rgb)
                      :layer-specs layers)))))

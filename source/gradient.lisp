@@ -120,7 +120,7 @@ the undo list; returns it as the rectangle."
          (w (the-object doc doc-width))
          (h (the-object doc doc-height))
          (pixels (the-object layer (ensure-own-pixels!)))
-         (ramped (gradient-rgba pixels w h x0 y0 x1 y1 start end shape opacity)))
+         (ramped (gradient-rgba pixels w h x0 y0 x1 y1 (doc-color doc start) (doc-color doc end) shape opacity)))
     (push-undo! doc (list (the-object layer index) :layer 0 0 w h (copy-seq pixels)))
     (blend-by-selection! pixels ramped w h (the-object doc selection))
     (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))

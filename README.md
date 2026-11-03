@@ -206,6 +206,16 @@ white reveals, and the eraser paints the background color. The shader
 has a second live-stroke stage for masks (`masked()`), the server's
 twin is `composite-mask-stroke!`, and undo covers mask strokes too.
 
+Image ▸ Mode ▸ Grayscale turns every raster layer gray, each pixel's
+luminance in linear light with its alpha kept, and from then on turns
+whatever is painted, filled, placed or pasted to gray on its way in,
+on the server and in the swatches, so no color gets back into the
+picture until RGB Color is picked again, which changes nothing but the
+mode (`source/mode.lisp`). The pixels are RGBA8 in either mode. A mode
+change is one undo step, a group entry holding every layer it turned
+with the mode itself, and the mode is kept in the file and through a
+crop or resize. The other modes on the menu are shown and disabled.
+
 ## Running it
 
 In a Gendl image (an SBCL or CCL room):
@@ -231,7 +241,8 @@ Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
 Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
-layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
+layer's pixels on OK; Image ▸ Mode ▸ Grayscale and RGB Color; Image ▸
+Image Size (Ctrl+Alt+I), Canvas Size
 (Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D),
 Inverse (Ctrl+Shift+I) and Feather (Shift+F6); Filter ▸ Blur ▸
 Gaussian Blur, Sharpen ▸
@@ -324,7 +335,8 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
 | `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null, heal: true or false}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
-| `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back |
+| `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back, or for a mode change `{mode, group: [rectangles]}` |
+| `POST /stratum/api/mode?doc=N` | `{mode: "rgb" or "grayscale"}`; answers `{mode, group: [the layers turned, as rectangles]}` |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
 | `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/open?name=&w=&h=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new document of one Background layer; answers `{doc, width, height}` |
@@ -365,6 +377,13 @@ It checks:
   brings changes back exactly and in order, that a new change empties
   the redo list, and that undo and redo round trip through the whole
   list;
+- Image ▸ Mode: a color turns to its luminance gray with its alpha
+  kept; Grayscale turns every raster layer gray in one undo entry and
+  rebuilds nothing; in Grayscale a red stroke, a red fill and a
+  red-to-blue gradient paint gray; undo of the mode change brings
+  every layer and the mode back and redo turns it gray again; RGB
+  Color changes the mode alone and undoes; a paste into a Grayscale
+  document is gray, and the file and a crop keep the mode;
 - the PNG reader: a PNG written by zpng reads back byte for byte; PNGs
   built by hand read back: 8-bit RGBA through every filter type, Adam7
   interlace through all seven passes and with passes skipped, 16-bit
@@ -535,6 +554,9 @@ The self-test checks:
   of its preview, on the parity document's Sky ramp the healed pixel
   keeps the destination's tone rather than the source's, parity, and
   undo gives the layer back;
+- Image ▸ Mode ▸ Grayscale on the document: every pixel of a layer and
+  the swatches turn gray, the Mode menu checks Grayscale, parity holds,
+  and one undo brings the color and the mode back exactly;
 - merging, on a throwaway document: an image placed on another and
   merged down leaves one raster layer with the lower name, and a
   curves layer added then flattened leaves one Background;

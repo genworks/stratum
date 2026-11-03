@@ -94,6 +94,7 @@
    "lutRows" (the-object doc lut-rows)
    "undoDepth" (length (the-object doc undo-entries))
    "redoDepth" (length (the-object doc redo-entries))
+   "mode" (string-downcase (the-object doc color-mode))
    "selection" (selection-json doc)
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
@@ -192,6 +193,28 @@ own."
          (let ((rect (apply-brush-stroke layer stroke :target target)))
            (if rect (rect-json doc layer target rect) (json-object "empty" 'yason:true)))))))
 
+(defun entry-json (doc entry)
+  "The rectangle an undo ENTRY put back, as rect-json gives it; for a
+mode change, {mode, group: [one rectangle per layer]}."
+  (if (eql (first entry) :mode)
+      (json-object "mode" (string-downcase (the-object doc color-mode))
+                   "group" (mapcar (lambda (e) (rect-json doc (the-object doc (layer (first e))) (second e) (cddr e)))
+                                   (cdddr entry))
+                   "undoDepth" (length (the-object doc undo-entries))
+                   "redoDepth" (length (the-object doc redo-entries)))
+      (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))))
+
+(defun handle-mode (req)
+  "Image > Mode: {mode: \"rgb\" | \"grayscale\"}; answers {mode, group:
+[the layers changed, as rectangles]}, the group empty when nothing
+changed."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (mode (find (or (gethash "mode" body) "rgb") '(:rgb :grayscale) :test #'string-equal)))
+    (unless mode (error "Unknown image mode ~s." (gethash "mode" body)))
+    (let ((entry (set-color-mode! doc mode)))
+      (json-string (entry-json doc (or entry (list :mode mode mode)))))))
+
 (defun handle-undo (req)
   "Undo the document's last change and answer the rectangle put back, as
 handle-stroke does; {empty: true} when there was nothing to undo."
@@ -199,7 +222,7 @@ handle-stroke does; {empty: true} when there was nothing to undo."
          (entry (undo-stroke! doc)))
     (json-string
      (if entry
-         (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
+         (entry-json doc entry)
          (json-object "empty" 'yason:true)))))
 
 (defun handle-redo (req)
@@ -209,7 +232,7 @@ handle-stroke does; {empty: true} when there was nothing to redo."
          (entry (redo-stroke! doc)))
     (json-string
      (if entry
-         (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))
+         (entry-json doc entry)
          (json-object "empty" 'yason:true)))))
 
 (defun selection-json (doc)
@@ -484,7 +507,7 @@ layer of the document (?name=&above=), centered and cropped or padded
 to the document's size; answers as handle-layers does."
   (let ((doc (request-doc req)))
     (multiple-value-bind (pixels w h) (request-image req)
-      (let* ((fitted (fit-rgba pixels w h (the-object doc doc-width) (the-object doc doc-height)))
+      (let* ((fitted (doc-pixels doc (fit-rgba pixels w h (the-object doc doc-width) (the-object doc doc-height))))
              (above (let ((a (net.aserve:request-query-value "above" req)))
                       (and a (plusp (length a)) (parse-integer a))))
              (name (or (net.aserve:request-query-value "name" req) "Placed"))
@@ -741,6 +764,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/adjust" "application/json" #'handle-adjust)
       (pub "/stratum/api/filter" "application/json" #'handle-filter)
       (pub "/stratum/api/gradient" "application/json" #'handle-gradient)
+      (pub "/stratum/api/mode" "application/json" #'handle-mode)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)

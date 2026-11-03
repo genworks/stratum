@@ -404,7 +404,7 @@ fit; the new layer's index.  Nothing without a clipboard."
                        :start1 (* 4 (+ x0 (* width py)))
                        :start2 (* 4 (+ (- x0 x) (* cw row)))
                        :end2 (* 4 (+ (- x1 x) (* cw row)))))))))
-    (the-object doc (add-layer! (plist-merge (list :pixels pixels) (the-object doc (new-layer-spec :raster)))
+    (the-object doc (add-layer! (plist-merge (list :pixels (doc-pixels doc pixels)) (the-object doc (new-layer-spec :raster)))
                                 above))))
 
 (defun fill-selection! (layer color opacity &optional erase?)
@@ -425,7 +425,7 @@ changed, on the undo list."
         (clip-coverage! coverage x y w h selection width)
         (push-undo! doc (list (the-object layer index) :layer x y w h
                               (rgba-rect pixels width height x y w h 4)))
-        (destructuring-bind (r g b) (stroke-color-linear (list :color color))
+        (destructuring-bind (r g b) (stroke-color-linear (list :color (doc-color doc color)))
           (composite-stroke! pixels width coverage x y w h r g b
                              (max 0d0 (min 1d0 (float opacity 1d0))) erase?))
         (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))

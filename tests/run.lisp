@@ -418,6 +418,72 @@ to alter the pictures."
       (check "undo gives the layer back after a healing stroke"
              (and (undo-stroke! doc) (equalp before (the-object sky pixels)))))))
 
+(defun test-mode ()
+  (check "a color turns to its luminance gray, alpha kept"
+         (let ((p (make-rgba 2 1)))
+           (setf (aref p 0) 255 (aref p 1) 0 (aref p 2) 0 (aref p 3) 100
+                 (aref p 4) 0 (aref p 5) 255 (aref p 6) 0 (aref p 7) 255)
+           (gray-rgba! p)
+           (and (= (aref p 0) (aref p 1) (aref p 2) 127) (= 100 (aref p 3))
+                (= (aref p 4) (aref p 5) (aref p 6) 220) (= 255 (aref p 7))
+                (= 127 (color-gray '(255 0 0))) (= 220 (color-gray '(0 255 0)))))
+         (list (color-gray '(255 0 0)) (color-gray '(0 255 0))))
+  (let* ((doc (make-sample-document "parity"))
+         (rasters (remove-if-not (lambda (l) (eql (the-object l kind) :raster)) (the-object doc layer-list)))
+         (before (mapcar (lambda (l) (copy-seq (the-object l pixels))) rasters))
+         (w 320))
+    (demand doc)
+    (flet ((all-gray (pixels) (loop for o from 0 below (length pixels) by 4
+                                    always (= (aref pixels o) (aref pixels (+ o 1)) (aref pixels (+ o 2)))))
+           (px (pixels x y) (let ((o (* 4 (+ x (* w y))))) (list (aref pixels o) (aref pixels (+ o 1)) (aref pixels (+ o 2))))))
+      (check "Grayscale turns every raster layer gray in one undo entry, and rebuilds nothing"
+             (let ((entry (set-color-mode! doc :grayscale)))
+               (and (eql (the-object doc color-mode) :grayscale)
+                    (equal (subseq entry 0 3) '(:mode :rgb :grayscale))
+                    (= (length (cdddr entry)) (length rasters))
+                    (every (lambda (l) (all-gray (the-object l pixels))) rasters)
+                    (notany #'all-gray before)
+                    (= 1 (length (the-object doc undo-entries)))
+                    (equal (demand doc) '(1 1)))))
+      (check "in Grayscale a red stroke, a red fill and a red-to-blue gradient paint gray"
+             (let* ((sky (first rasters))
+                    (gray-sky (copy-seq (the-object sky pixels))))
+               (apply-brush-stroke sky (list :points '((150 100 1)) :color '(255 0 0) :radius 6 :hardness 1 :flow 1 :opacity 1))
+               (select-rect! doc 10 10 20 20)
+               (fill-selection! sky '(255 0 0) 1)
+               (select-none! doc)
+               (gradient-layer! sky 0 0 320 0 :start '(255 0 0 255) :end '(0 0 255 255))
+               (let ((painted (and (all-gray (the-object sky pixels))
+                                   (not (equal (px (the-object sky pixels) 150 100) (px gray-sky 150 100)))))
+                     (entries (length (cdddr (fourth (the-object doc undo-entries))))))
+                 (undo-stroke! doc) (undo-stroke! doc) (undo-stroke! doc)
+                 (and painted (= entries (length rasters)) (equalp gray-sky (the-object sky pixels))))))
+      (check "undo of the mode change brings every layer and the mode back; redo turns it gray again"
+             (let ((entry (undo-stroke! doc)))
+               (and (equal (subseq entry 0 3) '(:mode :rgb :grayscale))
+                    (eql (the-object doc color-mode) :rgb)
+                    (every (lambda (l b) (equalp (the-object l pixels) b)) rasters before)
+                    (progn (redo-stroke! doc)
+                           (and (eql (the-object doc color-mode) :grayscale)
+                                (every (lambda (l) (all-gray (the-object l pixels))) rasters))))))
+      (check "RGB Color changes the mode alone, and undoes"
+             (let ((gray-now (mapcar (lambda (l) (copy-seq (the-object l pixels))) rasters)))
+               (and (null (set-color-mode! doc :grayscale))
+                    (equal (set-color-mode! doc :rgb) '(:mode :grayscale :rgb))
+                    (eql (the-object doc color-mode) :rgb)
+                    (every (lambda (l b) (equalp (the-object l pixels) b)) rasters gray-now)
+                    (progn (undo-stroke! doc) (eql (the-object doc color-mode) :grayscale)))))
+      (check "a paste into a Grayscale document is gray; the file and a crop keep the mode"
+             (let ((color-doc (make-sample-document "parity")))
+               (select-rect! color-doc 100 60 40 30)
+               (copy-selection! (the-object color-doc (layer 0)))
+               (let ((index (paste-clipboard! doc)))
+                 (and (all-gray (the-object doc (layer index) pixels))
+                      (not (all-gray (getf *clipboard* :pixels)))
+                      (eql (the-object (read-document-octets (document-octets doc) "back") color-mode) :grayscale)
+                      (eql (the-object (crop-document doc 10 10 50 50) color-mode) :grayscale)
+                      (eql (the-object (read-document-octets (document-octets color-doc) "rgb") color-mode) :rgb))))))))
+
 (defun test-masks ()
   (let* ((doc (make-sample-document "parity"))
          (w (the-object doc doc-width))
@@ -1138,7 +1204,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
+                  test-brush test-clone test-heal test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
                   test-layers test-files test-png
                   test-threads test-golden))

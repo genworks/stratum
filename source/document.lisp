@@ -239,6 +239,11 @@ for the other keys.")
    ("Number.  The background's alpha for the CPU render: 1 for a document
 as shown; 0 composites the stack over transparency, which a merge uses."
     background-alpha 1.0)
+   ("Keyword.  Image > Mode: :rgb, or :grayscale, in which every raster
+layer holds gray and whatever is painted, filled, placed or pasted is
+turned to gray first (set-color-mode!, mode.lisp).  The pixels are RGBA8
+either way."
+    color-mode :rgb :settable)
    ("List.  What the last strokes overwrote, newest first: (layer-index
 target x y w h bytes) each, at most *undo-depth* of them.  undo-stroke!
 in brush.lisp pops one and puts the bytes back."

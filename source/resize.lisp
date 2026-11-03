@@ -120,6 +120,7 @@ through PIXEL-FN and each mask through MASK-FN, both (bytes w h) -> bytes."
                  :doc-width nw
                  :doc-height nh
                  :background-srgb (the-object doc background-srgb)
+                 :color-mode (the-object doc color-mode)
                  :layer-specs
                  (mapcar (lambda (spec)
                            (let ((spec (copy-list spec)))

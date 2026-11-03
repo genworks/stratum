@@ -79,6 +79,16 @@ WIDTH x HEIGHT): what File > Open makes of an image."
                :doc-height height
                :layer-specs (list (list :kind :raster :name "Background" :pixels pixels))))
 
+(defun new-document (name width height &optional (background :white))
+  "File > New: a WIDTH x HEIGHT document of one Background layer filled
+with BACKGROUND, :white, :transparent or an (r g b) list."
+  (let ((color (cond ((eql background :white) '(255 255 255))
+                     ((eql background :transparent) '(0 0 0))
+                     (t background)))
+        (alpha (if (eql background :transparent) 0 255)))
+    (make-file-document name width height
+                        (gen-solid width height :color color :alpha alpha))))
+
 (defun make-sample-document (name)
   (let ((recipe (rest (assoc name *recipes* :test #'string=))))
     (unless recipe (error "No sample document named ~s." name))

@@ -184,9 +184,9 @@ empty space to add a point, or double-click a point to remove it.
 The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
-as unavailable commands do. Built so far: File ▸ Open (Ctrl+O), Open
-Sample, Place, Save (Ctrl+S), Save As PNG (Ctrl+Shift+S), Export As
-PNG and Close; Edit ▸
+as unavailable commands do. Built so far: File ▸ New (Ctrl+N), Open
+(Ctrl+O), Open Sample, Place, Save (Ctrl+S), Save As PNG
+(Ctrl+Shift+S), Export As PNG and Close; Edit ▸
 Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
 (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5), Clear (Delete) and Free
 Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
@@ -208,9 +208,10 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 (W), Crop (C), Eyedropper (I), Healing Brush (J), Brush (B), Clone
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
-Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Eyedropper, Brush,
-Eraser, Hand and Zoom; the rest are drawn dimmed and refuse to be
-picked. The foreground and
+Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Crop, Eyedropper,
+Brush, Eraser, Hand and Zoom; the rest are drawn dimmed and refuse to
+be picked. The Crop tool's drag leaves a box with everything outside
+it darkened; Enter or a double-click crops, Escape drops it. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
 eye for visibility, a thumbnail of the layer and of its mask, its name
@@ -223,6 +224,9 @@ duplicates one, Ctrl+] and Ctrl+[ move it, and Ctrl+0, Ctrl+1, Ctrl++
 and Ctrl+- are the views. Click a layer's name to make it the active
 one; the brush paints on it. The panel has the brush's size, hardness,
 flow, opacity and color.
+
+File ▸ New makes a document of a given size with one Background layer,
+white, transparent, or the background color.
 
 Files go in through the browser, which decodes every image format it
 knows, and exactly: an ImageBitmap with no premultiplication and no
@@ -273,6 +277,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
+| `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/open?name=&w=&h=` | body: raw RGBA8; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: raw RGBA8; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
@@ -284,7 +289,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/transform?doc=N` | `{layer, matrix: [a, b, c, d, e, f]}` (x′ = ax + by + c, y′ = dx + ey + f): the selected pixels resampled through it; answers the whole layer as a rectangle, with the selection's new rectangle |
 | `POST /stratum/api/clipboard?doc=N` | `{op: "copy" or "cut", layer}` or `{op: "paste", above}`; Copy answers the clipboard's size, Cut the rectangle cleared, Paste the new layer as `layers` does |
-| `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
+| `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "crop-rect", x, y, w, h}`, `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
 | `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", "unsharp-mask" or "add-noise", settings: {radius, amount, threshold, monochrome, seed}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}`, `{op: "mask", layer, value: "reveal", "hide" or "delete"}`, `{op: "merge", layer}` or `{op: "flatten"}`; answers the new plan version and the layer to work on |
@@ -367,7 +372,8 @@ It checks:
   duplicate's pixels its own, a new layer transparent, and the
   programs following;
 - files: an image fitted into another size is centered, padded or
-  cropped, and an opened image renders back as it came;
+  cropped, an opened image renders back as it came, and a new document
+  is white, transparent or a color, one Background;
 - that a threaded render equals a single-threaded one;
 - the FNV-1a checksums of the CPU renders against `tests/golden.sexp`,
   the sample documents and the parity document with a test stroke
@@ -442,6 +448,10 @@ The self-test checks:
 - sizes, on a throwaway document opened from a small image: Crop,
   Image Size and Canvas Size each remake it at the new size; the
   Image Size dialog opens and cancels;
+- New and Crop: the New dialog opens and cancels, New makes a document
+  of the asked size with a transparent Background, the Crop tool's
+  drag leaves a box that Escape drops, and a crop to a rectangle
+  remakes the document at that size;
 - merging, on a throwaway document: an image placed on another and
   merged down leaves one raster layer with the lower name, and a
   curves layer added then flattened leaves one Background;

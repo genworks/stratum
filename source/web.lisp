@@ -316,6 +316,13 @@ name; answers {width, height} and the page reloads."
                         (let ((selection (the-object doc selection)))
                           (unless selection (error "Nothing is selected to crop to."))
                           (apply #'crop-document doc (getf selection :rect))))
+                       ((equal op "crop-rect")
+                        (let* ((w (the-object doc doc-width)) (h (the-object doc doc-height))
+                               (x (max 0 (min (1- w) (round (gethash "x" body)))))
+                               (y (max 0 (min (1- h) (round (gethash "y" body)))))
+                               (cw (max 1 (min (- w x) (round (gethash "w" body)))))
+                               (ch (max 1 (min (- h y) (round (gethash "h" body))))))
+                          (crop-document doc x y cw ch)))
                        ((equal op "image-size")
                         (resize-document doc (size "width") (size "height")))
                        ((equal op "canvas-size")
@@ -468,6 +475,21 @@ under its name (?name=); answers {doc, width, height}."
     (json-string (json-object "doc" name
                               "width" (the-object doc doc-width)
                               "height" (the-object doc doc-height)))))
+
+(defun handle-new (req)
+  "File > New: {name, width, height, background: \"white\" | \"transparent\"
+| [r, g, b]}; a new document; answers {doc, width, height}."
+  (let* ((body (parse-json-body req))
+         (name (unique-document-name (or (gethash "name" body) "untitled")))
+         (w (round (gethash "width" body)))
+         (h (round (gethash "height" body)))
+         (bg (gethash "background" body)))
+    (unless (and (<= 1 w 16384) (<= 1 h 16384)) (error "Bad size ~a x ~a." w h))
+    (let ((doc (new-document name w h (cond ((equal bg "transparent") :transparent)
+                                            ((listp bg) (mapcar #'round bg))
+                                            (t :white)))))
+      (setf (gethash name *documents*) doc)
+      (json-string (json-object "doc" name "width" w "height" h)))))
 
 (defun handle-close (req)
   "Forget the named document; a sample is remade on its next request."
@@ -704,6 +726,7 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
       (pub "/stratum/api/close" "application/json" #'handle-close)
+      (pub "/stratum/api/new" "application/json" #'handle-new)
       (pub "/stratum/api/save" "application/octet-stream"
            (lambda (req) (document-octets (request-doc req))))
       (pub "/stratum/api/load" "application/json" #'handle-load))))

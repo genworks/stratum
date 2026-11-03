@@ -368,7 +368,17 @@ to alter the pictures."
              (and (= 1 (length (the-object doc layer-list)))
                   (string= (the-object doc (layer 0) layer-name) "Background")
                   (equalp (the-object doc (render-cpu)) opaque))
-             (list (the-object doc (render-cpu)) opaque)))))
+             (list (the-object doc (render-cpu)) opaque)))
+    (check "a new document is white, or transparent, or a color, one Background"
+           (let ((white (new-document "n1" 5 4))
+                 (clear (new-document "n2" 5 4 :transparent))
+                 (red (new-document "n3" 5 4 '(200 10 10))))
+             (and (every (lambda (v) (= v 255)) (the-object white (layer 0) pixels))
+                  (equal (layer-names white) '("Background"))
+                  (loop for i from 3 below 80 by 4 always (zerop (aref (the-object clear (layer 0) pixels) i)))
+                  (= 200 (aref (the-object red (layer 0) pixels) 0))
+                  (= 10 (aref (the-object red (layer 0) pixels) 1))
+                  (equalp (the-object white (render-cpu)) (the-object white (layer 0) pixels)))))))
 
 (defun test-selection ()
   (check "a rectangle selection covers its pixels and reports its bounds"

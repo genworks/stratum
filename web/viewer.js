@@ -345,8 +345,8 @@
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
   var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
-                  marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair' };
-  function selects(tool) { return tool === 'marquee' || tool === 'lasso'; }
+                  marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair' };
+  function selects(tool) { return tool === 'marquee' || tool === 'lasso' || tool === 'crop'; }
 
   // Shift adds to the selection, Alt takes from it, as in other editors.
   function selectionMode(e) { return e.shiftKey ? 'add' : (e.altKey ? 'subtract' : 'new'); }
@@ -436,6 +436,22 @@
     var ctx = overlay.getContext('2d');
     ctx.clearRect(0, 0, overlay.width, overlay.height);
     if (!g) return;
+    if (g.tool === 'crop') {
+      // the crop box: everything outside it darkened
+      var a0 = toCanvas(g.points[0]), b0 = toCanvas(g.points[g.points.length - 1]);
+      var x0 = Math.min(a0[0], b0[0]), y0 = Math.min(a0[1], b0[1]);
+      var x1 = Math.max(a0[0], b0[0]), y1 = Math.max(a0[1], b0[1]);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(0, 0, overlay.width, y0);
+      ctx.fillRect(0, y1, overlay.width, overlay.height - y1);
+      ctx.fillRect(0, y0, x0, y1 - y0);
+      ctx.fillRect(x1, y0, overlay.width - x1, y1 - y0);
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
+      return;
+    }
     ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -452,7 +468,36 @@
     ctx.stroke();
   }
 
+  // The crop box stays up after the drag until Enter or a double-click
+  // commits it, or Escape drops it; a new drag replaces it.
+  S.cropBox = null;
+
+  function cropRect(g) {
+    var a = g.points[0], b = g.points[g.points.length - 1];
+    var x = Math.round(Math.min(a[0], b[0])), y = Math.round(Math.min(a[1], b[1]));
+    return { x: x, y: y, w: Math.round(Math.max(a[0], b[0])) - x, h: Math.round(Math.max(a[1], b[1])) - y };
+  }
+
+  S.commitCrop = function () {
+    var r = S.cropBox;
+    if (!r) return Promise.resolve(null);
+    S.cropBox = null;
+    drawGesture(null);
+    return S.resize({ op: 'crop-rect', x: r.x, y: r.y, w: r.w, h: r.h });
+  };
+
+  S.cancelCrop = function () {
+    S.cropBox = null;
+    drawGesture(null);
+  };
+
   function finishGesture(g) {
+    if (g.tool === 'crop') {
+      var r = cropRect(g);
+      if (r.w > 0 && r.h > 0) { S.cropBox = r; drawGesture(g); status('crop: Enter or double-click commits, Escape cancels'); }
+      else S.cancelCrop();
+      return Promise.resolve(S.cropBox);
+    }
     drawGesture(null);
     if (g.tool === 'marquee') {
       var a = g.points[0], b = g.points[g.points.length - 1];
@@ -557,6 +602,11 @@
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
       else if (e.key === 'Enter' && S.transforming) { e.preventDefault(); S.transforming.commit(); }
       else if (e.key === 'Escape' && S.transforming) { e.preventDefault(); S.transforming.cancel(); }
+      else if (e.key === 'Enter' && S.cropBox) { e.preventDefault(); S.commitCrop(); }
+      else if (e.key === 'Escape' && S.cropBox) { e.preventDefault(); S.cancelCrop(); }
+      else if (mod && key === 'n' && !e.shiftKey) { e.preventDefault(); S.openNew(); }
+      else if (e.key === 'Escape' && S.newDialog) S.newDialog.cancel();
+      else if (e.key === 'Enter' && S.newDialog) S.newDialog.ok();
       else if (mod && key === 't') { e.preventDefault(); S.beginTransform(); }
       else if (mod && !e.shiftKey && key === 'z') { e.preventDefault(); S.undo(); }
       else if (mod && ((e.shiftKey && key === 'z') || key === 'y')) { e.preventDefault(); S.redo(); }
@@ -624,6 +674,7 @@
     }, { passive: false });
     canvas.addEventListener('dblclick', function () {
       if (S.transforming) { S.transforming.commit(); return; }
+      if (S.cropBox) { S.commitCrop(); return; }
       fitView(); status(); requestDraw();
     });
   }
@@ -1181,7 +1232,7 @@
     { id: 'lasso', key: 'L', label: 'Lasso Tool', built: true },
     { id: 'wand', key: 'W', label: 'Magic Wand Tool', built: true },
     '-',
-    { id: 'crop', key: 'C', label: 'Crop Tool' },
+    { id: 'crop', key: 'C', label: 'Crop Tool', built: true },
     { id: 'eyedropper', key: 'I', label: 'Eyedropper Tool', built: true },
     '-',
     { id: 'healing', key: 'J', label: 'Healing Brush Tool' },
@@ -1526,6 +1577,46 @@
     return { box: box, cancel: cancel, ok: ok };
   }
 
+  // File > New: name, size and what the Background holds.
+  S.openNew = function () {
+    if (S.newDialog) S.newDialog.cancel();
+    var state = { name: 'Untitled', width: 1920, height: 1080, background: 'white' };
+    var name = el('input', { type: 'text', value: state.name });
+    name.style.width = '140px';
+    name.addEventListener('input', function () { state.name = name.value; });
+    var w = numberField('width', state.width, function (v) { state.width = v; });
+    var h = numberField('height', state.height, function (v) { state.height = v; });
+    var bg = el('select');
+    [['white', 'White'], ['background', 'Background Color'], ['transparent', 'Transparent']].forEach(function (pair) {
+      bg.appendChild(el('option', { value: pair[0], text: pair[1] }));
+    });
+    bg.addEventListener('change', function () { state.background = bg.value; });
+    var d = sizeDialog('New', [
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'name' }), name]),
+      w.row, h.row,
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'contents' }), bg])]);
+    var dialog = S.newDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); name.value = state.name; w.input.value = String(state.width); h.input.value = String(state.height); bg.value = state.background; },
+      cancel: function () { d.box.remove(); S.newDialog = null; },
+      ok: function () {
+        d.box.remove();
+        S.newDialog = null;
+        var body = { name: state.name, width: state.width, height: state.height,
+                     background: state.background === 'background' ? S.background : state.background };
+        return postJSON('new', JSON.stringify(body)).then(function (res) {
+          if (S.noReload) return res;
+          location.search = '?doc=' + encodeURIComponent(res.doc);
+          return res;
+        }, function (e) { status('new failed: ' + e.message); return null; });
+      }
+    };
+    d.cancel.addEventListener('click', dialog.cancel);
+    d.ok.addEventListener('click', dialog.ok);
+    name.focus();
+    return dialog;
+  };
+
   // Image Size: width and height, proportions constrained by default.
   S.openImageSize = function () {
     if (S.sizeDialog) S.sizeDialog.cancel();
@@ -1851,7 +1942,7 @@
   function menuSpec() {
     return [
       { title: 'File', items: [
-        { label: 'New...', key: 'Ctrl+N' },
+        { label: 'New...', key: 'Ctrl+N', run: function () { S.openNew(); } },
         { label: 'Open...', key: 'Ctrl+O', run: function () { chooseFile(S.openFile); } },
         { label: 'Open Sample', sub: ['demo', 'parity', 'stress'].map(function (n) {
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + n; } }; }) },
@@ -2734,7 +2825,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('crop') && S.tool === saved.tool;
+      var refused = !S.setTool('healing') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -3163,6 +3254,47 @@
         .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
         .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
         .then(function () { return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' }); });
+    }).then(function () {
+      // File > New makes a document of the asked size with a white or a
+      // transparent Background; the Crop tool's drag leaves a box that
+      // Escape drops; a crop-rect through the endpoint crops the new
+      // document; then it is closed.  The New dialog opens and cancels.
+      var dlg = S.openNew();
+      dlg.set({ name: 'newtest', width: 64, height: 48, background: 'transparent' });
+      var opened = !!document.querySelector('.st-dialog');
+      dlg.cancel();
+      check('the New dialog opens and cancels', opened && !document.querySelector('.st-dialog') && !S.newDialog);
+      var made = null;
+      return postJSON('new', JSON.stringify({ name: 'newtest', width: 64, height: 48, background: 'transparent' })).then(function (res) {
+        made = res.doc;
+        return Promise.all([fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(made)),
+                            fetchBytes('/stratum/api/raster?doc=' + encodeURIComponent(made) + '&i=0')]);
+      }).then(function (pair) {
+        var d = pair[0], px = pair[1], clear = true;
+        for (var k = 3; k < px.length; k += 4) if (px[k] !== 0) clear = false;
+        check('New makes a document of the asked size with one transparent Background',
+              d.width === 64 && d.height === 48 && d.layers.length === 1 && d.layers[0].name === 'Background' && clear,
+              { width: d.width, height: d.height, layers: d.layers.length });
+        var saved = S.tool, r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+        function at(x, y) {
+          return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                   pointerId: 47, pointerType: 'mouse', bubbles: true };
+        }
+        S.setTool('crop');
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(10, 10)));
+        canvas.dispatchEvent(new PointerEvent('pointermove', at(110, 70)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(110, 70)));
+        var box = S.cropBox;
+        S.cancelCrop();
+        S.setTool(saved);
+        check('the Crop tool leaves a box that Escape drops', box && box.w === 100 && box.h === 60 && !S.cropBox, box);
+        return fetchJSON('/stratum/api/resize?doc=' + encodeURIComponent(made),
+                         { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ op: 'crop-rect', x: 10, y: 8, w: 30, h: 20 }) });
+      }).then(function (res) {
+        check('a crop to a rectangle remakes the document at that size', res.width === 30 && res.height === 20, res);
+        return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(made), { method: 'POST' });
+      });
     }).then(function () {
       // Merge Down and Flatten on a throwaway document: an image opened,
       // a second image placed on it, the two merged into one layer that

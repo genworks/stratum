@@ -418,6 +418,61 @@ to alter the pictures."
       (check "undo gives the layer back after a healing stroke"
              (and (undo-stroke! doc) (equalp before (the-object sky pixels)))))))
 
+(defun test-history ()
+  (let* ((doc (make-sample-document "parity"))
+         (sky (the-object doc (layer 0)))
+         (w 320)
+         (brush '(:radius 6 :hardness 1 :spacing 0.25 :flow 1 :opacity 1)))
+    (ensure-history-specs! doc)
+    (demand doc)
+    (flet ((px (pixels x y) (let ((o (* 4 (+ x (* w y))))) (list (aref pixels o) (aref pixels (+ o 1)) (aref pixels (+ o 2)) (aref pixels (+ o 3)))))
+           (near (a b) (every (lambda (p q) (<= (abs (- p q)) 1)) a b)))
+      (let ((opened (copy-seq (composite-specs doc (the-object doc layer-specs))))
+            (before (copy-seq (the-object sky pixels))))
+        (check "the history composite is the document as opened, over transparency, rendered once and kept"
+               (let ((h (history-pixels doc)))
+                 (and (equalp h opened) (eq h (history-pixels doc)) (= 0 (the-object doc history-version)))))
+        (check "a history stroke paints the opened composite onto the layer, inside its rectangle, and rebuilds nothing"
+               (progn (apply-brush-stroke sky (list* :points '((150 100 1)) :color '(255 0 0) brush))
+                      (let ((rect (apply-brush-stroke sky (list* :points '((150 100 1)) :history t brush)))
+                            (after (the-object sky pixels)))
+                        (and rect
+                             (near (px after 150 100) (px opened 150 100))
+                             (not (near (px before 150 100) (px opened 150 100)))
+                             (equal (px after 50 50) (px before 50 50))
+                             (equal (demand doc) '(1 1)))))
+               (list (px (the-object sky pixels) 150 100) (px opened 150 100) (px before 150 100)))
+        (check "undo twice gives the layer back; the source still stands after strokes"
+               (progn (undo-stroke! doc) (undo-stroke! doc)
+                      (and (equalp before (the-object sky pixels))
+                           (equalp opened (history-pixels doc)))))
+        (check "Set Source takes the current state, copied, and bumps the version"
+               (progn (select-rect! doc 100 60 60 40)
+                      (fill-selection! sky '(255 0 0) 1)
+                      (select-none! doc)
+                      (let ((version (set-history! doc))
+                            (red (copy-seq (composite-specs doc (materialized-specs doc)))))
+                        (undo-stroke! doc)
+                        (and (= version 1)
+                             (equalp (history-pixels doc) red)
+                             (equalp before (the-object sky pixels))
+                             (progn (apply-brush-stroke sky (list* :points '((130 80 1)) :history t brush))
+                                    (near (px (the-object sky pixels) 130 80) (px red 130 80)))
+                             (progn (undo-stroke! doc) (equalp before (the-object sky pixels)))))))
+        (check "in Grayscale the history brush paints gray"
+               (progn (set-color-mode! doc :grayscale)
+                      (apply-brush-stroke sky (list* :points '((150 100 1)) :history t brush))
+                      (let ((p (px (the-object sky pixels) 150 100)))
+                        (prog1 (and (= (first p) (second p) (third p))
+                                    (not (= (first (px opened 150 100)) (second (px opened 150 100)))))
+                          (undo-stroke! doc) (undo-stroke! doc)))))
+        (check "a cropped document starts its history at the cropped state"
+               (let ((cropped (crop-document doc 10 10 50 50)))
+                 (and (null (the-object cropped history-specs))
+                      (progn (ensure-history-specs! cropped)
+                             (equalp (history-pixels cropped)
+                                     (composite-specs cropped (the-object cropped layer-specs)))))))))))
+
 (defun test-mode ()
   (check "a color turns to its luminance gray, alpha kept"
          (let ((p (make-rgba 2 1)))
@@ -1223,7 +1278,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions
                   test-threads test-golden))

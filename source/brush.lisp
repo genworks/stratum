@@ -310,9 +310,12 @@ OPACITY.  The twin of the shader's masked()."
             (declare (type fixnum o) (type double-float m))
             (setf (aref mask o) (unit->byte (+ m (* (- gray m) a))))))))))
 
-(defparameter *undo-bytes* (* 512 1024 1024)
+(defparameter *undo-bytes* (* 128 1024 1024)
   "Integer. The most bytes a document's undo list keeps; the oldest
-entries go first.  A whole 4K layer is 33 MB.")
+entries go first.  A whole 4K layer is 33 MB.  (512 MB until
+2026-11-03: with documents per session on a 1 GB heap, four sessions'
+worth of 1080p undo entries exhausted it; relieve-memory! in web.lisp
+trims these lists first when the heap runs short.)")
 
 (defun entry-bytes (entry)
   "The bytes an undo ENTRY holds: a layer or mask entry's, or all of a
@@ -429,7 +432,9 @@ a mask takes the color's luminance either way); :clone, (dx dy) for the
 Clone Stamp: the paint at each pixel is the layer's own pixel dx, dy
 away, as it was before the stroke, transparent beyond the layer; only
 the pixels take it, not a mask.  With :heal as well, the Healing Brush:
-the source's texture on the destination's tone (heal-stroke!).
+the source's texture on the destination's tone (heal-stroke!).  :history,
+the History Brush: the paint is the document's history composite at
+the same place (history-pixels, history.lisp).
 
 Dabs are placed and rasterized by the dual functions place-dabs and
 paint-dab, which the browser's preview also runs, and composited once by
@@ -459,7 +464,12 @@ renders see the change; the plan is untouched."
                    (clone (getf stroke :clone)))
                (push-undo! doc (list (the-object layer index) :layer x y w h
                                      (rgba-rect pixels width height x y w h 4)))
-               (cond ((and clone (not erase?) (getf stroke :heal))
+               (cond ((and (getf stroke :history) (not erase?))
+                      ;; the History Brush: the history composite at the
+                      ;; same place, as the document's mode takes it
+                      (let ((source (doc-pixels doc (clone-source-rect (history-pixels doc) width height x y w h))))
+                        (composite-clone-stroke! pixels width coverage x y w h source opacity)))
+                     ((and clone (not erase?) (getf stroke :heal))
                       (heal-stroke! pixels width height coverage x y w h
                                     (round (first clone)) (round (second clone))
                                     (stroke-number stroke :radius) opacity))

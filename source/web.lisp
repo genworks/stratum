@@ -50,23 +50,74 @@ call, so two browsers opening \"demo\" get two documents.")
     (dolist (id gone) (remhash id *sessions*))
     gone))
 
+(defparameter *heap-high-water* 0.7
+  "The fraction of the heap in use above which relieve-memory! acts.")
+
+(defun heap-used-fraction ()
+  "How much of the heap is in use, 0 to 1, where the implementation can
+say (SBCL); nil elsewhere, and then relieve-memory! never acts."
+  #+sbcl (/ (float (sb-kernel:dynamic-usage) 1d0) (sb-ext:dynamic-space-size))
+  #-sbcl nil)
+
+(defun full-gc ()
+  #+sbcl (sb-ext:gc :full t)
+  #+ccl (ccl:gc)
+  #-(or sbcl ccl) nil)
+
+(defun relieve-memory! (keep-id)
+  "When the heap is above *heap-high-water*: drop every document's undo
+and redo lists, collect, and while still above it forget the sessions
+touched longest ago, except KEEP-ID's.  Returns what it did, or nil."
+  (let ((before (heap-used-fraction)))
+    (when (and before (> before *heap-high-water*))
+      (let ((done '()))
+        (flet ((drop-history (table)
+                 (maphash (lambda (name doc)
+                            (declare (ignore name))
+                            (the-object doc (set-slot! :undo-entries nil))
+                            (the-object doc (set-slot! :redo-entries nil)))
+                          table)))
+          (drop-history *documents*)
+          (maphash (lambda (id cell) (declare (ignore id)) (drop-history (car cell))) *sessions*)
+          (push :undo-dropped done)
+          (full-gc)
+          (loop while (and (> (heap-used-fraction) *heap-high-water*)
+                           (> (hash-table-count *sessions*) 0))
+                do (let ((oldest nil) (when-touched nil))
+                     (maphash (lambda (id cell)
+                                (unless (equal id keep-id)
+                                  (when (or (null when-touched) (< (cdr cell) when-touched))
+                                    (setf oldest id when-touched (cdr cell)))))
+                              *sessions*)
+                     (unless oldest (return))
+                     (remhash oldest *sessions*)
+                     (push (list :session-forgotten oldest) done)
+                     (full-gc))))
+        (nreverse done)))))
+
 (defun session-table (id)
   "The documents table of session ID, made on first sight and touched
-now; the shared pool for no id."
+now; the shared pool for no id.  A touch also sweeps idle sessions and,
+when the heap is short, relieves it (relieve-memory!)."
   (if (or (null id) (string= id ""))
       *documents*
       (let ((cell (or (gethash id *sessions*)
                       (setf (gethash id *sessions*) (cons (make-hash-table :test 'equal) 0)))))
         (setf (cdr cell) (get-universal-time))
         (sweep-sessions!)
+        (relieve-memory! id)
         (car cell))))
 
 (defun request-session-table (req)
   (session-table (net.aserve:request-query-value "s" req)))
 
 (defun find-document (name)
-  (or (gethash name *documents*)
-      (setf (gethash name *documents*) (make-sample-document name))))
+  "The session's document NAME, a sample made on first sight; its
+history source taken if it has none (the state at the first request)."
+  (let ((doc (or (gethash name *documents*)
+                 (setf (gethash name *documents*) (make-sample-document name)))))
+    (ensure-history-specs! doc)
+    doc))
 
 (defun request-doc (req)
   (find-document (or (net.aserve:request-query-value "doc" req) "demo")))
@@ -128,6 +179,7 @@ now; the shared pool for no id."
    "undoDepth" (length (the-object doc undo-entries))
    "redoDepth" (length (the-object doc redo-entries))
    "mode" (string-downcase (the-object doc color-mode))
+   "historyVersion" (the-object doc history-version)
    "selection" (selection-json doc)
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
@@ -187,7 +239,8 @@ opacity color mode}; missing brush numbers take *default-brush*."
             :clone (let ((c (gethash "clone" body)))
                      (and (consp c) (= (length c) 2) (every #'realp c)
                           (list (round (first c)) (round (second c)))))
-            :heal (let ((h (gethash "heal" body))) (and h (not (eql h 'yason:false))))))))
+            :heal (let ((h (gethash "heal" body))) (and h (not (eql h 'yason:false))))
+            :history (let ((h (gethash "history" body))) (and h (not (eql h 'yason:false))))))))
 
 (defun rect-json (doc layer target rect)
   "The rectangle a stroke or an undo changed: on the layer's pixels
@@ -574,6 +627,12 @@ under its name (?name=); answers {doc, width, height}."
       (setf (gethash name *documents*) doc)
       (json-string (json-object "doc" name "width" w "height" h)))))
 
+(defun handle-history-set (req)
+  "Set the History Brush's source to the document's current state;
+answers {historyVersion}."
+  (let ((doc (request-doc req)))
+    (json-string (json-object "historyVersion" (set-history! doc)))))
+
 (defun handle-documents (req)
   "The names of the session's open documents, sorted; {documents,
 session}."
@@ -724,8 +783,11 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 goes back as a 500 carrying the condition's text."
   (let ((result nil) (failure nil))
     (bt:with-lock-held (*lock*)
+      ;; serious-condition, not error: a heap exhausted inside a handler
+      ;; is a storage-condition, and a worker that stopped in the
+      ;; debugger on one would hold the lock against every request
       (handler-case (setf result (funcall thunk))
-        (error (e) (setf failure (princ-to-string e)))))
+        (serious-condition (e) (setf failure (princ-to-string e)))))
     (if failure
         (net.aserve:with-http-response (req ent :content-type "text/plain"
                                                 :response net.aserve:*response-internal-server-error*)
@@ -809,6 +871,9 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/gradient" "application/json" #'handle-gradient)
       (pub "/stratum/api/mode" "application/json" #'handle-mode)
       (pub "/stratum/api/documents" "application/json" #'handle-documents)
+      (pub "/stratum/api/history" "application/octet-stream"
+           (lambda (req) (history-pixels (request-doc req))))
+      (pub "/stratum/api/history-set" "application/json" #'handle-history-set)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)

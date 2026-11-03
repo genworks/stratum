@@ -35,13 +35,16 @@
   // from another's.  Without storage the id lasts the page.
   var session = null;
   try {
+    // ?s= names the session outright (the test probe reuses one), and
+    // it sticks
+    if (qs.get('s')) localStorage.setItem('stratum-session', qs.get('s'));
     session = localStorage.getItem('stratum-session');
     if (!session) {
       session = 's' + Math.random().toString(36).slice(2) + Date.now().toString(36);
       localStorage.setItem('stratum-session', session);
     }
   } catch (e) {}
-  if (!session) session = 's' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  if (!session) session = qs.get('s') || 's' + Math.random().toString(36).slice(2) + Date.now().toString(36);
   S.session = session;
   S.documents = null;
 
@@ -97,7 +100,7 @@
      'u_stroke_clone', 'u_stroke_offset',
      'u_adjust_layer', 'u_adjust_kind', 'u_adjust_row', 'u_adjust_params',
      'u_selection', 'u_selection_on', 'u_ants', 'u_float_layer', 'u_float_inv',
-     'u_replace', 'u_replace_layer', 'u_blur'].forEach(function (n) {
+     'u_replace', 'u_replace_layer', 'u_blur', 'u_history'].forEach(function (n) {
       uni[n] = gl.getUniformLocation(p, n);
     });
     S.stats.programBuilds++;
@@ -275,6 +278,9 @@
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_2D, preview.clone === 2 && blurTex[1] ? blurTex[1] : texIdle);
     gl.uniform1i(uni.u_blur, 6);
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, preview.clone === 3 && texHistory ? texHistory : texIdle);
+    gl.uniform1i(uni.u_history, 7);
     gl.uniform1fv(uni.u_opacity, opacity);
     gl.uniform4fv(uni.u_params, params);
     gl.uniform3fv(uni.u_background, doc.backgroundLinear);
@@ -365,11 +371,11 @@
   var spaceHeld = false;
 
   function effectiveTool() { return spaceHeld ? 'pan' : S.tool; }
-  function paints(tool) { return tool === 'brush' || tool === 'eraser' || samples(tool); }
+  function paints(tool) { return tool === 'brush' || tool === 'eraser' || tool === 'history' || samples(tool); }
   // The tools that paint from an Alt-clicked source.
   function samples(tool) { return tool === 'stamp' || tool === 'healing'; }
 
-  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', stamp: 'crosshair', healing: 'crosshair',
+  var CURSORS = { brush: 'crosshair', eraser: 'crosshair', stamp: 'crosshair', healing: 'crosshair', history: 'crosshair',
                   eyedropper: 'crosshair', zoom: 'zoom-in',
                   marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair', crop: 'crosshair',
                   gradient: 'crosshair' };
@@ -980,7 +986,7 @@
       preview.color = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2]), stroke.brush.opacity];
       preview.erase = stroke.brush.mode === 'erase' ? 1 : 0;
     }
-    preview.clone = stroke.heal ? 2 : (stroke.clone ? 1 : 0);
+    preview.clone = stroke.history ? 3 : stroke.heal ? 2 : (stroke.clone ? 1 : 0);
     preview.offset = stroke.clone || [0, 0];
     if (stroke.heal && !healBlur(stroke.texIndex, healSigma(stroke.brush.radius))) {
       // no float render targets: nothing to blur into, so no preview;
@@ -992,6 +998,34 @@
 
   // The healing blur's sigma for a brush radius: heal-sigma's rule.
   function healSigma(radius) { return Math.max(1, radius / 2); }
+
+  // The History Brush's source: the document's history composite
+  // (GET history), uploaded once and again when its version moves.
+  var texHistory = null, historyVersion = -1;
+  function ensureHistory() {
+    if (texHistory && historyVersion === doc.historyVersion) return Promise.resolve(texHistory);
+    return fetchBytes(api('history')).then(function (bytes) {
+      if (texHistory) gl.deleteTexture(texHistory);
+      texHistory = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texHistory);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.SRGB8_ALPHA8, doc.width, doc.height);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, doc.width, doc.height, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      historyVersion = doc.historyVersion;
+      return texHistory;
+    });
+  }
+
+  // Set the history source to the document as it is now.
+  S.setHistorySource = function () {
+    return S.strokesSettled().then(function () { return postJSON('history-set'); }).then(function (res) {
+      doc.historyVersion = res.historyVersion;
+      status('history source set to the current state');
+      return res.historyVersion;
+    });
+  };
 
   function clearPreview() {
     if (strokeDirty) {
@@ -1011,7 +1045,7 @@
   function strokeBody(stroke) {
     return JSON.stringify({
       layer: stroke.layer, target: stroke.target, brush: stroke.brush, clone: stroke.clone || null,
-      heal: !!stroke.heal,
+      heal: !!stroke.heal, history: !!stroke.history,
       samples: stroke.samples.map(function (s) { return [s.x, s.y, s.pressure]; })
     });
   }
@@ -1069,7 +1103,7 @@
       if (S.maskTarget && L && L.mask) {
         stroke.target = 'mask';
         stroke.maskIndex = L.maskIndex;
-        stroke.texIndex = samples(stroke.tool) ? -1 : 0;
+        stroke.texIndex = samples(stroke.tool) || stroke.tool === 'history' ? -1 : 0;
         stroke.brush.mode = 'paint';
         if (stroke.tool === 'eraser') stroke.brush.color = S.background.slice();
       } else {
@@ -1083,10 +1117,13 @@
             stroke.heal = stroke.tool === 'healing';
           }
         }
+        if (stroke.tool === 'history') stroke.history = true;
       }
     }
     if (stroke.texIndex < 0) return;
     stroke.previewed = strokeChain = strokeChain.then(function () {
+      return stroke.history ? ensureHistory() : null;
+    }).then(function () {
       ensureStrokeBuffer();
       if (preview.layer < 0) beginPreview(stroke);
       rasterizeStroke(stroke);
@@ -1432,7 +1469,7 @@
     { id: 'healing', key: 'J', label: 'Healing Brush Tool', built: true },
     { id: 'brush', key: 'B', label: 'Brush Tool', built: true },
     { id: 'stamp', key: 'S', label: 'Clone Stamp Tool', built: true },
-    { id: 'history', key: 'Y', label: 'History Brush Tool' },
+    { id: 'history', key: 'Y', label: 'History Brush Tool', built: true },
     { id: 'eraser', key: 'E', label: 'Eraser Tool', built: true },
     { id: 'gradient', key: 'G', label: 'Gradient Tool', built: true },
     { id: 'blur', key: 'R', label: 'Blur Tool' },
@@ -1570,7 +1607,14 @@
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
     statusEl.parentNode.insertBefore(wand, box.nextSibling);
     statusEl.parentNode.insertBefore(grad, wand.nextSibling);
+    // The History Brush's source, under that.
+    var history = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'History Brush' })])]);
+    var setSource = el('button', { type: 'button', text: 'Set source to current state' });
+    setSource.addEventListener('click', function () { S.setHistorySource(); });
+    history.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'paints the document as opened' })]));
+    history.appendChild(el('div', { 'class': 'st-row' }, [setSource]));
     statusEl.parentNode.insertBefore(stamp, grad.nextSibling);
+    statusEl.parentNode.insertBefore(history, stamp.nextSibling);
   }
 
   function hexColor(c) {
@@ -2875,14 +2919,16 @@
 
   // Two renders compared byte for byte.
   function renderDiff(a, b) {
-    var max = 0, over = 0, changed = 0;
+    var max = 0, over = 0, changed = 0, at = -1;
     for (var i = 0; i < a.length; i++) {
       var d = Math.abs(a[i] - b[i]);
-      if (d > max) max = d;
+      if (d > max) { max = d; at = i; }
       if (d > 1) over++;
       if (d > 0) changed++;
     }
-    return { maxDiff: max, overOne: over, changed: changed };
+    var w = doc ? doc.width : 1, p = at >> 2;
+    return { maxDiff: max, overOne: over, changed: changed,
+             worst: at < 0 ? null : { x: p % w, y: Math.floor(p / w), c: at & 3, a: a[at], b: b[at] } };
   }
 
   // The exact render compared with the server's CPU render, pixel by pixel.
@@ -3121,7 +3167,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('history') && S.tool === saved.tool;
+      var refused = !S.setTool('blur') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -3793,6 +3839,61 @@
           }).then(function () {
             check('undo gives the layer back after a healing stroke', renderDiff(before, S.renderExact()).maxDiff === 0);
           });
+        }).then(restore, function (e) { restore(); throw e; });
+      });
+    }).then(function () {
+      // The History Brush on the lowest raster layer: a red brush stroke
+      // first, then a history stroke over its middle, which puts the
+      // document's opened composite there, previewed through the
+      // history texture and committed within two levels; the layer's
+      // pixel under it equals the history composite's; parity; undo
+      // twice gives the layer back.
+      var active = S.activeLayer, L = null;
+      doc.layers.forEach(function (x) { if (!L && x.kind === 'raster') L = x; });
+      if (!L) return null;
+      S.setActiveLayer(L.index, false);
+      var saved = { tool: S.tool, brush: S.brush };
+      S.brush = { radius: 14, hardness: 1, spacing: 0.25, flow: 1, opacity: 1, color: [220, 20, 20], mode: 'paint' };
+      var W = doc.width, H = doc.height, before = S.renderExact();
+      var r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      function at(x, y) {
+        return { clientX: r.left + ((x - view.ox) * view.scale) / dpr, clientY: r.top + ((y - view.oy) * view.scale) / dpr,
+                 pointerId: 50, pointerType: 'mouse', bubbles: true };
+      }
+      function px4(b, x, y) { var o = (y * W + x) * 4; return [b[o], b[o + 1], b[o + 2], b[o + 3]]; }
+      var cx = Math.round(W * 0.5), cy = Math.round(H * 0.55);
+      function restore() { S.setTool(saved.tool); S.brush = saved.brush; S.setActiveLayer(active, false); }
+      S.setTool('brush');
+      canvas.dispatchEvent(new PointerEvent('pointerdown', at(cx - 30, cy)));
+      canvas.dispatchEvent(new PointerEvent('pointermove', at(cx + 30, cy)));
+      canvas.dispatchEvent(new PointerEvent('pointerup', at(cx + 30, cy)));
+      return S.strokesSettled().then(function () {
+        var painted = S.renderExact();
+        S.setTool('history');
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(cx, cy)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(cx, cy)));
+        var got = S.lastStroke;
+        check('a history stroke carries the history flag', got && got.history === true, got && got.tool);
+        if (!got || !got.previewed) { restore(); return null; }
+        return got.previewed.then(function () {
+          var shown = S.renderExact();
+          return S.strokesSettled().then(function () {
+            var after = S.renderExact(), kept = renderDiff(shown, after);
+            check('the history stroke changed the painted picture and the commit matches its preview',
+                  renderDiff(painted, after).maxDiff > 0 && kept.maxDiff <= 2, kept);
+            return Promise.all([fetchBytes(api('raster?i=' + L.texIndex)), fetchBytes(api('history'))]);
+          });
+        }).then(function (pair) {
+          var layer = px4(pair[0], cx, cy), hist = px4(pair[1], cx, cy);
+          check('under the history stroke the layer holds the opened composite',
+                pair[1].length === W * H * 4 && layer.every(function (v, i) { return Math.abs(v - hist[i]) <= 1; }),
+                { layer: layer, history: hist });
+          return S.parity();
+        }).then(function (p) {
+          check('parity after a history stroke', p.maxDiff <= 1, p);
+          return S.undo().then(function () { return S.undo(); });
+        }).then(function () {
+          check('undo twice gives the layer back after the history stroke', renderDiff(before, S.renderExact()).maxDiff === 0);
         }).then(restore, function (e) { restore(); throw e; });
       });
     }).then(function () {

@@ -8,14 +8,19 @@
 #
 #   tests/browser.sh                       # parity and demo
 #   BASE=http://engine-room:9090 tests/browser.sh parity stress
+#
+# Every run works in the one session named by SESSION (selftest), so
+# repeated runs reuse their documents instead of filling the server's
+# heap with a fresh copy of each.
 BASE=${BASE:-http://engine-room:9090}
+SESSION=${SESSION:-selftest}
 DIR=$(cd "$(dirname "$0")" && pwd)
 DOCS=("$@")
 [ ${#DOCS[@]} -eq 0 ] && DOCS=(parity demo)
 status=0
 for doc in "${DOCS[@]}"; do
   echo "== $doc"
-  timeout 600 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
+  timeout 600 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc&s=$SESSION" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
   rc=$?
   echo "== $doc exit $rc"
   [ $rc -ne 0 ] && status=1

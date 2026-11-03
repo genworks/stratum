@@ -186,6 +186,18 @@ each widened by the kernel's reach, and `composite-heal-stroke!`
 (`source/heal.lisp`) is the stage's twin. Without float render targets
 the stroke shows when the pointer lifts.
 
+The History Brush (Y) paints the document as it was opened back onto
+the current layer, through the brush: its source is the composite of
+every layer at the opened state, or at the state the panel's Set
+Source button chose since. Keeping the source costs nothing until it
+is painted from, since the specs the document was made of still hold
+the opened pixels, and the composite is rendered once when first
+wanted (`source/history.lisp`). The viewer uploads that composite as a
+texture the first time the tool is used and the live stroke stage
+samples it; the server composites the same bytes, through the stamp's
+compositing. In Grayscale the brush paints gray. A crop or resize
+starts the history at the cropped state.
+
 Free Transform (Ctrl+T) is the same floating stage with a matrix in
 place of the offset: a box with eight handles around the selection or
 the layer; drag inside to move, a handle to scale about the center
@@ -269,8 +281,8 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
 Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Crop, Eyedropper,
-Healing Brush, Brush, Clone Stamp, Eraser, Gradient, Hand and Zoom;
-the rest are drawn dimmed and refuse to be picked. The Crop tool's drag leaves a box with everything outside
+Healing Brush, Brush, Clone Stamp, History Brush, Eraser, Gradient,
+Hand and Zoom; the rest are drawn dimmed and refuse to be picked. The Crop tool's drag leaves a box with everything outside
 it darkened; Enter or a double-click crops, Escape drops it. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
@@ -344,8 +356,10 @@ change, and the plan, the programs and the layer panel follow.
 | `/stratum/api/export.png?doc=N` | the CPU render as PNG |
 | `/stratum/api/luts?doc=N` | JSON: the server's curve and levels tables |
 | `POST /stratum/api/set?doc=N` | `{layer, slot, value}` for `opacity`, `visible`, `blend`; `{layer, slot: "setting", name, value}` for a levels or hue/saturation setting; `{layer, slot: "curve", channel, points}` |
-| `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null, heal: true or false}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
+| `POST /stratum/api/stroke?doc=N` | `{layer, target: "layer" or "mask", samples: [[x, y, pressure], ...], brush: {radius, hardness, spacing, flow, opacity, color, mode}, clone: [dx, dy] or null, heal: true or false, history: true or false}`; answers the dirty rectangle with the layer's texture or mask index and new version; with `&dry=1` paints nothing and answers the coverage buffer |
 | `POST /stratum/api/undo?doc=N` | undoes the last change; answers the rectangle put back, or for a mode change `{mode, group: [rectangles]}` |
+| `/stratum/api/history?doc=N` | raw RGBA8 of the History Brush's source, the document's history composite |
+| `POST /stratum/api/history-set?doc=N` | sets the history source to the document's current state; answers `{historyVersion}` |
 | `/stratum/api/documents?s=S` | the session's open documents: `{documents: [names], session}`; every path above takes `&s=S` as well, the session id, and without it reaches the shared pool |
 | `POST /stratum/api/mode?doc=N` | `{mode: "rgb" or "grayscale"}`; answers `{mode, group: [the layers turned, as rectangles]}` |
 | `POST /stratum/api/redo?doc=N` | redoes the last undo; answers the rectangle put back |
@@ -388,6 +402,12 @@ It checks:
   brings changes back exactly and in order, that a new change empties
   the redo list, and that undo and redo round trip through the whole
   list;
+- the History Brush: the history composite is the document as opened,
+  rendered once and kept; a history stroke paints it onto the layer
+  inside its rectangle and rebuilds nothing; undo gives the layer
+  back and the source stands; Set Source takes the current state,
+  copied, and bumps the version; in Grayscale it paints gray; a
+  cropped document starts its history at the cropped state;
 - sessions: each session has its own documents and no session is the
   shared pool; an idle session is swept and comes back empty;
 - Image ▸ Mode: a color turns to its luminance gray with its alpha
@@ -567,6 +587,11 @@ The self-test checks:
   of its preview, on the parity document's Sky ramp the healed pixel
   keeps the destination's tone rather than the source's, parity, and
   undo gives the layer back;
+- the History Brush on the lowest raster layer: after a red brush
+  stroke, a history stroke over its middle puts the opened composite
+  there, committed within two levels of its preview, the layer's
+  pixel under it equal to the history composite's, parity, and undo
+  twice gives the layer back;
 - sessions: the page has a session id, a document made here is listed
   for this session and not for another nor for the shared pool, and
   Close drops it;

@@ -76,17 +76,89 @@ nil when it has none."
   (let ((rect (mask-bounds mask w h)))
     (and rect (list :mask mask :rect rect))))
 
-(defun select-rect! (doc x y w h)
-  (the-object doc (set-slot! :selection
-                             (make-selection (rasterize-rect (the-object doc doc-width)
-                                                             (the-object doc doc-height) x y w h)
-                                             (the-object doc doc-width) (the-object doc doc-height)))))
+(defun combine-masks (old mask mode)
+  "MASK as the new selection (MODE :new), added to OLD (:add, the
+larger coverage) or taken from it (:subtract, OLD where MASK is not).
+OLD may be nil."
+  (cond ((or (eql mode :new) (null old)) (if (eql mode :subtract) (make-array (length mask) :element-type '(unsigned-byte 8) :initial-element 0) mask))
+        ((eql mode :add) (map '(simple-array (unsigned-byte 8) (*)) #'max old mask))
+        ((eql mode :subtract) (map '(simple-array (unsigned-byte 8) (*)) (lambda (o m) (min o (- 255 m))) old mask))
+        (t (error "Unknown selection mode ~s." mode))))
 
-(defun select-polygon! (doc points)
-  (the-object doc (set-slot! :selection
-                             (make-selection (rasterize-polygon (the-object doc doc-width)
-                                                                (the-object doc doc-height) points)
-                                             (the-object doc doc-width) (the-object doc doc-height)))))
+(defun set-selection-mask! (doc mask mode)
+  (let ((old (and (the-object doc selection) (getf (the-object doc selection) :mask))))
+    (the-object doc (set-slot! :selection
+                               (make-selection (combine-masks old mask mode)
+                                               (the-object doc doc-width) (the-object doc doc-height))))))
+
+(defun select-rect! (doc x y w h &optional (mode :new))
+  (set-selection-mask! doc (rasterize-rect (the-object doc doc-width) (the-object doc doc-height) x y w h) mode))
+
+(defun select-polygon! (doc points &optional (mode :new))
+  (set-selection-mask! doc (rasterize-polygon (the-object doc doc-width) (the-object doc doc-height) points) mode))
+
+;;; The Magic Wand: the pixels within TOLERANCE of the one at X, Y, by
+;;; the largest channel difference, alpha included; the connected patch
+;;; of them when CONTIGUOUS, every one otherwise.
+(defun wand-mask (pixels w h x y tolerance contiguous)
+  (let* ((mask (make-gray w h))
+         (o (* 4 (+ x (* y w))))
+         (r0 (aref pixels o)) (g0 (aref pixels (+ o 1))) (b0 (aref pixels (+ o 2))) (a0 (aref pixels (+ o 3))))
+    (declare (type (simple-array (unsigned-byte 8) (*)) pixels mask) (type fixnum w h tolerance))
+    (flet ((matches (i)
+             (let ((p (* 4 i)))
+               (and (<= (abs (- (aref pixels p) r0)) tolerance)
+                    (<= (abs (- (aref pixels (+ p 1)) g0)) tolerance)
+                    (<= (abs (- (aref pixels (+ p 2)) b0)) tolerance)
+                    (<= (abs (- (aref pixels (+ p 3)) a0)) tolerance)))))
+      (if (not contiguous)
+          (dotimes (i (* w h))
+            (when (matches i) (setf (aref mask i) 255)))
+          (let ((stack (make-array 1024 :element-type 'fixnum :adjustable t :fill-pointer 0)))
+            (vector-push-extend (+ x (* y w)) stack)
+            (setf (aref mask (+ x (* y w))) 255)
+            (loop while (plusp (fill-pointer stack))
+                  do (let* ((i (vector-pop stack))
+                            (px (mod i w)) (py (floor i w)))
+                       (flet ((visit (j)
+                                (when (and (zerop (aref mask j)) (matches j))
+                                  (setf (aref mask j) 255)
+                                  (vector-push-extend j stack))))
+                         (when (> px 0) (visit (1- i)))
+                         (when (< px (1- w)) (visit (1+ i)))
+                         (when (> py 0) (visit (- i w)))
+                         (when (< py (1- h)) (visit (+ i w)))))))))
+    mask))
+
+(defun select-wand! (doc x y &key (tolerance 32) (contiguous t) (mode :new) layer)
+  "The Magic Wand at X, Y on LAYER's pixels (a raster layer) or on the
+composited picture (nil, or any other layer)."
+  (let* ((w (the-object doc doc-width))
+         (h (the-object doc doc-height))
+         (x (max 0 (min (1- w) (round x))))
+         (y (max 0 (min (1- h) (round y))))
+         (pixels (if (and layer (eql (the-object layer kind) :raster))
+                     (the-object layer pixels)
+                     (the-object doc (render-cpu)))))
+    (set-selection-mask! doc (wand-mask pixels w h x y (max 0 (min 255 (round tolerance))) contiguous) mode)))
+
+(defun feather-selection! (doc radius)
+  "The selection's edge softened by a Gaussian blur of RADIUS pixels
+(the mask riding in an alpha channel through gaussian-blur-premul);
+nothing without a selection."
+  (let ((selection (the-object doc selection))
+        (w (the-object doc doc-width))
+        (h (the-object doc doc-height)))
+    (when selection
+      (let* ((mask (getf selection :mask))
+             (premul (make-array (* 4 w h) :element-type 'single-float :initial-element 0f0)))
+        (dotimes (i (* w h))
+          (setf (aref premul (+ 3 (* 4 i))) (/ (float (aref mask i) 1f0) 255f0)))
+        (let ((blurred (gaussian-blur-premul premul w h (max 0.1d0 (float radius 1d0))))
+              (out (make-gray w h)))
+          (dotimes (i (* w h))
+            (setf (aref out i) (unit->byte (float (aref blurred (+ 3 (* 4 i))) 1d0))))
+          (the-object doc (set-slot! :selection (make-selection out w h))))))))
 
 (defun select-all! (doc)
   (select-rect! doc 0 0 (the-object doc doc-width) (the-object doc doc-height)))

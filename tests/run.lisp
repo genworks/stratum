@@ -426,6 +426,42 @@ to alter the pictures."
                            (equalp (the-object sky pixels) before)))))
       (check "a selection rebuilds nothing" (equal (demand doc) '(1 1)) (counts doc)))))
 
+(defun test-wand ()
+  ;; A 6 x 4 picture: a red left half, a blue right half, and one red
+  ;; pixel inside the blue half.
+  (let ((pic (let ((p (make-rgba 6 4)))
+               (dotimes (y 4 p)
+                 (dotimes (x 6)
+                   (let ((o (* 4 (+ x (* 6 y))))
+                         (red (or (< x 3) (and (= x 4) (= y 2)))))
+                     (setf (aref p o) (if red 220 20) (aref p (+ o 1)) 30
+                           (aref p (+ o 2)) (if red 20 220) (aref p (+ o 3)) 255)))))))
+    (check "a contiguous wand takes the connected patch only"
+           (let ((m (wand-mask pic 6 4 0 0 32 t)))
+             (and (= 12 (count 255 m)) (= 0 (aref m (+ 4 (* 6 2)))))))
+    (check "a non-contiguous wand takes every matching pixel"
+           (= 13 (count 255 (wand-mask pic 6 4 0 0 32 nil))))
+    (check "the tolerance decides what matches"
+           (and (= 13 (count 255 (wand-mask pic 6 4 4 2 0 nil)))
+                (= 11 (count 255 (wand-mask pic 6 4 5 0 0 nil)))
+                (= 24 (count 255 (wand-mask pic 6 4 0 0 255 nil)))))
+    (let ((doc (make-file-document "wand" 6 4 pic)))
+      (check "the wand through the document selects on the layer, and Shift adds"
+             (progn (select-wand! doc 0 0 :tolerance 32 :layer (the-object doc (layer 0)))
+                    (and (equal (getf (the-object doc selection) :rect) '(0 0 3 4))
+                         (progn (select-wand! doc 5 0 :tolerance 32 :mode :add :layer (the-object doc (layer 0)))
+                                (= 23 (count 255 (getf (the-object doc selection) :mask)))))))
+      (check "Alt takes from the selection"
+             (progn (select-rect! doc 0 0 3 4 :subtract)
+                    (= 11 (count 255 (getf (the-object doc selection) :mask)))))
+      (check "Feather softens the edge and widens the bounds"
+             (progn (select-rect! doc 2 1 2 2)
+                    (feather-selection! doc 1)
+                    (let* ((sel (the-object doc selection)) (m (getf sel :mask)))
+                      (and (equal (getf sel :rect) '(0 0 6 4))
+                           (< 0 (aref m (+ 1 (* 6 1))) 255)
+                           (> (aref m (+ 2 (* 6 1))) (aref m (+ 1 (* 6 1)))))))))))
+
 (defun test-floating ()
   (let* ((image (let ((p (make-rgba 4 3)))
                   (dotimes (i 12 p)
@@ -780,7 +816,7 @@ to alter the pictures."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-masks test-adjust test-selection test-floating test-transform test-resize
+                  test-brush test-masks test-adjust test-selection test-wand test-floating test-transform test-resize
                   test-file-format test-filter test-merge
                   test-layers test-files
                   test-threads test-golden))

@@ -345,8 +345,14 @@
   function paints(tool) { return tool === 'brush' || tool === 'eraser'; }
 
   var CURSORS = { brush: 'crosshair', eraser: 'crosshair', eyedropper: 'crosshair', zoom: 'zoom-in',
-                  marquee: 'crosshair', lasso: 'crosshair', move: 'move' };
+                  marquee: 'crosshair', lasso: 'crosshair', move: 'move', wand: 'crosshair' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso'; }
+
+  // Shift adds to the selection, Alt takes from it, as in other editors.
+  function selectionMode(e) { return e.shiftKey ? 'add' : (e.altKey ? 'subtract' : 'new'); }
+
+  // The Magic Wand's options.
+  S.wand = { tolerance: 32, contiguous: true };
 
   function setCursor(dragging) {
     canvas.style.cursor = CURSORS[effectiveTool()] || (dragging ? 'grabbing' : 'grab');
@@ -452,9 +458,15 @@
       var a = g.points[0], b = g.points[g.points.length - 1];
       var x = Math.round(Math.min(a[0], b[0])), y = Math.round(Math.min(a[1], b[1]));
       var w = Math.round(Math.max(a[0], b[0])) - x, h = Math.round(Math.max(a[1], b[1])) - y;
-      return S.select(w > 0 && h > 0 ? { op: 'rect', x: x, y: y, w: w, h: h } : { op: 'none' });
+      return S.select(w > 0 && h > 0 ? { op: 'rect', x: x, y: y, w: w, h: h, mode: g.mode } : { op: 'none' });
     }
-    return S.select(g.points.length >= 3 ? { op: 'polygon', points: g.points } : { op: 'none' });
+    return S.select(g.points.length >= 3 ? { op: 'polygon', points: g.points, mode: g.mode } : { op: 'none' });
+  }
+
+  function wandAt(e) {
+    var p = docPoint(e);
+    return S.select({ op: 'wand', x: Math.floor(p[0]), y: Math.floor(p[1]), tolerance: S.wand.tolerance,
+                      contiguous: S.wand.contiguous, mode: selectionMode(e), layer: S.activeLayer });
   }
 
   function installNavigation() {
@@ -468,8 +480,10 @@
                    samples: [strokeSample(e)] };
         S.onStrokeSamples(stroke, stroke.samples.slice());
       } else if (selects(tool)) {
-        gesture = { tool: tool, points: [docPoint(e)] };
+        gesture = { tool: tool, points: [docPoint(e)], mode: selectionMode(e) };
         drawGesture(gesture);
+      } else if (tool === 'wand') {
+        wandAt(e);
       } else if (tool === 'move') {
         var L = activeL();
         if (!L || L.kind !== 'raster') { status('pick a raster layer to move'); return; }
@@ -561,6 +575,9 @@
       else if (mod && key === 'd') { e.preventDefault(); S.select({ op: 'none' }); }
       else if (mod && e.shiftKey && key === 'i') { e.preventDefault(); S.select({ op: 'inverse' }); }
       else if (e.shiftKey && e.key === 'F5') { e.preventDefault(); S.openFill(); }
+      else if (e.shiftKey && e.key === 'F6') { e.preventDefault(); S.openFeather(); }
+      else if (e.key === 'Escape' && S.featherDialog) S.featherDialog.cancel();
+      else if (e.key === 'Enter' && S.featherDialog) S.featherDialog.ok();
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) { e.preventDefault(); S.clear(); }
       else if (e.key === 'Escape' && S.fillDialog) S.fillDialog.cancel();
       else if (e.key === 'Enter' && S.fillDialog) S.fillDialog.ok();
@@ -1162,7 +1179,7 @@
     { id: 'move', key: 'V', label: 'Move Tool', built: true },
     { id: 'marquee', key: 'M', label: 'Rectangular Marquee Tool', built: true },
     { id: 'lasso', key: 'L', label: 'Lasso Tool', built: true },
-    { id: 'wand', key: 'W', label: 'Magic Wand Tool' },
+    { id: 'wand', key: 'W', label: 'Magic Wand Tool', built: true },
     '-',
     { id: 'crop', key: 'C', label: 'Crop Tool' },
     { id: 'eyedropper', key: 'I', label: 'Eyedropper Tool', built: true },
@@ -1277,7 +1294,15 @@
         if (S.swatches) S.swatches.refresh();
       }
     };
+    // The Magic Wand's tolerance and contiguity, under the brush.
+    var wand = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Magic Wand' })])]);
+    wand.appendChild(settingSlider(S.wand, 'tolerance', function () {}));
+    var contiguous = el('input', { type: 'checkbox' });
+    contiguous.checked = true;
+    contiguous.addEventListener('change', function () { S.wand.contiguous = contiguous.checked; });
+    wand.appendChild(el('div', { 'class': 'st-row' }, [contiguous, el('span', { text: 'Contiguous' })]));
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
+    statusEl.parentNode.insertBefore(wand, box.nextSibling);
   }
 
   function hexColor(c) {
@@ -1391,6 +1416,28 @@
   };
 
   S.clear = function () { return S.fill({ color: [0, 0, 0], opacity: 1, mode: 'erase' }); };
+
+  // Select > Feather: the selection's edge softened by a radius.
+  S.openFeather = function () {
+    if (!S.selection) { status('nothing is selected to feather'); return null; }
+    if (S.featherDialog) S.featherDialog.cancel();
+    var state = { radius: 5 };
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: 'Feather Selection' }),
+                                                   settingSlider(state, 'radius', function () {})]);
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.featherDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); },
+      cancel: function () { box.remove(); S.featherDialog = null; },
+      ok: function () { box.remove(); S.featherDialog = null; return S.select({ op: 'feather', radius: state.radius }); }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
 
   // ---- the floating layer: Move, Cut, Copy, Paste -------------------------
   //
@@ -1877,7 +1924,8 @@
         { label: 'Inverse', key: 'Ctrl+Shift+I', run: function () { S.select({ op: 'inverse' }); } },
         '-',
         { label: 'Color Range...' },
-        { label: 'Feather...', key: 'Shift+F6' }] },
+        { label: 'Feather...', key: 'Shift+F6', enabled: function () { return !!S.selection; },
+          run: function () { S.openFeather(); } }] },
       { title: 'Filter', items: [
         { label: 'Blur', sub: [{ label: 'Gaussian Blur...', enabled: rasterActive,
                                  run: function () { S.openFilter('gaussian-blur'); } }] },
@@ -2027,7 +2075,7 @@
     'in-black': [0, 1, 0.005], 'in-white': [0, 1, 0.005], gamma: [0.2, 4, 0.01],
     'out-black': [0, 1, 0.005], 'out-white': [0, 1, 0.005],
     hue: [-180, 180, 1], saturation: [-1, 1, 0.01], lightness: [-1, 1, 0.01],
-    radius: [0.1, 100, 0.1], amount: [0, 500, 1], threshold: [0, 255, 1]
+    radius: [0.1, 100, 0.1], amount: [0, 500, 1], threshold: [0, 255, 1], tolerance: [0, 255, 1]
   };
 
   // One slider for a levels or hue/saturation setting.  A move changes
@@ -2686,7 +2734,7 @@
       // the color under the pointer into the foreground; X swaps the
       // swatches; a raster layer's thumbnail comes w*h*4 bytes.
       var saved = { tool: S.tool, color: S.brush.color, background: S.background };
-      var refused = !S.setTool('wand') && S.tool === saved.tool;
+      var refused = !S.setTool('crop') && S.tool === saved.tool;
       S.setTool('eyedropper');
       var r = canvas.getBoundingClientRect();
       canvas.dispatchEvent(new PointerEvent('pointerdown', {
@@ -2954,7 +3002,37 @@
         return S.select({ op: 'none' });
       }).then(function (rect) {
         check('Deselect clears the selection', rect === null && !S.selection);
-        S.setActiveLayer(active, false);
+        // The Magic Wand on the Sky gradient: a click through the tool
+        // selects a band of similar color; Shift-click adds a second;
+        // Feather softens the edge and widens the bounds; Deselect.
+        S.setTool('wand');
+        S.setBrush({});
+        var first = null;
+        canvas.dispatchEvent(new PointerEvent('pointerdown', at(W * 0.5, H * 0.2)));
+        canvas.dispatchEvent(new PointerEvent('pointerup', at(W * 0.5, H * 0.2)));
+        return S.strokesSettled().then(function () {
+          return new Promise(function (res) { var t = 0; (function w() { if (S.selection || t++ > 200) res(); else setTimeout(w, 20); })(); });
+        }).then(function () {
+          first = S.selection;
+          check('the Magic Wand selects a band of similar color', first && first.w === W && first.h < H, first);
+          var ev = at(W * 0.5, H * 0.8);
+          ev.shiftKey = true;
+          canvas.dispatchEvent(new PointerEvent('pointerdown', ev));
+          canvas.dispatchEvent(new PointerEvent('pointerup', ev));
+          return S.strokesSettled().then(function () {
+            return new Promise(function (res) { var t = 0; (function w() { if ((S.selection && S.selection.h > first.h) || t++ > 200) res(); else setTimeout(w, 20); })(); });
+          });
+        }).then(function () {
+          check('Shift-click adds a second band', S.selection && S.selection.h > first.h, S.selection);
+          S.setTool(saved.tool);
+          var before = S.selection;
+          var d = S.openFeather();
+          d.set({ radius: 6 });
+          return d.ok().then(function (rect) {
+            check('Feather widens the selection\'s bounds', rect && rect.h >= before.h, { before: before, after: rect });
+            return S.select({ op: 'none' });
+          });
+        }).then(function () { S.setActiveLayer(active, false); });
       });
     }).then(function () {
       // The floating layer: a rectangle of the bottom layer dragged with

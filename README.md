@@ -99,9 +99,15 @@ it, on the server and in the browser with the same arithmetic, so
 painting under a selection stays bit-exact between the two. The
 shader draws the marching ants from the same bytes, never in an exact
 render, since a selection is not part of the picture; the gesture
-itself is drawn on a 2D overlay while the pointer is down. Edit ▸
-Fill paints the selection with the foreground, background, black,
-white or gray at an opacity, and Clear empties it.
+itself is drawn on a 2D overlay while the pointer is down. The Magic
+Wand selects the pixels within a tolerance of the clicked one, by the
+largest channel difference with alpha included, the connected patch
+when contiguous and every one otherwise, on the active raster layer or
+on the composited picture; with any selection tool Shift adds to the
+selection and Alt takes from it. Feather softens the selection's edge
+with a Gaussian blur of the mask. Edit ▸ Fill paints the selection
+with the foreground, background, black, white or gray at an opacity,
+and Clear empties it.
 
 The Move tool drags the active layer's selected pixels (all of them
 without a selection). While the pointer is down the shader's floating
@@ -187,8 +193,9 @@ Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
 (Ctrl+L), Curves (Ctrl+M) and Hue/Saturation (Ctrl+U), each a dialog
 with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
-(Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
-Inverse (Ctrl+Shift+I); Filter ▸ Blur ▸ Gaussian Blur, Sharpen ▸
+(Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D),
+Inverse (Ctrl+Shift+I) and Feather (Shift+F6); Filter ▸ Blur ▸
+Gaussian Blur, Sharpen ▸
 Unsharp Mask and Noise ▸ Add Noise; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
 Layer Mask (Reveal All, Hide All, Delete), Arrange (Bring Forward,
@@ -201,8 +208,9 @@ the single-letter keys: Move (V), Marquee (M), Lasso (L), Magic Wand
 (W), Crop (C), Eyedropper (I), Healing Brush (J), Brush (B), Clone
 Stamp (S), History Brush (Y), Eraser (E), Gradient (G), Blur (R), Dodge
 (O), Pen (P), Type (T), Path Selection (A), Shape (U), Hand (H) and
-Zoom (Z). Built: Move, Marquee, Lasso, Eyedropper, Brush, Eraser, Hand
-and Zoom; the rest are drawn dimmed and refuse to be picked. The foreground and
+Zoom (Z). Built: Move, Marquee, Lasso, Magic Wand, Eyedropper, Brush,
+Eraser, Hand and Zoom; the rest are drawn dimmed and refuse to be
+picked. The foreground and
 background swatches below them hold the brush color; X swaps them and
 D resets them. The Layers panel lists the stack top first, each row an
 eye for visibility, a thumbnail of the layer and of its mask, its name
@@ -270,7 +278,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/close?doc=N` | forgets the document |
 | `/stratum/api/save?doc=N` | the document as a `.stratum` file |
 | `POST /stratum/api/load?name=` | body: a `.stratum` file; a new document; answers `{doc, width, height}` |
-| `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`; answers `{selection: {x, y, w, h} or null}` |
+| `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "wand", x, y, tolerance, contiguous, layer}`, `{op: "feather", radius}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`, with `mode: "new"`, `"add"` or `"subtract"` on the first three; answers `{selection: {x, y, w, h} or null}` |
 | `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |
 | `POST /stratum/api/move?doc=N` | `{layer, dx, dy}`: the selected pixels moved; answers the whole layer as a rectangle, with the selection's new rectangle |
@@ -316,6 +324,10 @@ It checks:
   selection changing pixels inside it only, clipping as the browser
   does it, Fill and Clear inside the selection with exact undo, and no
   rebuild;
+- the wand: a contiguous wand taking the connected patch only, a
+  non-contiguous one every matching pixel, the tolerance deciding
+  what matches, the wand on a layer with Shift adding and Alt taking
+  away, and Feather softening the edge and widening the bounds;
 - the floating layer: a move without a selection shifting the whole
   layer and emptying what it left, a move under a selection moving
   those pixels only and the selection with them, undo, Copy and
@@ -411,7 +423,9 @@ The self-test checks:
   exact;
 - selections: a marquee rectangle through the tool, a stroke under it
   matching the server's coverage to the last bit and changing nothing
-  outside it, Fill inside it, undo, Inverse and Deselect;
+  outside it, Fill inside it, undo, Inverse and Deselect; then the
+  Magic Wand selecting a band of the Sky gradient, Shift-click adding
+  a second, and Feather widening the bounds;
 - the floating layer: a rectangle dragged with the Move tool,
   previewed through the shader and committed within two levels of the
   preview with the selection moving along, parity, undo; Copy and

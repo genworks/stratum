@@ -184,8 +184,9 @@ layer's pixels on OK; Image ▸ Image Size (Ctrl+Alt+I), Canvas Size
 (Ctrl+Alt+C) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D) and
 Inverse (Ctrl+Shift+I); Filter ▸ Blur ▸ Gaussian Blur; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),
-Layer Mask (Reveal All, Hide All, Delete) and Arrange (Bring Forward,
-Send Backward); View ▸ Zoom In, Zoom Out,
+Layer Mask (Reveal All, Hide All, Delete), Arrange (Bring Forward,
+Send Backward), Merge Down (Ctrl+E) and Flatten Image; View ▸ Zoom In,
+Zoom Out,
 Fit on Screen, Actual Pixels; Window ▸ Layers and Brush Settings.
 
 The tool palette down the left keeps the order other editors use, with
@@ -226,6 +227,15 @@ Nothing else goes in: no undo, no selection, no clipboard. A saved
 document loads back rendering byte for byte the same, edits, strokes
 and masks included.
 
+Merge Down and Flatten Image are the compositing the document already
+does, pointed at part of the stack (`source/merge.lisp`): Merge Down
+renders the active layer and the one below it, with their opacities,
+blend modes and masks, over transparency into one raster layer that
+takes the lower layer's place and name; Flatten renders the whole
+document over its background into one Background layer, which then
+renders exactly as the stack did. The CPU kernel takes the background's
+alpha for this, 1 for a document as shown and 0 for a merge.
+
 A change of the stack (a layer added, deleted, moved or duplicated)
 goes through the document's `layer-specs`, which makes every layer
 object anew; each layer first writes its current state back into its
@@ -262,7 +272,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "image-size", width, height}` or `{op: "canvas-size", width, height, anchor: [ax, ay]}`; the document is remade; answers `{width, height}` |
 | `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", radius}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
-| `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}` or `{op: "mask", layer, value: "reveal", "hide" or "delete"}`; answers the new plan version and the layer to work on |
+| `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}`, `{op: "mask", layer, value: "reveal", "hide" or "delete"}`, `{op: "merge", layer}` or `{op: "flatten"}`; answers the new plan version and the layer to work on |
 
 ## Tests
 
@@ -312,6 +322,12 @@ It checks:
   brightest, a uniform layer blurs to itself, a blur changes the layer
   and rebuilds nothing, undoes exactly, and under a selection changes
   the selected pixels only;
+- merging: Merge Down folds a screened layer into the opaque one below
+  within two levels of the picture and an adjustment layer into the
+  raster below within three (the merged layer's one rounding to 8 bits
+  through the stack above), refuses the bottom layer and a non-raster
+  below, forgets the undo list, and Flatten renders exactly as the
+  stack did into one Background;
 - the native file: a saved document loads back rendering the same with
   its edits, strokes and masks, is smaller than its pixels, and a file
   that is not a Stratum file or a header that tries to evaluate is
@@ -398,6 +414,9 @@ The self-test checks:
 - sizes, on a throwaway document opened from a small image: Crop,
   Image Size and Canvas Size each remake it at the new size; the
   Image Size dialog opens and cancels;
+- merging, on a throwaway document: an image placed on another and
+  merged down leaves one raster layer with the lower name, and a
+  curves layer added then flattened leaves one Background;
 - the native file: Save brings a Stratum file of the document, and
   loaded back as a new document it has the same stack and renders
   byte for byte the same on the server.

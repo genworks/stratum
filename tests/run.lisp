@@ -576,6 +576,42 @@ to alter the pictures."
                                always (or (and (<= 100 px 159) (<= 60 py 99))
                                           (= (aref before i) (aref after i))))))))))
 
+(defun max-byte-diff (a b)
+  (loop for x across a for y across b maximize (abs (- x y))))
+
+(defun test-merge ()
+  ;; A merge rounds the merged pair to 8 bits once, where the stack kept
+  ;; doubles; through the curves and levels above, that one rounding is
+  ;; up to two levels in the picture, and a second merge up to three.
+  (let* ((doc (make-sample-document "parity"))
+         (render (the-object doc (render-cpu)))
+         (names (layer-names doc)))
+    (check "Merge Down folds a screened layer into the opaque one below, within two levels"
+           (and (= 0 (merge-down! doc 1))
+                (equal (layer-names doc) (cons "Sky" (cddr names)))
+                (eql (the-object doc (layer 0) kind) :raster)
+                (<= (max-byte-diff (the-object doc (render-cpu)) render) 2))
+           (list (layer-names doc) (max-byte-diff (the-object doc (render-cpu)) render)))
+    (check "Merge Down applies an adjustment layer to the raster below it, within three levels"
+           (and (= 0 (merge-down! doc 1))
+                (string= (the-object doc (layer 0) layer-name) "Sky")
+                (= (length (the-object doc layer-list)) (- (length names) 2))
+                (<= (max-byte-diff (the-object doc (render-cpu)) render) 3))
+           (max-byte-diff (the-object doc (render-cpu)) render))
+    (check "Merge Down refuses the bottom layer and a non-raster below"
+           (and (handler-case (progn (merge-down! doc 0) nil) (error () t))
+                (let ((j (position :levels (mapcar (lambda (l) (the-object l kind)) (the-object doc layer-list)))))
+                  (handler-case (progn (merge-down! doc (1+ j)) nil) (error () t)))))
+    (check "a merge forgets the undo list"
+           (progn (apply-brush-stroke (the-object doc (layer 0)) *test-stroke*)
+                  (merge-down! doc 1)
+                  (null (the-object doc undo-entries))))
+    (check "Flatten renders exactly as the stack did, into one Background"
+           (let ((before (the-object doc (render-cpu))))
+             (and (= 0 (flatten! doc))
+                  (equal (layer-names doc) '("Background"))
+                  (equalp (the-object doc (render-cpu)) before))))))
+
 (defun test-resize ()
   (let ((image (let ((p (make-rgba 4 3)))
                  (dotimes (i 12 p)
@@ -721,7 +757,7 @@ to alter the pictures."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-masks test-adjust test-selection test-floating test-transform test-resize
-                  test-file-format test-filter
+                  test-file-format test-filter test-merge
                   test-layers test-files
                   test-threads test-golden))
     (handler-case (funcall test)

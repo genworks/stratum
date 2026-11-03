@@ -572,6 +572,7 @@
       else if (mod && key === 's') { e.preventDefault(); S.saveDocument(); }
       else if (mod && e.shiftKey && key === 'n') { e.preventDefault(); S.layerOp({ op: 'add', kind: 'raster' }); }
       else if (mod && key === 'j') { e.preventDefault(); S.layerOp({ op: 'duplicate' }); }
+      else if (mod && key === 'e') { e.preventDefault(); if (canMergeDown()) S.layerOp({ op: 'merge' }); }
       else if (mod && e.key === ']') { e.preventDefault(); S.layerOp({ op: 'move', delta: 1 }); }
       else if (mod && e.key === '[') { e.preventDefault(); S.layerOp({ op: 'move', delta: -1 }); }
       else if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); S.zoomIn(); }
@@ -1866,8 +1867,9 @@
           { label: 'Send Backward', key: 'Ctrl+[', enabled: activeL,
             run: function () { S.layerOp({ op: 'move', delta: -1 }); } }] },
         '-',
-        { label: 'Merge Down', key: 'Ctrl+E' },
-        { label: 'Flatten Image' }] },
+        { label: 'Merge Down', key: 'Ctrl+E', enabled: canMergeDown, run: function () { S.layerOp({ op: 'merge' }); } },
+        { label: 'Flatten Image', enabled: function () { return doc && doc.layers.length > 0; },
+          run: function () { S.layerOp({ op: 'flatten' }); } }] },
       { title: 'Select', items: [
         { label: 'All', key: 'Ctrl+A', run: function () { S.select({ op: 'all' }); } },
         { label: 'Deselect', key: 'Ctrl+D', enabled: function () { return !!S.selection; },
@@ -2321,6 +2323,10 @@
   }
 
   function rasterActive() { var L = activeL(); return !!(L && L.kind === 'raster'); }
+  function canMergeDown() {
+    var L = activeL();
+    return !!(L && L.index > 0 && doc.layers[L.index - 1].kind === 'raster');
+  }
 
   // Open the KIND dialog on the active raster layer; the dialog object
   // (set, ok, cancel) is also the test hook.
@@ -3013,6 +3019,36 @@
         .then(function () { return resize({ op: 'canvas-size', width: 80, height: 80, anchor: [0, 0] }); })
         .then(function () { return sized(name).then(function (s) { check('Canvas Size remakes the document on the new canvas', s[0] === 80 && s[1] === 80, s); }); })
         .then(function () { return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' }); });
+    }).then(function () {
+      // Merge Down and Flatten on a throwaway document: an image opened,
+      // a second image placed on it, the two merged into one layer that
+      // keeps the lower one's name, then a curves layer added and the
+      // document flattened into one Background.
+      var w = 40, h = 24, c2 = el('canvas', { width: String(w), height: String(h) }), ctx = c2.getContext('2d');
+      ctx.fillStyle = '#c04040';
+      ctx.fillRect(0, 0, w, h);
+      var name = null;
+      function op(body) {
+        return fetchJSON('/stratum/api/layers?doc=' + encodeURIComponent(name),
+                         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      }
+      function layers() { return fetchJSON('/stratum/api/doc?doc=' + encodeURIComponent(name)).then(function (d) { return d.layers; }); }
+      return new Promise(function (r) { c2.toBlob(r, 'image/png'); }).then(S.decodeImage).then(function (img) {
+        return S.openImage(img, 'mergetest').then(function (res) {
+          name = res.doc;
+          return fetch('/stratum/api/place?doc=' + encodeURIComponent(name) + '&name=top&w=' + w + '&h=' + h + '&above=0',
+                       { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: img.bytes });
+        });
+      }).then(function () { return op({ op: 'merge', layer: 1 }); })
+        .then(function (res) { return layers().then(function (L) {
+          check('Merge Down leaves one raster layer with the lower name', res.active === 0 && L.length === 1 && L[0].name === 'Background' && L[0].kind === 'raster', L.map(function (x) { return x.name; }));
+          return op({ op: 'add', kind: 'curves', above: 0 });
+        }); })
+        .then(function () { return op({ op: 'flatten' }); })
+        .then(function () { return layers().then(function (L) {
+          check('Flatten leaves one Background layer', L.length === 1 && L[0].name === 'Background' && L[0].kind === 'raster', L.map(function (x) { return x.name; }));
+          return fetchJSON('/stratum/api/close?doc=' + encodeURIComponent(name), { method: 'POST' });
+        }); });
     }).then(function () {
       // The native file: Save brings a .stratum file of this document;
       // loaded back as a new document it has the same size and stack

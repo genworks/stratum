@@ -369,6 +369,8 @@ answering the new planVersion and the index of the layer to work on."
                     ((equal op "move") (need-layer)
                      (the-object doc (move-layer! layer (or (gethash "delta" body) 1))))
                     ((equal op "duplicate") (need-layer) (the-object doc (duplicate-layer! layer)))
+                    ((equal op "merge") (need-layer) (merge-down! doc layer))
+                    ((equal op "flatten") (flatten! doc))
                     ((equal op "mask")
                      ;; {op: "mask", layer, value: "reveal" | "hide" | "delete"}: a
                      ;; white or black mask in place of any the layer had, or none.

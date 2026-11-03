@@ -236,6 +236,9 @@ for the other keys.")
    (doc-height 768)
    (layer-specs nil :settable)
    (background-srgb (list 1.0 1.0 1.0) :settable)
+   ("Number.  The background's alpha for the CPU render: 1 for a document
+as shown; 0 composites the stack over transparency, which a merge uses."
+    background-alpha 1.0)
    ("List.  What the last strokes overwrote, newest first: (layer-index
 target x y w h bytes) each, at most *undo-depth* of them.  undo-stroke!
 in brush.lisp pops one and puts the bytes back."
@@ -379,6 +382,6 @@ pixels; the copy's index."
       (run-kernel (the cpu-kernel) (* (the doc-width) (the doc-height))
                   (the raster-vector) (the mask-vector) (the lut-vector) (the opacity-vector)
                   (the params-vector)
-                  (first bg) (second bg) (third bg)
+                  (first bg) (second bg) (third bg) (float (the background-alpha) 1d0)
                   out)
       out))))

@@ -149,18 +149,20 @@ the shader's hue_saturation() does it."
   "A lambda form compositing PLAN into OUT, sRGB RGBA8 straight alpha,
 for the pixels from START below END.  Called with the raster and mask
 pixel vectors, the curve and levels tables, the per-layer opacities and
-four-number parameters, and the linear background.  Pixels are independent, so disjoint ranges may run at once
+four-number parameters, the linear background and its alpha (1 for a
+document as shown, 0 to composite a stack over transparency, as a merge
+does).  Pixels are independent, so disjoint ranges may run at once
 (run-kernel)."
   (let ((tex-ids (remove-duplicates
                   (loop for e in plan when (eql (first e) :raster)
                         collect (getf (rest e) :tex))))
         (mask-ids (remove nil (remove-duplicates
                                (loop for e in plan collect (getf (rest e) :mask))))))
-    `(lambda (rasters masks luts opacity params bg-r bg-g bg-b out start end)
+    `(lambda (rasters masks luts opacity params bg-r bg-g bg-b bg-a out start end)
        (declare (optimize (speed 3) (safety 0) (debug 0))
                 (type simple-vector rasters masks)
                 (type (simple-array double-float (*)) luts opacity params)
-                (type double-float bg-r bg-g bg-b)
+                (type double-float bg-r bg-g bg-b bg-a)
                 (type (simple-array (unsigned-byte 8) (*)) out)
                 (type fixnum start end)
                 (ignorable rasters masks luts opacity params))
@@ -174,7 +176,7 @@ four-number parameters, and the linear background.  Pixels are independent, so d
                               ,@(mapcar #'tex-var tex-ids)
                               ,@(mapcar #'mask-var mask-ids)))))
          (loop for idx of-type fixnum from start below end do
-           (let ((kr bg-r) (kg bg-g) (kb bg-b) (ao 1.0))
+           (let ((kr (* bg-r bg-a)) (kg (* bg-g bg-a)) (kb (* bg-b bg-a)) (ao bg-a))
              (declare (type double-float kr kg kb ao))
              ,@(mapcar #'lisp-entry plan)
              (let ((o (* 4 idx)))

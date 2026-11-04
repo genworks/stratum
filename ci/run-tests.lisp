@@ -47,6 +47,17 @@
   (when (find-package name)
     (asdf:register-preloaded-system name)))
 
+;;; The invite gate (Gendl's gwl/source/invite-gate.lisp): from the
+;;; image when it carries it, else the file INVITE_GATE_FILE names
+;;; (.gitlab-ci.yml fetches it from the Gendl repository).
+(handler-case
+    (unless (find-package :invite-gate)
+      (let ((file (or (uiop:getenv "INVITE_GATE_FILE")
+                      (probe-file "/projects/gw/gendl/gwl/source/invite-gate.lisp")
+                      (ci-exit 2 "CI: no invite-gate in the image; set INVITE_GATE_FILE."))))
+        (load file)))
+  (error (e) (ci-exit 2 "CI: invite-gate did not load: ~a" e)))
+
 (handler-case
     (let ((warnings '()))
       (ql:quickload '(:zpng :chipz) :silent t)

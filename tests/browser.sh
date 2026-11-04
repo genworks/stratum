@@ -9,6 +9,7 @@
 #   tests/browser.sh                       # parity and demo
 #   BASE=http://engine-room:9090 tests/browser.sh parity stress
 #
+# INVITE, when set, is an invite token for a server whose gate is on.
 # Every run works in the one session named by SESSION (selftest), so
 # repeated runs reuse their documents instead of filling the server's
 # heap with a fresh copy of each.
@@ -20,7 +21,7 @@ DOCS=("$@")
 status=0
 for doc in "${DOCS[@]}"; do
   echo "== $doc"
-  timeout 600 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc&s=$SESSION" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
+  timeout 600 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc&s=$SESSION${INVITE:+&invite=$INVITE}" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
   rc=$?
   echo "== $doc exit $rc"
   [ $rc -ne 0 ] && status=1

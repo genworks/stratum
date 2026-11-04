@@ -43,10 +43,14 @@ stages:
     - amd64-docker
   variables:
     GIT_DEPTH: "1"
+    INVITE_GATE_FILE: /tmp/invite-gate.lisp
   before_script:
     # A private copy: the build directory belongs to the runner's helper,
     # not the image's user.
     - rm -rf /tmp/stratum && cp -r "$CI_PROJECT_DIR" /tmp/stratum
+    # The invite gate lives in Gendl (gwl/source/invite-gate.lisp); until
+    # the images carry it, the one file comes from Gendl's repository.
+    - curl -fsSL https://gitlab.common-lisp.net/gendl/gendl/-/raw/devo/gwl/source/invite-gate.lisp -o /tmp/invite-gate.lisp
     - cd /opt/gendl
 
 tests-ccl:

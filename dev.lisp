@@ -34,6 +34,16 @@
 (pushnew (make-pathname :name nil :type nil :defaults *load-truename*)
          asdf:*central-registry* :test #'equal)
 
+;; The invite gate (Gendl's gwl/source/invite-gate.lisp, 2026-11-04):
+;; from the image when it carries it, else the one file from a Gendl
+;; checkout beside this one, or wherever INVITE_GATE_FILE points.
+(unless (find-package :invite-gate)
+  (let ((file (or (uiop:getenv "INVITE_GATE_FILE")
+                  (probe-file "/projects/gw/gendl/gwl/source/invite-gate.lisp")
+                  (probe-file (merge-pathnames "../gendl/gwl/source/invite-gate.lisp" *load-truename*))
+                  (error "Stratum needs invite-gate (gendl gwl/source/invite-gate.lisp): set INVITE_GATE_FILE."))))
+    (load file)))
+
 (asdf:load-system :stratum)
 
 (funcall (intern "PUBLISH-STRATUM!" :stratum))

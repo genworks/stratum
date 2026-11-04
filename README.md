@@ -259,6 +259,19 @@ Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
 
+### Private beta: invite links
+
+With `stratum::*invites-file*` set to a file (nothing by default), every
+door under `/stratum/` admits only a request carrying a live invite: the
+cookie an invite link sets, or `?invite=TOKEN` (which sets the cookie
+as well, so the page's own calls follow). An invite link is
+`<base>/stratum/invite/TOKEN`: `(stratum::mint-invite! "Name")` appends
+a token to the file and returns the link (`stratum::*public-base*` is
+its base), `(stratum::revoke-invite! token)` removes it, and
+`(stratum::invites-report)` lists every invite with its uses. A line
+removed from the file by hand revokes as well; the file is re-read
+whenever it changes. Anything else gets a short refusal page (403).
+
 The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
@@ -394,6 +407,7 @@ change, and the plan, the programs and the layer panel follow.
 
 | path | answer |
 |---|---|
+| `/stratum/invite/TOKEN` | a live invite sets the invite cookie and redirects to `/stratum/`; anything else is a 403 (only when an invites file is set) |
 | `/stratum/api/doc?doc=N` | JSON: size, plan version, shader source, layers |
 | `/stratum/api/raster?doc=N&i=K` | raw RGBA8 of raster layer K; with `&x=&y=&w=&h=`, that rectangle |
 | `/stratum/api/mask?doc=N&i=K` | raw R8 of mask K; with `&x=&y=&w=&h=`, that rectangle |

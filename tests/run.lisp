@@ -1543,13 +1543,43 @@ to alter the pictures."
          (single (let ((*render-threads* 1)) (the-object doc (render-cpu)))))
     (check "a threaded render equals a single-threaded one" (equalp threaded single))))
 
+(defun test-invite ()
+  "The private beta's door: invites minted, found, revoked and reported;
+no file, no gate."
+  (let ((stratum::*gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")))
+    (check "no invites file: no gate" (not (stratum::invite-gate?)))
+    (check "no invites file: nothing found" (null (stratum::find-invite "abc"))))
+  (let* ((file (format nil "/tmp/stratum-invites-test-~d.sexp" (get-universal-time)))
+         (stratum::*gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"
+                                                 :invites-file file :public-base "https://example.test/")))
+    (unwind-protect
+         (multiple-value-bind (token url) (stratum::mint-invite! "Ada")
+           (check "token: 20 characters, letters and digits"
+                  (and (= (length token) 20) (every #'alphanumericp token)))
+           (check "tokens differ" (string/= token (invite-gate:random-token)))
+           (check "the invite link" (string= url (format nil "https://example.test/stratum/invite/~a" token)) url)
+           (check "the token is found, with its name"
+                  (equal (second (stratum::find-invite token)) "Ada"))
+           (check "an unknown token is not" (null (stratum::find-invite "nobody")))
+           (check "the gate is on" (stratum::invite-gate?))
+           (let ((second-token (stratum::mint-invite! "Grace")))
+             (check "two invites in the report, unused"
+                    (equal (mapcar (lambda (r) (list (getf r :name) (getf r :uses))) (stratum::invites-report))
+                           '(("Ada" 0) ("Grace" 0))))
+             (check "revoked: gone, the other kept"
+                    (and (stratum::revoke-invite! token)
+                         (null (stratum::find-invite token))
+                         (stratum::find-invite second-token)))
+             (check "revoking twice does nothing" (not (stratum::revoke-invite! token)))))
+      (when (probe-file file) (delete-file file)))))
+
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions
+                  test-layers test-files test-png test-sessions test-invite
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

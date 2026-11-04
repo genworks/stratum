@@ -853,10 +853,17 @@ goes back as a 500 carrying the condition's text."
              (net.aserve:publish :path path :server server :host host
                                  :content-type content-type
                                  :function (lambda (req ent)
-                                             (reply req ent content-type
-                                                    (lambda ()
-                                                      (let ((*documents* (request-session-table req)))
-                                                        (funcall fn req))))))))
+                                             (if (invite-allowed? req)
+                                                 (progn
+                                                   (ensure-invite-cookie! req)
+                                                   (reply req ent content-type
+                                                          (lambda ()
+                                                            (let ((*documents* (request-session-table req)))
+                                                              (funcall fn req)))))
+                                                 (refuse req ent))))))
+      ;; the invite link of the private beta (invite.lisp): no gate
+      ;; without an invites file
+      (invite-gate:publish-invite-door *gate* :server server :host host)
       (pub "/stratum" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/viewer.js" "application/javascript"

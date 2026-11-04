@@ -786,6 +786,16 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   padding: 3px 8px; border-radius: 3px; cursor: pointer; }
 .st-curve { display: block; margin-top: 6px; background: #17181b;
   border: 1px solid #3a3e45; cursor: crosshair; touch-action: none; }
+#stratum-prompt { border-top: 1px solid #33363c; margin-top: 10px; padding-top: 6px; }
+.st-prompt-box { width: 100%; box-sizing: border-box; background: #17181b; color: inherit;
+  border: 1px solid #3a3e45; border-radius: 3px; padding: 4px 6px; font: inherit; resize: vertical; }
+.st-prompt-log { font-size: 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; }
+.st-prompt-turn { border-top: 1px solid #2c2f35; padding: 4px 0; }
+.st-prompt-you { color: #8a9099; }
+.st-prompt-forms { font: 11px/1.4 ui-monospace, Menlo, monospace; color: #c9cdd3;
+  white-space: pre-wrap; margin: 3px 0 0; }
+.st-prompt-forms .st-failed { color: #e07a7a; }
+.st-prompt-busy { color: #8a9099; font-style: italic; }
 @media (max-width: 700px) {
   #stratum-app { flex-direction: column; }
   #stratum-view { height: 60vh; flex: none; width: 100%; }
@@ -815,7 +825,8 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
              (:aside :id "stratum-panel"
                (:h1 "Stratum")
                (:div :id "stratum-status" "Loading...")
-               (:div :id "stratum-layers" "")))
+               (:div :id "stratum-layers" "")
+               (:div :id "stratum-prompt" "")))
            (:script :src "/stratum/dual.js" "")
            (:script :src "/stratum/viewer.js" "")))))
 
@@ -846,21 +857,32 @@ goes back as a 500 carrying the condition's text."
                   (write-string result s)
                   (write-sequence result s))))))))
 
+(defun publish-door (server host path content-type fn)
+  "Publish FN, a function of the request answering a string or octets,
+at PATH: behind the invite gate, under the lock, the session's
+documents bound."
+  (net.aserve:publish :path path :server server :host host
+                      :content-type content-type
+                      :function (lambda (req ent)
+                                  (if (invite-allowed? req)
+                                      (progn
+                                        (ensure-invite-cookie! req)
+                                        (reply req ent content-type
+                                               (lambda ()
+                                                 (let ((*documents* (request-session-table req)))
+                                                   (funcall fn req)))))
+                                      (refuse req ent)))))
+
+(defvar *stratum-publishers* nil
+  "Functions of (server host) that publish doors of their own when
+publish-stratum! runs, for files loaded after this one (prompt.lisp).
+Not gwl:*publishers*, which the stratum package inherits: those are
+the image's own, called with one argument at its start.")
+
 (defun publish-stratum! (&key host)
   "Publish the page at /stratum/ and its API under /stratum/api/."
   (gwl:with-all-servers (server)
-    (flet ((pub (path content-type fn)
-             (net.aserve:publish :path path :server server :host host
-                                 :content-type content-type
-                                 :function (lambda (req ent)
-                                             (if (invite-allowed? req)
-                                                 (progn
-                                                   (ensure-invite-cookie! req)
-                                                   (reply req ent content-type
-                                                          (lambda ()
-                                                            (let ((*documents* (request-session-table req)))
-                                                              (funcall fn req)))))
-                                                 (refuse req ent))))))
+    (flet ((pub (path content-type fn) (publish-door server host path content-type fn)))
       ;; the invite link of the private beta (invite.lisp): no gate
       ;; without an invites file
       (invite-gate:publish-invite-door *gate* :server server :host host)
@@ -947,4 +969,5 @@ goes back as a 500 carrying the condition's text."
            (lambda (req) (document-octets (request-doc req))))
       (pub "/stratum/api/load" "application/json" #'handle-load)
       (pub "/stratum/api/save.ora" "image/openraster"
-           (lambda (req) (document-ora-octets (request-doc req)))))))
+           (lambda (req) (document-ora-octets (request-doc req))))
+      (dolist (publisher *stratum-publishers*) (funcall publisher server host)))))

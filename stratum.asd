@@ -20,4 +20,5 @@
   (:file "source/history") (:file "source/samples")
   (:file "source/png") (:file "source/zip") (:file "source/ora")
   (:file "source/ora-document") (:file "source/invite")
-  (:file "source/web") (:file "source/stubs")))
+  (:file "source/web") (:file "source/api") (:file "source/prompt")
+  (:file "source/stubs")))

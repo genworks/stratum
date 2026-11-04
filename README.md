@@ -259,6 +259,27 @@ Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
 
+### The Lisp API and the prompt box
+
+Everything the editor does from its menus and tools is a function in
+the package `stratum-api`, each of literal arguments on a current
+document: `(stratum-api:use-document "demo")`, `(stratum-api:levels
+0 :gamma 1.2)`, `(stratum-api:add-layer :curves :name "Warmer")`.
+[docs/api.md](docs/api.md) is the reference, also served at
+`/stratum/api/reference`.
+
+The panel's prompt box takes an edit in words.  `POST
+/stratum/api/prompt` sends the reference, the document described in
+words with a small picture of it, and the request to a language model
+(Gendl's `sexp-agent`, gwl/source/sexp-agent.lisp); the model answers
+with forms, which run through a sandbox that admits only the API's
+operations with literal arguments; the page then redraws.  The work
+runs on its own thread: the door answers a job id and the page asks
+after it.  Where the model is reached is `(stratum:configure-agent!
+:messages-url ...)`: a key-holding gate in production, or the API with
+`:api-key-file` on a trusted machine; with neither set the box reports
+that no model answers.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file

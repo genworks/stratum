@@ -266,7 +266,11 @@ change empties it."
    ("Plist (:mask bytes :rect (x y w h)), or nil.  The selection: an
 8-bit coverage over the document and its bounds; nil selects nothing,
 which paints everywhere.  selection.lisp makes and uses it."
-    selection nil :settable))
+    selection nil :settable)
+   ("List.  The prompt box's turns on this document, newest first, each
+(prompt . the model's reply), the context of the next prompt
+(prompt.lisp)."
+    prompt-log nil :settable))
 
   :objects
   ((layers :type (:sequence (the layer-types))

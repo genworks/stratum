@@ -1576,13 +1576,93 @@ no file, no gate."
              (check "revoking twice does nothing" (not (stratum::revoke-invite! token)))))
       (when (probe-file file) (delete-file file)))))
 
+(defun test-api ()
+  "The Lisp API (api.lisp) and the sandbox the prompt box runs forms
+through: every form the model may write, and the ones it may not."
+  (let ((stratum-api:*document* nil)
+        (*documents* (make-hash-table :test 'equal)))
+    (let ((info (stratum-api:use-document "parity")))
+      (check "use-document: the sample's size"
+             (and (= (getf info :width) 320) (= (getf info :height) 200)) (getf info :width)))
+    (check "describe-document names the layers"
+           (search "index 0 is the bottom" (stratum-api:describe-document)))
+    (let ((before (length (stratum-api:layers))))
+      (let ((added (stratum-api:add-layer :curves :name "Warm")))
+        (check "add-layer answers the new layer's info"
+               (and (eql (getf added :kind) :curves) (equal (getf added :name) "Warm")) added))
+      (check "one more layer" (= (length (stratum-api:layers)) (1+ before)))
+      (let ((set (stratum-api:set-layer "Warm" :opacity 0.5 :red '((0 0) (0.5 0.6) (1 1)))))
+        (check "set-layer by name: opacity and a curve"
+               (and (< (abs (- (getf set :opacity) 0.5)) 1e-6) (= (length (getf set :red)) 3)) set))
+      (check "set-layer refuses a setting the layer lacks"
+             (handler-case (progn (stratum-api:set-layer "Warm" :gamma 2) nil)
+               (error () t)))
+      (stratum-api:delete-layer "Warm")
+      (check "delete-layer" (= (length (stratum-api:layers)) before)))
+    (stratum-api:select-rect 10 10 50 40)
+    (check "select-rect's bounds" (equal (stratum-api:selection) '(10 10 50 40)) (stratum-api:selection))
+    (let ((r (stratum-api:fill-selection 0 '(200 10 10))))
+      (check "fill-selection answers the rectangle and the undo depth"
+             (and (getf r :changed) (= (getf r :undo-depth) 1)) r))
+    (check "undo" (getf (stratum-api:undo) :undone))
+    (stratum-api:select-none)
+    (check "select-none" (null (stratum-api:selection)))
+    (let ((r (stratum-api:levels 0 :gamma 1.3)))
+      (check "levels bakes into the whole layer" (equal (getf r :changed) '(0 0 320 200)) r))
+    (stratum-api:undo)
+    (let ((results (stratum:run-forms "(gaussian-blur 0 2) (hue-saturation 0 :hue 10) (undo) (undo) (selection)")))
+      (check "run-forms: five forms, all passed"
+             (and (= (length results) 5) (every (lambda (r) (getf r :ok)) results)) results))
+    (let ((results (stratum:run-forms "(open-image \"/etc/hostname\") (levels 0)")))
+      (check "run-forms refuses a file operation and stops there"
+             (and (= (length results) 1) (not (getf (first results) :ok))
+                  (search "not an operation" (getf (first results) :error)))
+             results))
+    (let ((results (stratum:run-forms "(levels 0 :gamma (+ 1 1))")))
+      (check "run-forms refuses a nested call"
+             (and (not (getf (first results) :ok)) (search "literal" (getf (first results) :error))) results))
+    (let ((results (stratum:run-forms "(levels 0 :gamma #.(+ 1 1))")))
+      (check "run-forms reads with read-eval off"
+             (and (= (length results) 1) (not (getf (first results) :ok))) results))
+    (let ((results (stratum:run-forms "(select-polygon ((0 0) (100 0) (50 80))) (crop 0 0 100 80)")))
+      (check "an unquoted list is data; crop remakes the document under its name"
+             (and (every (lambda (r) (getf r :ok)) results)
+                  (= (getf (stratum-api:use-document "parity") :width) 100))
+             results))))
+
+(defun test-prompt ()
+  "The prompt door's pieces that need no model: the reply parsed, the
+picture, the reference and the rules."
+  (multiple-value-bind (code prose)
+      (sexp-agent:parse-forms (format nil "I will warm it up.~%```lisp~%(levels 0 :gamma 1.1)~%(undo)~%```~%"))
+    (check "parse-forms: the block's code and the prose"
+           (and (search "(levels 0 :gamma 1.1)" code) (equal prose "I will warm it up.")) (list code prose)))
+  (multiple-value-bind (code prose) (sexp-agent:parse-forms "(undo)")
+    (check "parse-forms without a block: all code" (and (equal code "(undo)") (equal prose "")) (list code prose)))
+  (check "the reference document names the package" (search "stratum-api" (api-reference)))
+  (check "the system text carries the reference and the rules"
+         (let ((text (sexp-agent:system-text *agent*)))
+           (and (search "stratum-api" text) (search "fenced code block" text))))
+  (let ((stratum-api:*document* nil)
+        (*documents* (make-hash-table :test 'equal)))
+    (stratum-api:use-document "parity")
+    (let ((png (document-picture-png stratum-api:*document* 64)))
+      (check "the picture is a PNG of the scaled size"
+             (and (png-octets-p png)
+                  (multiple-value-bind (pixels w h) (read-png png)
+                    (declare (ignore pixels))
+                    (and (= w 64) (= h 40))))
+             (length png))))
+  (check "base64 of a known vector"
+         (equal (sexp-agent:base64-encode (coerce '(77 97 110) '(simple-array (unsigned-byte 8) (*)))) "TWFu")))
+
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite
+                  test-layers test-files test-png test-sessions test-invite test-api test-prompt
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -4235,6 +4235,113 @@
   S.redraw = requestDraw;
   S.doc = function () { return doc; };
 
+  // ---- the prompt box ------------------------------------------------------
+  // An edit described in words: POST prompt sends it with the document's
+  // state and a picture to a model, which answers with forms of the Lisp
+  // API (docs/api.md); the server runs them and the page redraws
+  // whatever they touched -- everything, since the forms may have.
+
+  var promptLog = null;
+
+  // The page brought up to date with the server after changes made
+  // outside its own calls: the structure, every pixel, the selection.
+  S.refreshAll = function () {
+    return fetchJSON(api('doc')).then(function (d) {
+      doc = d;
+      buildProgram(doc.shader);
+      syncOpacity();
+      uploadLuts();
+      applyMode();
+      S.undoDepth = doc.undoDepth;
+      S.redoDepth = doc.redoDepth;
+      buildPanel();
+      return uploadPixels();
+    }).then(function () {
+      return loadSelection(doc.selection);
+    }).then(function () { status(); requestDraw(); });
+  };
+
+  function showPromptTurn(text, res) {
+    if (!promptLog) return;
+    var turn = el('div', { 'class': 'st-prompt-turn' });
+    turn.appendChild(el('div', { 'class': 'st-prompt-you', text: text }));
+    if (res.reply) turn.appendChild(el('div', { text: res.reply }));
+    if (res.results && res.results.length) {
+      var pre = el('div', { 'class': 'st-prompt-forms' });
+      res.results.forEach(function (r) {
+        var line = el('div', { 'class': r.ok ? '' : 'st-failed', text: r.form + (r.ok ? '' : '  ; ' + r.error) });
+        pre.appendChild(line);
+      });
+      turn.appendChild(pre);
+    } else if (res.error) {
+      turn.appendChild(el('div', { 'class': 'st-prompt-forms st-failed', text: res.error }));
+    }
+    promptLog.insertBefore(turn, promptLog.firstChild);
+  }
+
+  // The test hook and the button's action: resolves to the server's
+  // answer ({reply, forms, results, ok, width, height}) once the page
+  // has caught up; the page reloads when the document's size changed.
+  function awaitPromptJob(id) {
+    return new Promise(function (resolve, reject) {
+      function poll() {
+        fetchJSON(api('prompt?job=' + encodeURIComponent(id))).then(function (res) {
+          if (res.status === 'working') setTimeout(poll, 1500);
+          else if (res.status === 'done') resolve(res);
+          else reject(new Error(res.error || ('the prompt job is ' + res.status)));
+        }, reject);
+      }
+      poll();
+    });
+  }
+
+  S.prompt = function (text) {
+    return S.strokesSettled().then(function () {
+      return postJSON('prompt', JSON.stringify({ prompt: text }));
+    }).then(function (res) {
+      return awaitPromptJob(res.job);
+    }).then(function (res) {
+      showPromptTurn(text, res);
+      if (res.width !== doc.width || res.height !== doc.height) {
+        if (!S.noReload) location.reload();
+        return res;
+      }
+      return S.refreshAll().then(function () { return res; });
+    }, function (e) {
+      showPromptTurn(text, { error: e.message });
+      status('prompt failed: ' + e.message);
+      throw e;
+    });
+  };
+
+  function installPrompt() {
+    var host = document.getElementById('stratum-prompt');
+    if (!host) return;
+    var box = el('textarea', { 'class': 'st-prompt-box', rows: '3', id: 'stratum-prompt-text',
+      placeholder: 'Describe an edit, for example: warm it up and lift the shadows' });
+    var go = el('button', { text: 'Do it', id: 'stratum-prompt-go' });
+    var busy = el('span', { 'class': 'st-prompt-busy', text: '' });
+    promptLog = el('div', { 'class': 'st-prompt-log' });
+    host.appendChild(el('div', { 'class': 'st-layers-head' }, [
+      el('span', { text: 'Prompt' }),
+      el('span', { 'class': 'st-lkind', text: 'Ctrl+Enter' })]));
+    host.appendChild(box);
+    host.appendChild(el('div', { 'class': 'st-row' }, [go, busy]));
+    host.appendChild(promptLog);
+    function run() {
+      var text = box.value.trim();
+      if (!text || go.disabled) return;
+      go.disabled = true;
+      busy.textContent = 'working...';
+      S.prompt(text).then(function () { box.value = ''; }, function () {})
+        .then(function () { go.disabled = false; busy.textContent = ''; });
+    }
+    go.addEventListener('click', run);
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
+    });
+  }
+
   // ---- start --------------------------------------------------------------
 
   function start() {
@@ -4273,6 +4380,7 @@
       installToolbar();
       installTools();
       installMenubar();
+      installPrompt();
       S.ready = true;
       fetchJSON(api('documents')).then(function (r) { S.documents = r.documents; }).catch(function () {});
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);

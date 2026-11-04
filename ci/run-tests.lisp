@@ -47,16 +47,20 @@
   (when (find-package name)
     (asdf:register-preloaded-system name)))
 
-;;; The invite gate (Gendl's gwl/source/invite-gate.lisp): from the
-;;; image when it carries it, else the file INVITE_GATE_FILE names
-;;; (.gitlab-ci.yml fetches it from the Gendl repository).
-(handler-case
-    (unless (find-package :invite-gate)
-      (let ((file (or (uiop:getenv "INVITE_GATE_FILE")
-                      (probe-file "/projects/gw/gendl/gwl/source/invite-gate.lisp")
-                      (ci-exit 2 "CI: no invite-gate in the image; set INVITE_GATE_FILE."))))
-        (load file)))
-  (error (e) (ci-exit 2 "CI: invite-gate did not load: ~a" e)))
+;;; Two of Gendl's gwl files, the invite gate and sexp-agent: from the
+;;; image when it carries them, else the files INVITE_GATE_FILE and
+;;; SEXP_AGENT_FILE name (.gitlab-ci.yml fetches them from the Gendl
+;;; repository).
+(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate")
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent")))
+  (destructuring-bind (package variable name) need
+    (handler-case
+        (unless (find-package package)
+          (let ((file (or (uiop:getenv variable)
+                          (probe-file (format nil "/projects/gw/gendl/gwl/source/~a.lisp" name))
+                          (ci-exit 2 "CI: no ~a in the image; set ~a." package variable))))
+            (load file)))
+      (error (e) (ci-exit 2 "CI: ~a did not load: ~a" package e)))))
 
 (handler-case
     (let ((warnings '()))

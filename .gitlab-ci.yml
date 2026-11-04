@@ -44,13 +44,15 @@ stages:
   variables:
     GIT_DEPTH: "1"
     INVITE_GATE_FILE: /tmp/invite-gate.lisp
+    SEXP_AGENT_FILE: /tmp/sexp-agent.lisp
   before_script:
     # A private copy: the build directory belongs to the runner's helper,
     # not the image's user.
     - rm -rf /tmp/stratum && cp -r "$CI_PROJECT_DIR" /tmp/stratum
-    # The invite gate lives in Gendl (gwl/source/invite-gate.lisp); until
-    # the images carry it, the one file comes from Gendl's repository.
+    # The invite gate and sexp-agent live in Gendl (gwl/source/); until
+    # the images carry them, the files come from Gendl's repository.
     - curl -fsSL https://gitlab.common-lisp.net/gendl/gendl/-/raw/devo/gwl/source/invite-gate.lisp -o /tmp/invite-gate.lisp
+    - curl -fsSL https://gitlab.common-lisp.net/gendl/gendl/-/raw/devo/gwl/source/sexp-agent.lisp -o /tmp/sexp-agent.lisp
     - cd /opt/gendl
 
 tests-ccl:

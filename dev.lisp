@@ -34,15 +34,20 @@
 (pushnew (make-pathname :name nil :type nil :defaults *load-truename*)
          asdf:*central-registry* :test #'equal)
 
-;; The invite gate (Gendl's gwl/source/invite-gate.lisp, 2026-11-04):
-;; from the image when it carries it, else the one file from a Gendl
-;; checkout beside this one, or wherever INVITE_GATE_FILE points.
-(unless (find-package :invite-gate)
-  (let ((file (or (uiop:getenv "INVITE_GATE_FILE")
-                  (probe-file "/projects/gw/gendl/gwl/source/invite-gate.lisp")
-                  (probe-file (merge-pathnames "../gendl/gwl/source/invite-gate.lisp" *load-truename*))
-                  (error "Stratum needs invite-gate (gendl gwl/source/invite-gate.lisp): set INVITE_GATE_FILE."))))
-    (load file)))
+;; Two of Gendl's gwl files (2026-11-04) an image built before them
+;; does not carry: the invite gate and sexp-agent (the prompt box's
+;; agent).  From the image when it has them, else the one file from a
+;; Gendl checkout beside this one, or wherever INVITE_GATE_FILE and
+;; SEXP_AGENT_FILE point.
+(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate")
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent")))
+  (destructuring-bind (package variable name) need
+    (unless (find-package package)
+      (let ((file (or (uiop:getenv variable)
+                      (probe-file (format nil "/projects/gw/gendl/gwl/source/~a.lisp" name))
+                      (probe-file (merge-pathnames (format nil "../gendl/gwl/source/~a.lisp" name) *load-truename*))
+                      (error "Stratum needs ~a (gendl gwl/source/~a.lisp): set ~a." package name variable))))
+        (load file)))))
 
 (asdf:load-system :stratum)
 

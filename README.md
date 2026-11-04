@@ -263,7 +263,7 @@ The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ New (Ctrl+N), Open
-(Ctrl+O), Open Sample, Place, Save (Ctrl+S), Save As PNG
+(Ctrl+O), Open Sample, Place, Place Gendl Drawing, Save (Ctrl+S), Save As PNG
 (Ctrl+Shift+S), Save As OpenRaster, Export As PNG and Close; Edit ▸
 Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
 (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5), Clear (Delete) and Free
@@ -336,6 +336,19 @@ Nothing else goes in: no undo, no selection, no clipboard. A saved
 document loads back rendering byte for byte the same, edits, strokes
 and masks included.
 
+A Gendl model is a layer source too (`source/drawing.lisp`): Place
+Gendl Drawing draws a registered model by the drawing system's svg
+lens in process, any of the ten standard views with hidden lines
+drawn, removed or dashed, and rasterizes the edges anti-aliased
+(Xiaolin Wu's lines, cubic curves flattened) into a layer of the ink
+color with the coverage as its alpha, at the document's size. The
+layer's source is `(:drawing :source NAME :projection ...)`, NAME a
+model registered with `register-drawing-source`, so it draws afresh
+at any size; `open-drawing` makes a document of a model from Lisp,
+`place-drawing!` adds one to a document. No Ghostscript and no
+subprocess: the sample assembly draws in about a tenth of a second.
+Text in the drawing (view labels, dimensions) is not drawn yet.
+
 For interchange with other editors there is OpenRaster, the layered
 file of Krita, GIMP, MyPaint and Scribus (`.ora`, openraster.org):
 Open reads one and Save As OpenRaster writes one. The file is a zip
@@ -395,6 +408,8 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/new` | `{name, width, height, background: "white", "transparent" or [r, g, b]}`; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/open?name=&w=&h=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new document of one Background layer; answers `{doc, width, height}` |
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new layer of the document, centered and fitted to its size; answers as `layers` does |
+| `/stratum/api/drawing-sources` | the Gendl models registered to be drawn, the standard views and the hidden-line treatments: `{sources, projections, hiddenLines}` |
+| `POST /stratum/api/drawing?doc=N` | `{source, projection, hiddenLines, color: [r, g, b], weight, margin, above}`: a new layer drawn from the registered Gendl model; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
 | `/stratum/api/save?doc=N` | the document as a `.stratum` file |
 | `POST /stratum/api/load?name=` | body: a `.stratum` file or an OpenRaster `.ora` file; a new document; answers `{doc, width, height, unsupported: [[layer, composite-op] ...]}` |

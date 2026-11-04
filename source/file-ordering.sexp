@@ -1,1 +1,1 @@
-("package" "color" "dual" "curves" "generators" "glsl" "cpu" "document" "brush" "filter" "selection" "gradient" "heal" "resize" "file" "merge" "mode" "history" "samples" "png" "zip" "ora" "ora-document" "web" "stubs")
+("package" "color" "dual" "curves" "drawing" "generators" "glsl" "cpu" "document" "brush" "filter" "selection" "gradient" "heal" "resize" "file" "merge" "mode" "history" "samples" "png" "zip" "ora" "ora-document" "web" "stubs")

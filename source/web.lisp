@@ -630,6 +630,44 @@ mode is not one of Stratum's and became Normal."
                                 "height" (the-object doc doc-height)
                                 "unsupported" (coerce (mapcar (lambda (u) (coerce u 'vector)) unsupported) 'vector))))))
 
+(defun handle-drawing-sources (req)
+  "The Gendl models registered to be drawn (drawing.lisp), the standard
+views and the hidden-line treatments: {sources, projections,
+hiddenLines}, each a list of names."
+  (declare (ignore req))
+  (json-string (json-object "sources" (coerce (drawing-source-names) 'vector)
+                            "projections" (coerce (mapcar #'string-downcase *drawing-projections*) 'vector)
+                            "hiddenLines" (vector "draw" "remove" "dashed"))))
+
+(defun handle-drawing (req)
+  "File > Place Gendl Drawing: {source, projection, hiddenLines, color:
+[r, g, b], weight, margin, above}: a new raster layer of the document,
+the registered Gendl model SOURCE drawn by the drawing system in
+process at the document's size; answers as layers does."
+  (let* ((doc (request-doc req))
+         (body (parse-json-body req))
+         (source (gethash "source" body))
+         (projection (let ((p (gethash "projection" body)))
+                       (if p (find p *drawing-projections* :test #'string-equal) :trimetric)))
+         (hidden (let ((h (gethash "hiddenLines" body)))
+                   (if h (find h '(:draw :remove :dashed) :test #'string-equal) :draw)))
+         (color (let ((c (gethash "color" body)))
+                  (if (and (listp c) (= (length c) 3)) (mapcar #'round c) '(0 0 0))))
+         (above (gethash "above" body)))
+    (unless (and (stringp source) (gethash source *drawing-sources*))
+      (error "No Gendl model is registered as ~s." source))
+    (unless projection (error "Unknown view ~s." (gethash "projection" body)))
+    (unless hidden (error "Unknown hidden-line treatment ~s." (gethash "hiddenLines" body)))
+    (let ((active (place-drawing! doc source
+                                  :projection projection :hidden-lines hidden
+                                  :color (doc-color doc color)
+                                  :weight (float (or (gethash "weight" body) 1.5) 1d0)
+                                  :margin (float (or (gethash "margin" body) 0.05) 1d0)
+                                  :above (and (integerp above) above))))
+      (json-string (json-object "planVersion" (the-object doc plan-version)
+                                "active" active
+                                "layerCount" (length (the-object doc layer-list)))))))
+
 (defun handle-new (req)
   "File > New: {name, width, height, background: \"white\" | \"transparent\"
 | [r, g, b]}; a new document; answers {doc, width, height}."
@@ -904,6 +942,8 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/resize" "application/json" #'handle-resize)
       (pub "/stratum/api/open" "application/json" #'handle-open)
       (pub "/stratum/api/place" "application/json" #'handle-place)
+      (pub "/stratum/api/drawing-sources" "application/json" #'handle-drawing-sources)
+      (pub "/stratum/api/drawing" "application/json" #'handle-drawing)
       (pub "/stratum/api/close" "application/json" #'handle-close)
       (pub "/stratum/api/new" "application/json" #'handle-new)
       (pub "/stratum/api/save" "application/octet-stream"

@@ -1008,6 +1008,79 @@ to alter the pictures."
                                   nil)
                (error () t))))))
 
+(defun test-drawing ()
+  (let ((d "M 0 0 L 10 0 C 10 5 20 5 20 0 Z M 1 1 2 2"))
+    (check "a path's M, L, C and Z read as polylines, the curve flattened through its midpoint"
+           (let ((lines (svg-path-polylines d)))
+             (and (= (length lines) 2)
+                  (equal (first (first lines)) '(0d0 . 0d0))
+                  (equal (second (first lines)) '(10d0 . 0d0))
+                  (= (length (first lines)) (+ 3 *curve-segments*))
+                  (let ((mid (nth (1+ (floor *curve-segments* 2)) (first lines))))
+                    (and (< (abs (- (car mid) 15)) 1d-9) (< (abs (- (cdr mid) 3.75)) 1d-9)))
+                  (equal (first (last (first lines))) '(0d0 . 0d0))
+                  (equal (second lines) '((1d0 . 1d0) (2d0 . 2d0)))))
+           (svg-path-polylines d)))
+  (multiple-value-bind (segments w h)
+      (svg-segments "<svg viewBox=\"0 0 100 50\"><g transform=\"translate(10, 5)\"><path d=\"M 0 0 10 0\" stroke-dasharray=\"4 2\"/><g><path d=\"M 0 0 L 0 10\"/></g></g><path d=\"M 1 1 2 2\"/></svg>")
+    (check "segments are translated by their groups, the sheet size read from the viewBox, dashes noted"
+           (and (= w 100d0) (= h 50d0)
+                (equal segments '((10d0 5d0 20d0 5d0 t) (10d0 5d0 10d0 15d0 nil) (1d0 1d0 2d0 2d0 nil))))
+           segments))
+  (let ((c (make-coverage 16 8)))
+    (draw-line c 16 8 2d0 3d0 12d0 3d0)
+    (check "a horizontal line covers its row fully between the endpoints, half at them, and nothing beside"
+           (and (loop for x from 3 to 11 always (= 1d0 (aref c (+ x (* 16 3)))))
+                (= 0.5d0 (aref c (+ 2 (* 16 3)))) (= 0.5d0 (aref c (+ 12 (* 16 3))))
+                (loop for x below 16 always (and (zerop (aref c (+ x (* 16 2)))) (zerop (aref c (+ x (* 16 4)))))))
+           (coerce c 'list)))
+  (let* ((rgba (gen-drawing 64 64 :source "box" :projection :top))
+         (rows (loop for y below 64 collect (loop for x below 64 count (plusp (aref rgba (+ 3 (* 4 (+ x (* 64 y)))))))))
+         (inked (remove 0 rows)))
+    (check "a box seen from the top draws as a rectangle inside the margin: long rows at the ends, thin ones between, black ink"
+           (and (every #'zerop (subseq rows 0 3)) (every #'zerop (subseq rows 61))
+                (>= (apply #'max rows) 50)
+                (<= (nth (floor (length inked) 2) inked) 8)
+                (loop for i below (* 64 64)
+                      always (let ((o (* 4 i)))
+                               (or (zerop (aref rgba (+ o 3)))
+                                   (and (zerop (aref rgba o)) (zerop (aref rgba (+ o 1))) (zerop (aref rgba (+ o 2))))))))
+           rows))
+  (let* ((spec '(:drawing :source "sample" :projection :trimetric))
+         (a (generate-pixels spec 320 200))
+         (b (generate-pixels spec 320 200))
+         (c (generate-pixels spec 160 100))
+         (ink (lambda (p) (loop for i from 3 below (length p) by 4 count (plusp (aref p i))))))
+    (check "the sample assembly draws with curves and straight edges, cached per size, afresh at another size"
+           (and (> (funcall ink a) 3000) (eq a b) (= (length c) (* 4 160 100)) (> (funcall ink c) 800)
+                (< (funcall ink c) (funcall ink a)))
+           (list (funcall ink a) (funcall ink c))))
+  ;; Hidden-line removal is geom-base's exact occlusion test, minutes on
+  ;; the sample's sphere and cylinder; the box is quick.
+  (check "dashed hidden lines draw too, lighter than the visible edges"
+         (let ((p (gen-drawing 100 100 :source "box" :hidden-lines :dashed)))
+           (and (plusp (loop for i from 3 below (length p) by 4 count (plusp (aref p i))))
+                (plusp (loop for i from 3 below (length p) by 4 count (< 0 (aref p i) 160))))))
+  (let* ((doc (make-sample-document "parity"))
+         (before (the-object doc (render-cpu)))
+         (count (length (the-object doc layer-list)))
+         (i (place-drawing! doc "sample" :projection :front :color '(200 0 0))))
+    (check "place-drawing! adds a raster layer named for the model and the view, on top, and it inks the picture"
+           (and (= i count) (= (length (the-object doc layer-list)) (1+ count))
+                (equal (the-object doc (layer i) layer-name) "sample (front)")
+                (eql (the-object doc (layer i) kind) :raster)
+                (not (equalp (the-object doc (render-cpu)) before)))
+           (layer-names doc)))
+  (let ((doc (open-drawing (make-object 'box :width 3 :length 2 :height 1) :name "drawing-test" :width 200 :height 120)))
+    (check "open-drawing registers a document of a white Background and the model's drawing"
+           (and (gethash "drawing-test" *documents*)
+                (equal (layer-names doc) '("Background" "drawing-test (trimetric)"))
+                (let ((p (the-object doc (render-cpu))))
+                  (and (loop for i from 3 below (length p) by 4 always (= 255 (aref p i)))
+                       (plusp (loop for i below (length p) by 4 count (< (aref p i) 128)))))))
+    (remhash "drawing-test" *documents*)
+    (remhash "drawing-test" *drawing-sources*)))
+
 (defun test-ora ()
   ;; The zip layer.
   (let* ((flat (make-array 5000 :element-type '(unsigned-byte 8) :initial-element 7))
@@ -1465,7 +1538,7 @@ to alter the pictures."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
-                  test-file-format test-ora test-filter test-gradient test-merge
+                  test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions
                   test-threads test-golden))
     (handler-case (funcall test)

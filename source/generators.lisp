@@ -94,7 +94,8 @@ PIXELS (WIDTH wide, CHANNELS bytes a pixel) at X, Y."
                   (:gradient (apply #'gen-gradient w h args))
                   (:discs (apply #'gen-discs w h args))
                   (:clouds (apply #'gen-clouds w h args))
-                  (:stripes (apply #'gen-stripes w h args))))))))
+                  (:stripes (apply #'gen-stripes w h args))
+                  (:drawing (apply #'gen-drawing w h args))))))))
 
 (defun generate-mask (spec w h)
   "One byte a pixel for the mask SPEC, (generator &key ...)."

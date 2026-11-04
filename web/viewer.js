@@ -2201,6 +2201,66 @@
     });
   };
 
+  // File > Place Gendl Drawing: a Gendl model the server has registered,
+  // drawn by the drawing system in process at the document's size as a
+  // new layer (the layer's source is the model and the view, so it
+  // draws afresh at any size).  The dialog's lists come from the
+  // server; `ready` resolves when they have.
+  S.openDrawing = function () {
+    if (S.drawingDialog) S.drawingDialog.cancel();
+    var state = { source: null, projection: 'trimetric', hiddenLines: 'draw', weight: 1.5 };
+    var source = el('select'), projection = el('select'), hidden = el('select');
+    var weight = el('input', { type: 'number', min: '1', max: '4', step: '0.5', value: '1.5' });
+    weight.style.width = '60px';
+    source.addEventListener('change', function () { state.source = source.value; });
+    projection.addEventListener('change', function () { state.projection = projection.value; });
+    hidden.addEventListener('change', function () { state.hiddenLines = hidden.value; });
+    weight.addEventListener('input', function () { state.weight = Number(weight.value); });
+    var d = sizeDialog('Place Gendl Drawing', [
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'model' }), source]),
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'view' }), projection]),
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'hidden lines' }), hidden]),
+      el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'line weight' }), weight, el('span', { text: 'px' })])]);
+    function show() {
+      if (state.source) source.value = state.source;
+      projection.value = state.projection;
+      hidden.value = state.hiddenLines;
+      weight.value = String(state.weight);
+    }
+    var ready = fetchJSON(api('drawing-sources')).then(function (r) {
+      r.sources.forEach(function (n) { source.appendChild(el('option', { value: n, text: n })); });
+      r.projections.forEach(function (n) { projection.appendChild(el('option', { value: n, text: n })); });
+      r.hiddenLines.forEach(function (n) { hidden.appendChild(el('option', { value: n, text: n })); });
+      if (!state.source) state.source = r.sources[0] || null;
+      show();
+      return r;
+    });
+    var dialog = S.drawingDialog = {
+      state: state,
+      ready: ready,
+      set: function (changes) { Object.assign(state, changes); show(); },
+      cancel: function () { d.box.remove(); S.drawingDialog = null; },
+      ok: function () {
+        d.box.remove();
+        S.drawingDialog = null;
+        var body = { source: state.source, projection: state.projection, hiddenLines: state.hiddenLines,
+                     weight: state.weight, color: S.brush.color.slice(0, 3) };
+        if (S.activeLayer !== null) body.above = S.activeLayer;
+        status('drawing ' + state.source + '...');
+        return S.strokesSettled().then(function () {
+          return postJSON('drawing', JSON.stringify(body));
+        }).then(function (res) {
+          S.activeLayer = res.active;
+          S.undoDepth = 0;
+          return reloadStructure(true);
+        }).then(function () { status(); }, function (e) { status('drawing failed: ' + e.message); });
+      }
+    };
+    d.cancel.addEventListener('click', dialog.cancel);
+    d.ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
   S.placeFile = function (file) {
     status('placing ' + (file.name || 'image') + '...');
     return S.decodeImage(file).then(function (img) { return S.placeImage(img, baseName(file)); })
@@ -2265,6 +2325,7 @@
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + n; } }; }) },
         '-',
         { label: 'Place...', run: function () { chooseFile(S.placeFile); } },
+        { label: 'Place Gendl Drawing...', run: function () { S.openDrawing(); } },
         '-',
         { label: 'Save', key: 'Ctrl+S', run: function () { S.saveDocument(); } },
         { label: 'Save As PNG...', key: 'Ctrl+Shift+S', run: S.saveAs },
@@ -4113,6 +4174,32 @@
         var d = renderDiff(pair[0], pair[1]);
         check('loaded back from OpenRaster, it renders within two levels', d.maxDiff <= 2, d);
         return fetchJSON(apiFor(loaded, 'close'), { method: 'POST' });
+      });
+    }).then(function () {
+      // A Gendl model as a layer: the server draws the registered
+      // model's edges in process at the document's size; the new layer
+      // has ink, the GPU shows it within a level of the CPU, and
+      // deleting it gives the picture back.
+      var before = S.renderExact(), count = doc.layers.length;
+      var dialog = S.openDrawing();
+      return dialog.ready.then(function (r) {
+        check('the server lists Gendl models to draw, the sample among them, and the standard views',
+              r.sources.indexOf('sample') >= 0 && r.projections.indexOf('top') >= 0 && r.hiddenLines.length === 3, r);
+        dialog.set({ source: 'sample', projection: 'tri-l', hiddenLines: 'draw', weight: 1.5 });
+        return dialog.ok();
+      }).then(function () {
+        var L = doc.layers[S.activeLayer];
+        check('Place Gendl Drawing adds a raster layer named for the model and the view',
+              doc.layers.length === count + 1 && !!L && L.kind === 'raster' && L.name === 'sample (tri-l)', L && L.name);
+        var after = S.renderExact(), d = renderDiff(before, after);
+        check('the drawing inks the picture', d.changed > 500, d);
+        return S.parity();
+      }).then(function (p) {
+        check('the drawn layer shows on the GPU within a level of the CPU', p.maxDiff <= 1, p);
+        return S.layerOp({ op: 'delete' });
+      }).then(function () {
+        check('deleting the drawing gives the picture back exactly',
+              doc.layers.length === count && renderDiff(before, S.renderExact()).maxDiff === 0);
       });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };

@@ -277,8 +277,9 @@ operations with literal arguments; the page then redraws.  The work
 runs on its own thread: the door answers a job id and the page asks
 after it.  Where the model is reached is `(stratum:configure-agent!
 :messages-url ...)`: a key-holding gate in production, or the API with
-`:api-key-file` on a trusted machine; with neither set the box reports
-that no model answers.
+`:api-key-file` on a trusted machine.  When the model cannot be
+reached the box shows what its server said, changes nothing, and
+keeps the prompt for another try.
 
 ### Private beta: invite links
 

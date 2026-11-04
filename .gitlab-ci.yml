@@ -35,24 +35,51 @@ workflow:
     - if: $CI_SERVER_HOST == "gitlab.genworks.com"
 
 stages:
+  - fetch
   - test
+
+# The invite gate and sexp-agent live in Gendl (gwl/source/); until the
+# images carry them, the two files come from Gendl's repository -- by
+# git, which common-lisp.net's bot screen lets through where it answers
+# curl with a challenge page (the 2026-11-04 failure: the image read an
+# HTML page as Lisp).  The Gendl images have no git, so a job of its
+# own fetches the files, a partial clone of a few hundred kilobytes,
+# and hands them on as artifacts.
+gendl-files:
+  stage: fetch
+  tags:
+    - amd64-docker
+  image:
+    name: alpine/git:latest
+    entrypoint: [""]
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - rm -rf gendl-partial gendl-files
+    - git clone --depth 1 --filter=blob:none --no-checkout -b devo https://gitlab.common-lisp.net/gendl/gendl.git gendl-partial
+    - git -C gendl-partial checkout devo -- gwl/source/invite-gate.lisp gwl/source/sexp-agent.lisp
+    - mkdir gendl-files && cp gendl-partial/gwl/source/invite-gate.lisp gendl-partial/gwl/source/sexp-agent.lisp gendl-files/
+    - for f in gendl-files/*.lisp; do head -c 120 "$f" | grep -q Copyright || { echo "$f is not the Lisp file"; exit 1; }; done
+    - git -C gendl-partial log --oneline -1
+  artifacts:
+    paths:
+      - gendl-files/
+    expire_in: 1 day
 
 .lisp-tests:
   stage: test
+  needs:
+    - gendl-files
   tags:
     - amd64-docker
   variables:
     GIT_DEPTH: "1"
-    INVITE_GATE_FILE: /tmp/invite-gate.lisp
-    SEXP_AGENT_FILE: /tmp/sexp-agent.lisp
+    INVITE_GATE_FILE: /tmp/stratum/gendl-files/invite-gate.lisp
+    SEXP_AGENT_FILE: /tmp/stratum/gendl-files/sexp-agent.lisp
   before_script:
     # A private copy: the build directory belongs to the runner's helper,
-    # not the image's user.
+    # not the image's user.  The fetched Gendl files ride along in it.
     - rm -rf /tmp/stratum && cp -r "$CI_PROJECT_DIR" /tmp/stratum
-    # The invite gate and sexp-agent live in Gendl (gwl/source/); until
-    # the images carry them, the files come from Gendl's repository.
-    - curl -fsSL https://gitlab.common-lisp.net/gendl/gendl/-/raw/devo/gwl/source/invite-gate.lisp -o /tmp/invite-gate.lisp
-    - curl -fsSL https://gitlab.common-lisp.net/gendl/gendl/-/raw/devo/gwl/source/sexp-agent.lisp -o /tmp/sexp-agent.lisp
     - cd /opt/gendl
 
 tests-ccl:

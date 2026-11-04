@@ -613,14 +613,22 @@ to the document's size; answers as handle-layers does."
                                   "layerCount" (length (the-object doc layer-list))))))))
 
 (defun handle-load (req)
-  "File > Open of a .stratum file: the body is the file; a new document
-under its name (?name=); answers {doc, width, height}."
+  "File > Open of a .stratum or an OpenRaster .ora file (told apart by
+their first bytes): the body is the file; a new document under its
+name (?name=); answers {doc, width, height, unsupported: [[layer,
+composite-op] ...]}, the last naming OpenRaster layers whose blend
+mode is not one of Stratum's and became Normal."
   (let* ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled")))
-         (doc (read-document-octets (request-octets req) name)))
-    (setf (gethash name *documents*) doc)
-    (json-string (json-object "doc" name
-                              "width" (the-object doc doc-width)
-                              "height" (the-object doc doc-height)))))
+         (octets (request-octets req)))
+    (multiple-value-bind (doc unsupported)
+        (if (zip-octets-p octets)
+            (read-ora-document octets name)
+            (read-document-octets octets name))
+      (setf (gethash name *documents*) doc)
+      (json-string (json-object "doc" name
+                                "width" (the-object doc doc-width)
+                                "height" (the-object doc doc-height)
+                                "unsupported" (coerce (mapcar (lambda (u) (coerce u 'vector)) unsupported) 'vector))))))
 
 (defun handle-new (req)
   "File > New: {name, width, height, background: \"white\" | \"transparent\"
@@ -900,4 +908,6 @@ goes back as a 500 carrying the condition's text."
       (pub "/stratum/api/new" "application/json" #'handle-new)
       (pub "/stratum/api/save" "application/octet-stream"
            (lambda (req) (document-octets (request-doc req))))
-      (pub "/stratum/api/load" "application/json" #'handle-load))))
+      (pub "/stratum/api/load" "application/json" #'handle-load)
+      (pub "/stratum/api/save.ora" "image/openraster"
+           (lambda (req) (document-ora-octets (request-doc req)))))))

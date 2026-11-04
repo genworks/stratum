@@ -17,4 +17,6 @@
   (:file "source/heal") (:file "source/resize") (:file "source/file")
   (:file "source/merge") (:file "source/mode")
   (:file "source/history") (:file "source/samples")
-  (:file "source/png") (:file "source/web") (:file "source/stubs")))
+  (:file "source/png") (:file "source/zip") (:file "source/ora")
+  (:file "source/ora-document") (:file "source/web")
+  (:file "source/stubs")))

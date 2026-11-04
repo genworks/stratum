@@ -264,7 +264,7 @@ with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ New (Ctrl+N), Open
 (Ctrl+O), Open Sample, Place, Save (Ctrl+S), Save As PNG
-(Ctrl+Shift+S), Export As PNG and Close; Edit ▸
+(Ctrl+Shift+S), Save As OpenRaster, Export As PNG and Close; Edit ▸
 Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
 (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5), Clear (Delete) and Free
 Transform (Ctrl+T); Image ▸ Adjustments ▸ Levels
@@ -336,6 +336,27 @@ Nothing else goes in: no undo, no selection, no clipboard. A saved
 document loads back rendering byte for byte the same, edits, strokes
 and masks included.
 
+For interchange with other editors there is OpenRaster, the layered
+file of Krita, GIMP, MyPaint and Scribus (`.ora`, openraster.org):
+Open reads one and Save As OpenRaster writes one. The file is a zip
+archive, read and written by `source/zip.lisp` (stored and deflated
+entries, nothing more), holding `stack.xml`, one PNG per layer,
+`mergedimage.png` and a thumbnail (`source/ora.lisp`: an `ora-image`
+of `ora-layer`s, top first; `read-ora`, `ora-octets`, a small XML
+reader of its own). The mapping onto a document is
+`source/ora-document.lisp`. A raster layer goes out as its pixels
+with the mask baked into the alpha, Normal, Multiply, Screen and Add
+as `svg:src-over`, `svg:multiply`, `svg:screen` and `svg:plus`. An
+adjustment layer has no OpenRaster shape, so it goes out as a hidden,
+empty layer carrying its spec in Stratum's own attribute,
+`stratum:spec`, which Stratum reads back whole and other editors show
+as an empty hidden layer; the merged image is the full render either
+way. Coming in, a layer at an offset is placed on the canvas, a
+nested stack (a group) is flattened with its opacity and visibility
+applied, and a blend mode Stratum has not got becomes Normal and is
+reported. A document saved as OpenRaster loads back the same stack,
+rendering within two levels (the baked mask rounds once).
+
 Merge Down and Flatten Image are the compositing the document already
 does, pointed at part of the stack (`source/merge.lisp`): Merge Down
 renders the active layer and the one below it, with their opacities,
@@ -376,7 +397,8 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/place?doc=N&name=&w=&h=&above=` | body: a PNG file, or raw RGBA8 with `w` and `h`; a new layer of the document, centered and fitted to its size; answers as `layers` does |
 | `POST /stratum/api/close?doc=N` | forgets the document |
 | `/stratum/api/save?doc=N` | the document as a `.stratum` file |
-| `POST /stratum/api/load?name=` | body: a `.stratum` file; a new document; answers `{doc, width, height}` |
+| `POST /stratum/api/load?name=` | body: a `.stratum` file or an OpenRaster `.ora` file; a new document; answers `{doc, width, height, unsupported: [[layer, composite-op] ...]}` |
+| `/stratum/api/save.ora?doc=N` | the document as an OpenRaster `.ora` file |
 | `POST /stratum/api/select?doc=N` | `{op: "rect", x, y, w, h}`, `{op: "polygon", points}`, `{op: "wand", x, y, tolerance, contiguous, layer}`, `{op: "feather", radius}`, `{op: "all"}`, `{op: "none"}` or `{op: "inverse"}`, with `mode: "new"`, `"add"` or `"subtract"` on the first three; answers `{selection: {x, y, w, h} or null}` |
 | `/stratum/api/selection?doc=N` | raw R8 of the selection, empty when none |
 | `POST /stratum/api/fill?doc=N` | `{layer, color, opacity, mode: "paint" or "erase"}` inside the selection; answers the rectangle as `stroke` does |

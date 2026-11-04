@@ -2154,17 +2154,32 @@
     return postBytes('open?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height, img.bytes);
   };
 
-  // A .stratum file goes to the server whole (its own format); anything
-  // else is an image the browser decodes.
+  // A .stratum file or an OpenRaster .ora file goes to the server
+  // whole (the server tells them apart); anything else is an image the
+  // browser decodes.  A note about the open (an OpenRaster blend mode
+  // Stratum has not got) survives the navigation in sessionStorage and
+  // shows on the new page's status line.
   S.openFile = function (file) {
     status('opening ' + (file.name || 'image') + '...');
-    var opened = /\.stratum$/i.test(file.name || '')
+    var opened = /\.(stratum|ora)$/i.test(file.name || '')
       ? file.arrayBuffer().then(function (buf) {
           return postBytes('load?name=' + encodeURIComponent(baseName(file)), new Uint8Array(buf));
         })
       : S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); });
-    return opened.then(function (res) { location.search = '?doc=' + encodeURIComponent(res.doc); })
-      .catch(function (e) { status('open failed: ' + e.message); });
+    return opened.then(function (res) {
+      if (res.unsupported && res.unsupported.length) {
+        var note = res.unsupported.map(function (u) { return u[0] + ' (' + u[1] + ')'; }).join(', ');
+        try { sessionStorage.setItem('stratum-open-note', 'blend modes set to Normal, not supported here: ' + note); } catch (e) {}
+      }
+      location.search = '?doc=' + encodeURIComponent(res.doc);
+    }).catch(function (e) { status('open failed: ' + e.message); });
+  };
+
+  S.openNote = function () {
+    try {
+      var note = sessionStorage.getItem('stratum-open-note');
+      if (note) { sessionStorage.removeItem('stratum-open-note'); status(note); }
+    } catch (e) {}
   };
 
   // File > Save: the document as a .stratum file, downloaded.
@@ -2199,12 +2214,21 @@
     a.remove();
   };
 
+  // File > Save As OpenRaster: the document as an .ora file (GIMP,
+  // Krita, MyPaint and Scribus open it), downloaded.
+  S.saveOra = function () {
+    var a = el('a', { href: api('save.ora'), download: doc.name + '.ora' });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   S.closeDocument = function () {
     return postJSON('close').then(function () { location.search = '?doc=demo'; });
   };
 
   function chooseFile(then) {
-    var input = el('input', { type: 'file', accept: 'image/*,.stratum' });
+    var input = el('input', { type: 'file', accept: 'image/*,.stratum,.ora' });
     input.style.display = 'none';
     input.addEventListener('change', function () {
       if (input.files[0]) then(input.files[0]);
@@ -2244,6 +2268,7 @@
         '-',
         { label: 'Save', key: 'Ctrl+S', run: function () { S.saveDocument(); } },
         { label: 'Save As PNG...', key: 'Ctrl+Shift+S', run: S.saveAs },
+        { label: 'Save As OpenRaster...', run: S.saveOra },
         { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(api('export.png')); } }] },
         '-',
         { label: 'Close', run: S.closeDocument }] },
@@ -4062,6 +4087,34 @@
         return fetchJSON(apiFor(loaded, 'close'), { method: 'POST' });
       });
     }).then(function () {
+      // OpenRaster: Save As OpenRaster brings a zip whose first entry
+      // is the stored mimetype; loaded back as a new document it has the
+      // same stack (the adjustment layers ride in Stratum's own
+      // attribute) and renders within two levels: a mask baked into a
+      // layer's alpha rounds once.
+      var loaded = null;
+      return fetchBytes(api('save.ora')).then(function (bytes) {
+        var name = String.fromCharCode.apply(null, bytes.subarray(30, 38));
+        var mime = String.fromCharCode.apply(null, bytes.subarray(38, 54));
+        check('Save As OpenRaster brings a zip with the stored mimetype first',
+              bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[8] === 0 && name === 'mimetype' && mime === 'image/openraster',
+              { bytes: bytes.length, name: name, mime: mime });
+        return postBytes('load?name=ora-roundtrip', bytes);
+      }).then(function (res) {
+        loaded = res.doc;
+        check('an OpenRaster of our own has no unsupported blend modes', res.unsupported && res.unsupported.length === 0, res.unsupported);
+        return fetchJSON(apiFor(loaded, 'doc'));
+      }).then(function (d) {
+        var same = d.width === doc.width && d.height === doc.height && d.layers.length === doc.layers.length &&
+          d.layers.every(function (L, k) { return L.name === doc.layers[k].name && L.kind === doc.layers[k].kind; });
+        check('loaded back from OpenRaster, it is the same stack, adjustments included', same, { layers: d.layers.length });
+        return Promise.all([fetchBytes(api('cpu')), fetchBytes(apiFor(loaded, 'cpu'))]);
+      }).then(function (pair) {
+        var d = renderDiff(pair[0], pair[1]);
+        check('loaded back from OpenRaster, it renders within two levels', d.maxDiff <= 2, d);
+        return fetchJSON(apiFor(loaded, 'close'), { method: 'POST' });
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -4127,6 +4180,7 @@
       return loadSelection(doc.selection);
     }).then(function () {
       status();
+      S.openNote();
       draw();
       installBenchButton();
       installToolbar();

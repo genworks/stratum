@@ -1576,6 +1576,88 @@ no file, no gate."
              (check "revoking twice does nothing" (not (stratum::revoke-invite! token)))))
       (when (probe-file file) (delete-file file)))))
 
+(defun free-port ()
+  "A port nothing listens on just now."
+  (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
+         (port (usocket:get-local-port socket)))
+    (usocket:socket-close socket)
+    port))
+
+(defun raw-post (port path bytes)
+  "POST BYTES to PATH over a plain socket and read the answer to the
+end: (status text).  A connection reset here, the reply lost to bytes
+left unread at the close, is a failure, as it is for a person."
+  (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (stream (usocket:socket-stream socket))
+         (head (format nil "POST ~a HTTP/1.1~c~cHost: 127.0.0.1~c~cConnection: close~c~cContent-Type: application/octet-stream~c~cContent-Length: ~d~c~c~c~c"
+                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                       (length bytes) #\Return #\Newline #\Return #\Newline)))
+    (unwind-protect
+         (progn
+           (write-sequence (map '(vector (unsigned-byte 8)) #'char-code head) stream)
+           (write-sequence bytes stream)
+           (force-output stream)
+           ;; a deadline, not usocket:wait-for-input: on CCL that answers
+           ;; nothing with the first byte already there to read
+           (let ((text (handler-case
+                           (glisp:with-deadline (20)
+                             (with-output-to-string (out)
+                               (loop for byte = (read-byte stream nil nil)
+                                     while byte do (write-char (code-char byte) out))))
+                         (serious-condition (e) (error "No answer from ~a: ~a" path e)))))
+             (list (parse-integer text :start 9 :end 12) text)))
+      (usocket:socket-close socket))))
+
+(defun test-uploads ()
+  "The doors over a real connection, on a server of their own: a body
+comes through byte for byte as octets and no string; an upload over the
+limit, or at any door over the small limit, is told why; a visitor with
+no invite gets the gate's page with the body unread."
+  (check "body-refusal: within the limit" (null (body-refusal 10 100)))
+  (check "body-refusal: over it, in megabytes" (search "MB" (or (body-refusal 200 100) "")))
+  (check "body-refusal: undeclared passes to the reader" (null (body-refusal nil 100)))
+  (check "body-refusal: no heap on earth has room"
+         (or (null (heap-free-bytes))
+             (search "no room" (or (body-refusal (expt 10 12) (expt 10 13) :upload? t) ""))))
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (seen nil)
+         (bytes (let ((v (make-array 300000 :element-type '(unsigned-byte 8))))
+                  (dotimes (i (length v) v) (setf (aref v i) (mod (* i 7) 256)))))
+         (old-gate *gate*)
+         (old-max *max-upload-bytes*)
+         (old-small *max-request-bytes*)
+         (file (format nil "/tmp/stratum-upload-test-~d.sexp" (get-universal-time))))
+    (flet ((post (path body) (raw-post port path body)))
+      (unwind-protect
+           (progn
+             (publish-door server nil "/up" "application/json"
+                           (lambda (req) (setf seen (request-octets req)) "{}") :upload? t)
+             (publish-door server nil "/small" "application/json" (lambda (req) (declare (ignore req)) "{}"))
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (check "an upload arrives whole" (eql (first (post "/up" bytes)) 200))
+             (check "byte for byte, as octets"
+                    (and (typep seen '(simple-array (unsigned-byte 8) (*))) (equalp seen bytes))
+                    (and seen (length seen)))
+             (setf *max-upload-bytes* 1000 *max-request-bytes* 1000)
+             (let ((answer (post "/up" bytes)))
+               (check "an upload over the limit is told why"
+                      (and (eql (first answer) 413) (search "MB" (second answer))) answer))
+             (let ((answer (post "/small" bytes)))
+               (check "any other door has its limit" (eql (first answer) 413) answer))
+             (setf *max-upload-bytes* old-max *max-request-bytes* old-small)
+             (configure-gate! :invites-file file)
+             (with-open-file (out file :direction :output :if-exists :supersede) (terpri out))
+             (let ((answer (post "/up" bytes)))
+               (check "no invite: the gate's page, the body unread"
+                      (and (eql (first answer) 403) (search "private beta" (second answer))) answer))
+             (check "the server still answers after a refusal"
+                    (progn (configure-gate! :invites-file nil)
+                           (eql (first (post "/up" bytes)) 200))))
+        (setf *gate* old-gate *max-upload-bytes* old-max *max-request-bytes* old-small)
+        (when (probe-file file) (delete-file file))
+        (net.aserve:shutdown :server server)))))
+
 (defun test-api ()
   "The Lisp API (api.lisp) and the sandbox the prompt box runs forms
 through: every form the model may write, and the ones it may not."
@@ -1662,7 +1744,7 @@ picture, the reference and the rules."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-api test-prompt
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-api test-prompt
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

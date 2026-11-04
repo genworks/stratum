@@ -223,10 +223,7 @@ wrong, as the other doors answer."
                 (setf result (json-string (json-object "job" (start-prompt-job! documents doc prompt session)))))))
       (serious-condition (e) (setf failure (princ-to-string e))))
     (if failure
-        (net.aserve:with-http-response (req ent :content-type "text/plain"
-                                                :response net.aserve:*response-internal-server-error*)
-          (net.aserve:with-http-body (req ent)
-            (write-string failure (net.aserve:request-reply-stream req))))
+        (reply-text req ent net.aserve:*response-internal-server-error* failure)
         (net.aserve:with-http-response (req ent :content-type "application/json")
           (net.aserve:with-http-body (req ent)
             (write-string result (net.aserve:request-reply-stream req)))))))
@@ -237,10 +234,8 @@ every door under /stratum."
   (net.aserve:publish :path "/stratum/api/prompt" :server server :host host
                       :content-type "application/json"
                       :function (lambda (req ent)
-                                  (if (invite-allowed? req)
-                                      (progn (ensure-invite-cookie! req)
-                                             (handle-prompt req ent))
-                                      (refuse req ent))))
+                                  (when (door-admits? req ent *max-request-bytes*)
+                                    (handle-prompt req ent))))
   (publish-door server host "/stratum/api/reference" "text/markdown; charset=utf-8"
                 (lambda (req) (declare (ignore req)) (api-reference))))
 

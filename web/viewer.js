@@ -2121,10 +2121,51 @@
   // Place adds them as a layer of this one; Save As is the flattened
   // PNG the server writes.
 
+  // What went wrong, for a person: a failed fetch's message starts
+  // with the address and the status.
+  function plainError(e) {
+    return String(e && e.message || e).replace(/^\/stratum\/\S*: \d+ /, '');
+  }
+
+  // A message that cannot be missed, as a dialog with one button;
+  // dialogs here sit over the picture, the status line does not.
+  S.notice = function (title, text) {
+    if (S.noticeDialog) S.noticeDialog.ok();
+    var ok = el('button', { type: 'button', text: 'OK' });
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: title }), el('div', { text: text }),
+      el('div', { 'class': 'st-row st-dialog-buttons' }, [ok])]);
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.noticeDialog = {
+      title: title, text: text,
+      ok: function () { box.remove(); S.noticeDialog = null; }
+    };
+    ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
+  function megabytes(n) { return (n / 1e6).toFixed(1) + ' MB'; }
+
+  // Refuse here what the server would refuse after a long upload: an
+  // image travels as raw pixels, four bytes each, however small its file.
+  function checkImageSize(w, h) {
+    var most = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (w > most || h > most) {
+      throw new Error('This image is ' + w + ' x ' + h + ' pixels, and this browser\'s graphics take at most ' +
+                      most + ' on a side. Make it smaller and try again.');
+    }
+    var limit = doc && doc.maxUploadBytes;
+    if (limit && w * h * 4 > limit) {
+      throw new Error('This image is ' + w + ' x ' + h + ' pixels (' + (w * h / 1e6).toFixed(1) +
+                      ' megapixels), and Stratum takes up to ' + (limit / 4e6).toFixed(1) +
+                      ' megapixels for now. Make it smaller and try again.');
+    }
+  }
+
   S.decodeImage = function (file) {
     return createImageBitmap(file, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
       .then(function (bmp) {
         var w = bmp.width, h = bmp.height;
+        try { checkImageSize(w, h); } catch (e) { bmp.close(); throw e; }
         var tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -2151,6 +2192,7 @@
   function baseName(file) { return (file.name || 'untitled').replace(/\.[^.]*$/, ''); }
 
   S.openImage = function (img, name) {
+    status('sending ' + megabytes(img.bytes.length) + '...');
     return postBytes('open?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height, img.bytes);
   };
 
@@ -2163,6 +2205,10 @@
     status('opening ' + (file.name || 'image') + '...');
     var opened = /\.(stratum|ora)$/i.test(file.name || '')
       ? file.arrayBuffer().then(function (buf) {
+          if (doc && doc.maxUploadBytes && buf.byteLength > doc.maxUploadBytes) {
+            throw new Error('This file is ' + megabytes(buf.byteLength) + ', and Stratum takes up to ' +
+                            megabytes(doc.maxUploadBytes) + ' for now.');
+          }
           return postBytes('load?name=' + encodeURIComponent(baseName(file)), new Uint8Array(buf));
         })
       : S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); });
@@ -2172,7 +2218,10 @@
         try { sessionStorage.setItem('stratum-open-note', 'blend modes set to Normal, not supported here: ' + note); } catch (e) {}
       }
       location.search = '?doc=' + encodeURIComponent(res.doc);
-    }).catch(function (e) { status('open failed: ' + e.message); });
+    }).catch(function (e) {
+      status('open failed');
+      S.notice('Could not open ' + (file.name || 'the file'), plainError(e));
+    });
   };
 
   S.openNote = function () {
@@ -2192,6 +2241,7 @@
 
   S.placeImage = function (img, name) {
     return S.strokesSettled().then(function () {
+      status('sending ' + megabytes(img.bytes.length) + '...');
       return postBytes('place?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height +
                        (S.activeLayer !== null ? '&above=' + S.activeLayer : ''), img.bytes);
     }).then(function (res) {
@@ -2264,7 +2314,10 @@
   S.placeFile = function (file) {
     status('placing ' + (file.name || 'image') + '...');
     return S.decodeImage(file).then(function (img) { return S.placeImage(img, baseName(file)); })
-      .catch(function (e) { status('place failed: ' + e.message); });
+      .catch(function (e) {
+        status('place failed');
+        S.notice('Could not place ' + (file.name || 'the file'), plainError(e));
+      });
   };
 
   S.saveAs = function () {

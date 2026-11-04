@@ -44,6 +44,29 @@ call, so two browsers opening \"demo\" get two documents.")
     (dolist (id gone) (remhash id *sessions*))
     gone))
 
+(defparameter *max-upload-bytes* 100000000
+  "The largest body the upload doors (open, place, load) take: a
+photo of about 25 megapixels as raw RGBA, and what a content network
+in front of the server passes anyway.  The page is told (document-json)
+and says so before it sends anything.")
+
+(defparameter *max-request-bytes* (* 16 1024 1024)
+  "The largest body any other door takes.  Those read their body as a
+string, four bytes a character on SBCL.")
+
+(defparameter *drained-body-bytes* 200000000
+  "How much of a body refused by an invited person is read and dropped
+so the words reach them; past this the connection is closed on it.
+Apart from the door limits on purpose: a body just over any limit must
+still hear why.")
+
+(defparameter *upload-heap-factor* 3
+  "An upload is admitted when the heap has this many times its size
+free: the octets, an undo entry of them, and a render's working room.")
+
+(defvar *upload-octets* nil
+  "The body of the upload being served, read before the lock is taken.")
+
 (defparameter *heap-high-water* 0.7
   "The fraction of the heap in use above which relieve-memory! acts.")
 
@@ -179,6 +202,7 @@ history source taken if it has none (the state at the first request)."
    "mode" (string-downcase (the-object doc color-mode))
    "historyVersion" (the-object doc history-version)
    "selection" (selection-json doc)
+   "maxUploadBytes" *max-upload-bytes*
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
 
@@ -558,13 +582,91 @@ answering the new planVersion and the index of the layer to work on."
 ;;; with its size, so the server needs no decoder; the PNG it writes
 ;;; (export.png) is the flattened picture.
 
+(defun heap-free-bytes ()
+  "Bytes free in the heap where the implementation can say; else nil."
+  #+sbcl (- (sb-ext:dynamic-space-size) (sb-kernel:dynamic-usage))
+  #-sbcl nil)
+
+(defun body-refusal (length limit &key upload?)
+  "Why a body of LENGTH bytes (nil: undeclared) cannot be taken at a
+door of LIMIT bytes, in words for the person sending it; nil when it
+can.  An upload also needs room in the heap, asked again after a
+collection, since the measure counts garbage."
+  (cond ((null length) nil)
+        ((> length limit)
+         (format nil "That is ~,1f MB as sent, and this server takes up to ~,1f MB."
+                 (/ length 1d6) (/ limit 1d6)))
+        ((and upload?
+              (let ((need (* *upload-heap-factor* length)))
+                (flet ((short? () (let ((free (heap-free-bytes))) (and free (< free need)))))
+                  (and (short?) (progn (full-gc) (short?))))))
+         "The server has no room for an image this size just now. Try a smaller one, or try again later.")))
+
+(defparameter *upload-chunk-bytes* (* 4 1024 1024)
+  "How much of an upload one read asks for.")
+
+(defparameter *upload-stall-seconds* 60
+  "How long one chunk of an upload may take before it is given up.")
+
+(defun read-declared-body (req length)
+  "LENGTH bytes of REQ's body, straight from the socket into one octet
+vector.  Not get-request-body-incremental: its read asks for the whole
+of its buffer whatever is left, so the last short piece waits for bytes
+that never come.  A connection that ends or stalls early is an error,
+never a short picture."
+  (let ((out (make-array length :element-type '(unsigned-byte 8)))
+        (sock (net.aserve:request-socket req))
+        (used 0))
+    ;; read now: the reply's keep-alive read must not read it again
+    (setf (net.aserve::request-request-body req) "")
+    (when (net.aserve::request-has-continue-expectation req)
+      (net.aserve::send-100-continue req))
+    (loop while (< used length)
+          do (let ((got (glisp:with-deadline (*upload-stall-seconds*)
+                          (read-sequence out sock :start used
+                                                  :end (min length (+ used *upload-chunk-bytes*))))))
+               (when (<= got used)
+                 (error "The upload ended after ~a of ~a bytes." used length))
+               (setf used got)))
+    out))
+
+(defun read-chunked-body (req limit)
+  "REQ's body of undeclared length as one octet vector; nil when it
+proves longer than LIMIT, the rest read and dropped so the reply can go
+out."
+  (let ((out (make-array (min limit 1048576) :element-type '(unsigned-byte 8)))
+        (used 0)
+        (over? nil))
+    (net.aserve:get-request-body-incremental
+     req
+     (lambda (buffer count)
+       (when (and buffer (plusp count) (not over?))
+         (let ((needed (+ used count)))
+           (cond ((> needed limit) (setf over? t))
+                 (t (when (> needed (length out))
+                      (let ((grown (make-array (min limit (max needed (* 2 (length out))))
+                                               :element-type '(unsigned-byte 8))))
+                        (replace grown out :end2 used)
+                        (setf out grown)))
+                    (replace out buffer :start1 used :end2 count)
+                    (setf used needed))))))
+     :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
+    (and (not over?) (subseq out 0 used))))
+
+(defun read-request-octets (req limit)
+  "The request body as one octet vector: never the string
+get-request-body makes, which with its conversions costs ten times the
+body at its peak.  Nil when it is longer than LIMIT."
+  (let ((declared (request-content-length req)))
+    (cond ((null declared) (read-chunked-body req limit))
+          ((> declared limit) nil)
+          (t (read-declared-body req declared)))))
+
 (defun request-octets (req)
-  "The request body as octets.  aserve hands a binary body over as a
-string of one character per byte."
-  (let ((body (net.aserve:get-request-body req :external-format :octets)))
-    (if (stringp body)
-        (map '(simple-array (unsigned-byte 8) (*)) #'char-code body)
-        (coerce body '(simple-array (unsigned-byte 8) (*))))))
+  "The request body as octets: the upload the door read, or read now."
+  (or *upload-octets*
+      (read-request-octets req *max-upload-bytes*)
+      (error "The body is over ~a bytes." *max-upload-bytes*)))
 
 (defun request-image (req)
   "(values pixels w h): the image in the body -- a PNG file, decoded
@@ -835,6 +937,28 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 (defun page-html ()
   (the-object (or *page* (setf *page* (make-object 'stratum-page))) main-sheet))
 
+(defparameter *response-payload-too-large* (net.aserve::make-resp 413 "Payload Too Large"))
+
+(defun reply-text (req ent response text)
+  "Answer TEXT with RESPONSE and close the connection, so a body the
+door could not read is not read now, outside any handler.  A body
+within reason is dropped first, in pieces, so the words arrive."
+  (drain-body! req *drained-body-bytes*)
+  (net.aserve:with-http-response (req ent :content-type "text/plain" :response response)
+    (close-after-reply! req)
+    (net.aserve:with-http-body (req ent)
+      (write-string text (net.aserve:request-reply-stream req)))))
+
+(defun door-admits? (req ent limit &key upload?)
+  "True when REQ may come in: a live invite, and a body within LIMIT
+that an upload has room for.  Otherwise REQ is answered here, with its
+body unread, and the answer is nil."
+  (cond ((not (invite-allowed? req)) (refuse req ent) nil)
+        (t (ensure-invite-cookie! req)
+           (let ((refusal (body-refusal (request-content-length req) limit :upload? upload?)))
+             (when refusal (reply-text req ent *response-payload-too-large* refusal))
+             (not refusal)))))
+
 (defun reply (req ent content-type thunk)
   "Run THUNK under the lock, then send its string or octets; a failure
 goes back as a 500 carrying the condition's text."
@@ -846,10 +970,7 @@ goes back as a 500 carrying the condition's text."
       (handler-case (setf result (funcall thunk))
         (serious-condition (e) (setf failure (princ-to-string e)))))
     (if failure
-        (net.aserve:with-http-response (req ent :content-type "text/plain"
-                                                :response net.aserve:*response-internal-server-error*)
-          (net.aserve:with-http-body (req ent)
-            (write-string failure (net.aserve:request-reply-stream req))))
+        (reply-text req ent net.aserve:*response-internal-server-error* failure)
         (net.aserve:with-http-response (req ent :content-type content-type)
           (net.aserve:with-http-body (req ent)
             (let ((s (net.aserve:request-reply-stream req)))
@@ -857,21 +978,38 @@ goes back as a 500 carrying the condition's text."
                   (write-string result s)
                   (write-sequence result s))))))))
 
-(defun publish-door (server host path content-type fn)
+(defun serve-door (req ent content-type fn)
+  (reply req ent content-type
+         (lambda ()
+           (let ((*documents* (request-session-table req)))
+             (funcall fn req)))))
+
+(defun serve-upload (req ent content-type fn)
+  "Read the body, outside the lock since a slow link can take minutes
+over it, then serve the door with it in *upload-octets*."
+  (let ((octets nil) (failure nil))
+    (handler-case (setf octets (read-request-octets req *max-upload-bytes*))
+      (serious-condition (e) (setf failure (princ-to-string e))))
+    (cond (failure (reply-text req ent net.aserve:*response-internal-server-error* failure))
+          ((null octets)
+           (reply-text req ent *response-payload-too-large*
+                       (body-refusal (1+ *max-upload-bytes*) *max-upload-bytes*)))
+          (t (let ((*upload-octets* octets))
+               (serve-door req ent content-type fn))))))
+
+(defun publish-door (server host path content-type fn &key upload?)
   "Publish FN, a function of the request answering a string or octets,
 at PATH: behind the invite gate, under the lock, the session's
-documents bound."
+documents bound.  With UPLOAD? the door takes a large binary body."
   (net.aserve:publish :path path :server server :host host
                       :content-type content-type
                       :function (lambda (req ent)
-                                  (if (invite-allowed? req)
-                                      (progn
-                                        (ensure-invite-cookie! req)
-                                        (reply req ent content-type
-                                               (lambda ()
-                                                 (let ((*documents* (request-session-table req)))
-                                                   (funcall fn req)))))
-                                      (refuse req ent)))))
+                                  (when (door-admits? req ent
+                                                      (if upload? *max-upload-bytes* *max-request-bytes*)
+                                                      :upload? upload?)
+                                    (if upload?
+                                        (serve-upload req ent content-type fn)
+                                        (serve-door req ent content-type fn))))))
 
 (defvar *stratum-publishers* nil
   "Functions of (server host) that publish doors of their own when
@@ -882,7 +1020,8 @@ the image's own, called with one argument at its start.")
 (defun publish-stratum! (&key host)
   "Publish the page at /stratum/ and its API under /stratum/api/."
   (gwl:with-all-servers (server)
-    (flet ((pub (path content-type fn) (publish-door server host path content-type fn)))
+    (flet ((pub (path content-type fn &key upload?)
+             (publish-door server host path content-type fn :upload? upload?)))
       ;; the invite link of the private beta (invite.lisp): no gate
       ;; without an invites file
       (invite-gate:publish-invite-door *gate* :server server :host host)
@@ -959,15 +1098,15 @@ the image's own, called with one argument at its start.")
       (pub "/stratum/api/transform" "application/json" #'handle-transform)
       (pub "/stratum/api/clipboard" "application/json" #'handle-clipboard)
       (pub "/stratum/api/resize" "application/json" #'handle-resize)
-      (pub "/stratum/api/open" "application/json" #'handle-open)
-      (pub "/stratum/api/place" "application/json" #'handle-place)
+      (pub "/stratum/api/open" "application/json" #'handle-open :upload? t)
+      (pub "/stratum/api/place" "application/json" #'handle-place :upload? t)
       (pub "/stratum/api/drawing-sources" "application/json" #'handle-drawing-sources)
       (pub "/stratum/api/drawing" "application/json" #'handle-drawing)
       (pub "/stratum/api/close" "application/json" #'handle-close)
       (pub "/stratum/api/new" "application/json" #'handle-new)
       (pub "/stratum/api/save" "application/octet-stream"
            (lambda (req) (document-octets (request-doc req))))
-      (pub "/stratum/api/load" "application/json" #'handle-load)
+      (pub "/stratum/api/load" "application/json" #'handle-load :upload? t)
       (pub "/stratum/api/save.ora" "image/openraster"
            (lambda (req) (document-ora-octets (request-doc req))))
       (dolist (publisher *stratum-publishers*) (funcall publisher server host)))))

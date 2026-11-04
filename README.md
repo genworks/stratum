@@ -281,6 +281,12 @@ after it.  Where the model is reached is `(stratum:configure-agent!
 reached the box shows what its server said, changes nothing, and
 keeps the prompt for another try.
 
+An opened image travels to the server as raw pixels, four bytes each,
+so the limit is in pixels, not in the file's size: 100 MB, about 25
+megapixels (`stratum::*max-upload-bytes*`).  The page says so before it
+sends anything, and the server refuses in words when its heap has no
+room.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file

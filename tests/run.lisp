@@ -1055,12 +1055,22 @@ to alter the pictures."
            (and (> (funcall ink a) 3000) (eq a b) (= (length c) (* 4 160 100)) (> (funcall ink c) 800)
                 (< (funcall ink c) (funcall ink a)))
            (list (funcall ink a) (funcall ink c))))
-  ;; Hidden-line removal is geom-base's exact occlusion test, minutes on
-  ;; the sample's sphere and cylinder; the box is quick.
-  (check "dashed hidden lines draw too, lighter than the visible edges"
-         (let ((p (gen-drawing 100 100 :source "box" :hidden-lines :dashed)))
+  ;; Hidden-line removal on the sample (a sphere, a cylinder and a cone
+  ;; beside the box) takes well under a second; the first version of this
+  ;; check called gen-drawing inside its pixel loop, ten thousand drawings,
+  ;; and read the minutes that took as a stall in geom-base.  Draw once.
+  (let ((start (get-internal-real-time))
+        (p (gen-drawing 100 100 :source "sample" :hidden-lines :dashed)))
+    (check "dashed hidden lines draw too, lighter than the visible edges, and the sample's curved solids draw in seconds, not minutes"
            (and (plusp (loop for i from 3 below (length p) by 4 count (plusp (aref p i))))
-                (plusp (loop for i from 3 below (length p) by 4 count (< 0 (aref p i) 160))))))
+                (plusp (loop for i from 3 below (length p) by 4 count (< 0 (aref p i) 160)))
+                (< (- (get-internal-real-time) start) (* 10 internal-time-units-per-second)))
+           (/ (- (get-internal-real-time) start) internal-time-units-per-second 1.0)))
+  (check "the layer draws through gendl-raster when the image has it (text and filled arrowheads), and through the lines here otherwise"
+         (let ((canvas (gendl-raster-coverage (drawing-svg (drawing-source "box") :projection :top) 64 64 0.05 1.5 nil)))
+           (if (find-package "GENDL-RASTER")
+               (and canvas (= (length canvas) (* 64 64)) (plusp (count-if #'plusp canvas)))
+               (null canvas))))
   (let* ((doc (make-sample-document "parity"))
          (before (the-object doc (render-cpu)))
          (count (length (the-object doc layer-list)))

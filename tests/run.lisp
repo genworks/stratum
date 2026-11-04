@@ -1562,6 +1562,9 @@ no file, no gate."
                   (equal (second (stratum::find-invite token)) "Ada"))
            (check "an unknown token is not" (null (stratum::find-invite "nobody")))
            (check "the gate is on" (stratum::invite-gate?))
+           (check "(stratum:gate) is the gate invite-gate's functions take"
+                  (and (eq (stratum:gate) stratum::*gate*)
+                       (equal (second (invite-gate:find-invite (stratum:gate) token)) "Ada")))
            (let ((second-token (stratum::mint-invite! "Grace")))
              (check "two invites in the report, unused"
                     (equal (mapcar (lambda (r) (list (getf r :name) (getf r :uses))) (stratum::invites-report))

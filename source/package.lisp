@@ -14,4 +14,5 @@
              #:png-octets #:read-png #:read-png-file #:open-png-file #:publish-stratum!
              #:define-dual-function #:dual-functions-js
              #:plan->glsl #:plan->lisp
-             #:place-dabs #:paint-dab #:apply-brush-stroke #:undo-stroke!))
+             #:place-dabs #:paint-dab #:apply-brush-stroke #:undo-stroke!
+             #:gate #:configure-gate! #:mint-invite! #:revoke-invite! #:invites-report))

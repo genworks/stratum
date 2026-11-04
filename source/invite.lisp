@@ -20,6 +20,11 @@
 ;; dev.lisp and ci/run-tests.lisp load invite-gate before Stratum when
 ;; the image does not carry it yet.
 ;;
+;; The operator's forms are exported: (stratum:configure-gate! ...),
+;; (stratum:mint-invite! "Name"), (stratum:revoke-invite! token),
+;; (stratum:invites-report), and (stratum:gate) for invite-gate's own
+;; functions, so one shape serves every application on a server.
+;;
 
 (defvar *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
   "Stratum's invite gate; its invites file is the beta's roster.")
@@ -29,6 +34,10 @@
 point; the gate as it stands."
   (when file? (setf (invite-gate:gate-invites-file *gate*) invites-file))
   (when base? (setf (invite-gate:gate-public-base *gate*) public-base))
+  *gate*)
+
+(defun gate ()
+  "Stratum's gate, for invite-gate's own functions: (invite-gate:mint-invite! (stratum:gate) name)."
   *gate*)
 
 (defun invite-gate? () (invite-gate:gate-on? *gate*))

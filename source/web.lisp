@@ -26,12 +26,6 @@
                    :directory (butlast (pathname-directory base))
                    :defaults base)))
 
-(defvar *documents* (make-hash-table :test 'equal)
-  "The documents of the session being served, by name.  Bound around
-every request to its session's table (request-session-table); the
-global value is the shared pool, which a request without a session
-(?s=) and Lisp callers use.")
-
 (defvar *sessions* (make-hash-table :test 'equal)
   "Session id -> (documents-table . last-touched universal time).  A
 browser keeps its id in its own storage and sends it as ?s= on every
@@ -65,35 +59,39 @@ say (SBCL); nil elsewhere, and then relieve-memory! never acts."
   #-(or sbcl ccl) nil)
 
 (defun relieve-memory! (keep-id)
-  "When the heap is above *heap-high-water*: drop every document's undo
-and redo lists, collect, and while still above it forget the sessions
-touched longest ago, except KEEP-ID's.  Returns what it did, or nil."
+  "When the heap is above *heap-high-water*: collect first, since the
+measure counts garbage not yet collected, and if it is still above,
+drop every document's undo and redo lists, collect, and while still
+above forget the sessions touched longest ago, except KEEP-ID's.
+Returns what it did, or nil."
   (let ((before (heap-used-fraction)))
     (when (and before (> before *heap-high-water*))
-      (let ((done '()))
-        (flet ((drop-history (table)
-                 (maphash (lambda (name doc)
-                            (declare (ignore name))
-                            (the-object doc (set-slot! :undo-entries nil))
-                            (the-object doc (set-slot! :redo-entries nil)))
-                          table)))
-          (drop-history *documents*)
-          (maphash (lambda (id cell) (declare (ignore id)) (drop-history (car cell))) *sessions*)
-          (push :undo-dropped done)
-          (full-gc)
-          (loop while (and (> (heap-used-fraction) *heap-high-water*)
-                           (> (hash-table-count *sessions*) 0))
-                do (let ((oldest nil) (when-touched nil))
-                     (maphash (lambda (id cell)
-                                (unless (equal id keep-id)
-                                  (when (or (null when-touched) (< (cdr cell) when-touched))
-                                    (setf oldest id when-touched (cdr cell)))))
-                              *sessions*)
-                     (unless oldest (return))
-                     (remhash oldest *sessions*)
-                     (push (list :session-forgotten oldest) done)
-                     (full-gc))))
-        (nreverse done)))))
+      (full-gc)
+      (when (> (heap-used-fraction) *heap-high-water*)
+        (let ((done (list :collected)))
+          (flet ((drop-history (table)
+                   (maphash (lambda (name doc)
+                              (declare (ignore name))
+                              (the-object doc (set-slot! :undo-entries nil))
+                              (the-object doc (set-slot! :redo-entries nil)))
+                            table)))
+            (drop-history *documents*)
+            (maphash (lambda (id cell) (declare (ignore id)) (drop-history (car cell))) *sessions*)
+            (push :undo-dropped done)
+            (full-gc)
+            (loop while (and (> (heap-used-fraction) *heap-high-water*)
+                             (> (hash-table-count *sessions*) 0))
+                  do (let ((oldest nil) (when-touched nil))
+                       (maphash (lambda (id cell)
+                                  (unless (equal id keep-id)
+                                    (when (or (null when-touched) (< (cdr cell) when-touched))
+                                      (setf oldest id when-touched (cdr cell)))))
+                                *sessions*)
+                       (unless oldest (return))
+                       (remhash oldest *sessions*)
+                       (push (list :session-forgotten oldest) done)
+                       (full-gc))))
+          (nreverse done))))))
 
 (defun session-table (id)
   "The documents table of session ID, made on first sight and touched
@@ -579,14 +577,6 @@ here (read-png), or raw RGBA8 with W x H from the query."
           (unless (and (< 0 w) (< 0 h) (= (length octets) (* 4 w h)))
             (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
           (values octets w h)))))
-
-(defun unique-document-name (name)
-  "NAME, or NAME-2, NAME-3 ... when a document or a sample already has it."
-  (loop for n from 1
-        for candidate = (if (= n 1) name (format nil "~a-~d" name n))
-        unless (or (gethash candidate *documents*)
-                   (assoc candidate *recipes* :test #'string=))
-          return candidate))
 
 (defun handle-open (req)
   "A new document from the image in the body (a PNG file, or raw RGBA8

@@ -100,3 +100,40 @@ with BACKGROUND, :white, :transparent or an (r g b) list."
                    :layer-specs (ecase layers
                                   (:demo (copy-tree *demo-layers*))
                                   (:stress (stress-layers)))))))
+
+;;; The document registry lives here, after the recipes and before
+;;; every file that opens a document (png, ora-document, web), so a cold
+;;; load meets no forward reference: CI compiles each file in its own
+;;; unit and fails on the warning one would raise.
+
+(defvar *documents* (make-hash-table :test 'equal)
+  "The documents of the session being served, by name.  Bound around
+every request to its session's table (request-session-table, web.lisp);
+the global value is the shared pool, which a request without a session
+(?s=) and Lisp callers use.")
+
+(defun unique-document-name (name)
+  "NAME, or NAME-2, NAME-3 ... when a document or a sample already has it."
+  (loop for n from 1
+        for candidate = (if (= n 1) name (format nil "~a-~d" name n))
+        unless (or (gethash candidate *documents*)
+                   (assoc candidate *recipes* :test #'string=))
+          return candidate))
+
+(defun open-drawing (object &key name (width 1024) (height 768) (projection :trimetric)
+                                 (hidden-lines :draw) (color '(0 0 0)) (margin 0.05) (weight 1.5))
+  "A new document named NAME of a white Background and OBJECT's drawing
+as a layer (drawing.lisp), registered to be served (OBJECT is registered
+as a drawing source under the document's name); the document."
+  (let ((name (unique-document-name (or name "drawing"))))
+    (register-drawing-source name (lambda () object))
+    (setf (gethash name *documents*)
+          (make-object 'image-document
+                       :doc-name name
+                       :doc-width width
+                       :doc-height height
+                       :layer-specs (list (list :kind :raster :name "Background"
+                                                :source (list :solid :color '(255 255 255) :alpha 255))
+                                          (drawing-layer-spec name :projection projection
+                                                                   :hidden-lines hidden-lines
+                                                                   :color color :margin margin :weight weight))))))

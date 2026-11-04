@@ -361,24 +361,6 @@ layer's index."
                      (loop for (k v) on options by #'cddr unless (eq k :above) collect k and collect v))))
     (the-object doc (add-layer! spec above))))
 
-(defun open-drawing (object &key name (width 1024) (height 768) (projection :trimetric)
-                                 (hidden-lines :draw) (color '(0 0 0)) (margin 0.05) (weight 1.5))
-  "A new document named NAME of a white Background and OBJECT's drawing
-as a layer, registered to be served (OBJECT is registered as a drawing
-source under the document's name); the document."
-  (let ((name (unique-document-name (or name "drawing"))))
-    (register-drawing-source name (lambda () object))
-    (setf (gethash name *documents*)
-          (make-object 'image-document
-                       :doc-name name
-                       :doc-width width
-                       :doc-height height
-                       :layer-specs (list (list :kind :raster :name "Background"
-                                                :source (list :solid :color '(255 255 255) :alpha 255))
-                                          (drawing-layer-spec name :projection projection
-                                                                   :hidden-lines hidden-lines
-                                                                   :color color :margin margin :weight weight))))))
-
 ;;; A model to draw out of the box: a bracket of the four primitives.
 
 (define-object drawing-sample (base-object)

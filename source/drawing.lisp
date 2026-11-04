@@ -31,7 +31,8 @@
 ;;; The registry: a name to a function that makes the model, and the
 ;;; model once made.
 
-(defparameter *drawing-sources* (make-hash-table :test 'equal))
+(defvar *drawing-sources* (make-hash-table :test 'equal)
+  "Name -> (maker . model): a defvar, so a reload keeps what was registered.")
 
 (defun register-drawing-source (name maker)
   "Register the Gendl model MAKER makes (a function of no arguments
@@ -308,15 +309,33 @@ coverage as alpha."
           (let ((o (* 4 i)))
             (setf (aref out o) r (aref out (+ o 1)) g (aref out (+ o 2)) b (aref out (+ o 3)) a)))))))
 
+;;; Gendl's own rasterizer (gendl-raster, in gwl-graphics since
+;;; 2026-11-03) draws the same lines and also fills the arrowheads and
+;;; draws the text -- view labels, dimensions -- in the Hershey simplex
+;;; stroke font.  An image that has it does the whole job; an image
+;;; without it (the published images before then) gets the lines above.
+
+(defun gendl-raster-coverage (svg width height margin weight sheet?)
+  "The coverage canvas gendl-raster draws for SVG at WIDTH x HEIGHT, or
+nil when the image has no gendl-raster."
+  (let ((renderer (and (find-package "GENDL-RASTER")
+                       (find-symbol "RENDER-SVG-COVERAGE" "GENDL-RASTER"))))
+    (and renderer (fboundp renderer)
+         (funcall renderer svg :size (list width height)
+                               :fit (if sheet? nil (float margin 1d0))
+                               :line-weight (float weight 1d0)))))
+
 (defun svg-rgba (svg width height &key (color '(0 0 0)) (margin 0.05d0) (weight 1.5d0) sheet?)
   "The drawing SVG rasterized as a WIDTH x HEIGHT RGBA8 layer: ink of
 COLOR, alpha from coverage; the drawing's extent fitted with MARGIN,
-or with SHEET? the whole sheet."
-  (multiple-value-bind (segments sw sh) (svg-segments svg)
-    (coverage-rgba (segments-coverage segments width height
-                                      :margin (float margin 1d0) :weight (float weight 1d0)
-                                      :sheet (and sheet? (list sw sh)))
-                   width height :color color)))
+or with SHEET? the whole sheet.  Through gendl-raster (text and filled
+arrowheads too) when the image has it."
+  (coverage-rgba (or (gendl-raster-coverage svg width height margin weight sheet?)
+                     (multiple-value-bind (segments sw sh) (svg-segments svg)
+                       (segments-coverage segments width height
+                                          :margin (float margin 1d0) :weight (float weight 1d0)
+                                          :sheet (and sheet? (list sw sh)))))
+                 width height :color color))
 
 ;;; The generator: (:drawing :source NAME ...) as a layer's source.
 

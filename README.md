@@ -347,7 +347,11 @@ model registered with `register-drawing-source`, so it draws afresh
 at any size; `open-drawing` makes a document of a model from Lisp,
 `place-drawing!` adds one to a document. No Ghostscript and no
 subprocess: the sample assembly draws in about a tenth of a second.
-Text in the drawing (view labels, dimensions) is not drawn yet.
+On a Gendl that has its own in-process rasterizer (`gendl-raster` in
+gwl-graphics, from November 2026) the layer is drawn by that instead,
+which also fills the arrowheads and draws the text of dimensions and
+labels in the Hershey simplex stroke font; an older Gendl draws the
+lines alone.
 
 For interchange with other editors there is OpenRaster, the layered
 file of Krita, GIMP, MyPaint and Scribus (`.ora`, openraster.org):

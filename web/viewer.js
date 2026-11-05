@@ -135,8 +135,87 @@
 
   // Pixels go up one layer at a time, so only one layer's bytes are in
   // flight at once (a 4K layer is 33 MB).
+  // What the layer and mask textures hold, by texture index: the content
+  // stamp of each (pixelStamp and maskStamp in the document's JSON).
+  // Equal stamps are equal bytes, so after any change only content new
+  // to the page is fetched: a layer of a photograph is tens of megabytes.
+  var held = { w: 0, h: 0, rasters: [], masks: [] };
+
+  function wantedStamps(d) {
+    var rasters = [], masks = [];
+    d.layers.forEach(function (L) {
+      if (L.kind === 'raster') rasters[L.texIndex] = L.pixelStamp;
+      if (L.mask) masks[L.maskIndex] = L.maskStamp;
+    });
+    return { rasters: rasters, masks: masks };
+  }
+
+  // One array texture brought to the stamps WANT.  Content the old
+  // texture holds at another index is copied across on the GPU, into a
+  // new texture; content it holds in place stays; the rest is fetched.
+  function syncArray(oldTex, have, want, internal, path, format, w, h) {
+    function holds(j) { return want[j] != null && want[j] === have[j]; }
+    function found(j) { return want[j] == null ? -1 : have.indexOf(want[j]); }
+    var sameCount = !!oldTex && have.length === want.length, j;
+    var inPlace = sameCount;
+    for (j = 0; j < want.length && inPlace; j++) inPlace = holds(j) || found(j) < 0;
+    var tex = inPlace ? oldTex : arrayTexture(internal, w, h, want.length);
+    var chain = Promise.resolve(), touched = !inPlace;
+    want.forEach(function (stamp, j) {
+      if (inPlace && holds(j)) return;
+      touched = true;
+      var i = inPlace ? -1 : found(j);
+      if (i >= 0) {
+        chain = chain.then(function () {
+          var fbo = gl.createFramebuffer();
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo);
+          gl.framebufferTextureLayer(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, oldTex, 0, i);
+          gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+          gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, 0, 0, w, h);
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+          gl.deleteFramebuffer(fbo);
+          S.stats.pixelCopies = (S.stats.pixelCopies || 0) + 1;
+        });
+      } else {
+        chain = chain.then(function () {
+          return fetchBytes(api(path + '?i=' + j)).then(function (bytes) {
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+            gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, format, gl.UNSIGNED_BYTE, bytes);
+            S.stats.pixelFetches = (S.stats.pixelFetches || 0) + 1;
+          });
+        });
+      }
+    });
+    return chain.then(function () {
+      if (tex !== oldTex && oldTex) gl.deleteTexture(oldTex);
+      if (touched) {
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+        gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+      }
+      return tex;
+    });
+  }
+
+  // The textures brought up to date with the document as the server now
+  // describes it; everything, when the page holds nothing of this size.
+  function syncPixels() {
+    var w = doc.width, h = doc.height, want = wantedStamps(doc);
+    if (!texLayers || !texMasks || held.w !== w || held.h !== h) return uploadPixels();
+    return syncArray(texLayers, held.rasters, want.rasters, gl.SRGB8_ALPHA8, 'raster', gl.RGBA, w, h)
+      .then(function (tex) {
+        texLayers = tex;
+        held.rasters = want.rasters;
+        return syncArray(texMasks, held.masks, want.masks, gl.R8, 'mask', gl.RED, w, h);
+      }).then(function (tex) {
+        texMasks = tex;
+        held.masks = want.masks;
+      });
+  }
+
   function uploadPixels() {
-    var w = doc.width, h = doc.height;
+    var w = doc.width, h = doc.height, want = wantedStamps(doc);
+    held = { w: 0, h: 0, rasters: [], masks: [] };
     if (texLayers) gl.deleteTexture(texLayers);
     if (texMasks) gl.deleteTexture(texMasks);
     texLayers = arrayTexture(gl.SRGB8_ALPHA8, w, h, doc.rasterCount);
@@ -147,7 +226,11 @@
       chain = chain.then((function (i) {
         return function () {
           status('loading layer ' + (i + 1) + ' of ' + doc.rasterCount);
-          return fetchBytes(api('raster?i=' + i)).then(function (bytes) {
+          var url = api('raster?i=' + i);
+          return takeStashed(url, w * h * 4).then(function (kept) {
+            if (kept) S.stashed++;
+            return kept || fetchBytes(url);
+          }).then(function (bytes) {
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
             gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
           });
@@ -169,6 +252,7 @@
       gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
       gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+      held = { w: w, h: h, rasters: want.rasters, masks: want.masks };
     });
   }
 
@@ -1077,12 +1161,15 @@
       applyMode();
       return Promise.all(res.group.map(tookRect)).then(function () { status(); });
     }
+    // the rectangle is fetched here, so the texture holds the new content
     if (res.target === 'mask') {
       doc.layers[res.layer].maskVersion = res.maskVersion;
+      doc.layers[res.layer].maskStamp = held.masks[res.maskIndex] = res.maskStamp;
       S.refreshMaskThumb(res.maskIndex);
       return S.uploadMaskRect(res.maskIndex, res.x, res.y, res.w, res.h);
     }
     doc.layers[res.layer].paintVersion = res.paintVersion;
+    doc.layers[res.layer].pixelStamp = held.rasters[res.texIndex] = res.pixelStamp;
     S.refreshThumb(res.texIndex);
     return S.uploadRect(res.texIndex, res.x, res.y, res.w, res.h);
   }
@@ -1247,19 +1334,18 @@
     postTimers[key] = setTimeout(function () { post(body); }, 150);
   }
 
-  // A plan change brings a new shader; the pixels stay where they are
-  // unless the raster or mask count moved.  A change of the stack
+  // A plan change brings a new shader; of the pixels, only content the
+  // page does not hold is fetched (syncPixels).  A change of the stack
   // itself (REBUILD_PANEL) also remakes the layer panel, whose rows
   // would otherwise hold the old layers.
   function reloadStructure(rebuildPanel) {
     return fetchJSON(api('doc')).then(function (d) {
-      var repixel = d.rasterCount !== doc.rasterCount || d.maskCount !== doc.maskCount;
       doc = d;
       buildProgram(doc.shader);
       syncOpacity();
       uploadLuts();
       if (rebuildPanel) buildPanel();
-      return repixel ? uploadPixels() : null;
+      return syncPixels();
     }).then(function () { status(); requestDraw(); });
   }
 
@@ -2191,9 +2277,68 @@
 
   function baseName(file) { return (file.name || 'untitled').replace(/\.[^.]*$/, ''); }
 
+  // An image goes up as rows of differences, each byte less the same
+  // channel of the pixel to its left, deflated by the browser's own
+  // compressor: every pixel exact, at about a fifth of the raw bytes
+  // for a photograph.  Three bytes a pixel when nothing is transparent.
+  // Without the compressor (an old browser) the raw pixels go as before.
+  S.packPixels = function (img) {
+    if (typeof CompressionStream === 'undefined') return Promise.resolve({ body: img.bytes, enc: '' });
+    var px = img.bytes, w = img.width, h = img.height, n = w * h, opaque = true;
+    for (var a = 3; a < px.length && opaque; a += 4) opaque = px[a] === 255;
+    var channels = opaque ? 3 : 4;
+    var out = new Uint8Array(n * channels);
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var i = (y * w + x) * 4, o = (y * w + x) * channels;
+        for (var c = 0; c < channels; c++) out[o + c] = (px[i + c] - (x > 0 ? px[i - 4 + c] : 0)) & 255;
+      }
+    }
+    var stream = new Blob([out]).stream().pipeThrough(new CompressionStream('deflate'));
+    return new Response(stream).arrayBuffer().then(function (buf) {
+      return { body: new Uint8Array(buf), enc: '&enc=sub' + channels };
+    });
+  };
+
+  function postImage(path, img) {
+    status('packing ' + img.width + ' x ' + img.height + '...');
+    return S.packPixels(img).then(function (packed) {
+      status('sending ' + megabytes(packed.body.length) + '...');
+      return postBytes(path + '&w=' + img.width + '&h=' + img.height + packed.enc, packed.body);
+    });
+  }
+
+  // The page reloads on a document it has just opened and would fetch
+  // back the very pixels it sent.  Where the browser has cache storage
+  // (a secure page), they wait there for the reload, under the address
+  // it will ask; uploadPixels takes them from there and empties it.
+  var STASH = 'stratum-opened';
+  function stashPixels(name, bytes) {
+    if (!window.caches) return Promise.resolve();
+    return caches.open(STASH).then(function (cache) {
+      return cache.put(apiFor(name, 'raster?i=0'),
+                       new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } }));
+    }).catch(function () {});
+  }
+  function takeStashed(url, length) {
+    if (!window.caches) return Promise.resolve(null);
+    return caches.open(STASH).then(function (cache) {
+      return cache.match(url).then(function (res) {
+        if (!res) return null;
+        return res.arrayBuffer().then(function (buf) {
+          return cache.delete(url).then(function () {
+            return buf.byteLength === length ? new Uint8Array(buf) : null;
+          });
+        });
+      });
+    }).catch(function () { return null; });
+  }
+  S.stashed = 0;
+
   S.openImage = function (img, name) {
-    status('sending ' + megabytes(img.bytes.length) + '...');
-    return postBytes('open?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height, img.bytes);
+    return postImage('open?name=' + encodeURIComponent(name), img).then(function (res) {
+      return stashPixels(res.doc, img.bytes).then(function () { return res; });
+    });
   };
 
   // A .stratum file or an OpenRaster .ora file goes to the server
@@ -2241,9 +2386,8 @@
 
   S.placeImage = function (img, name) {
     return S.strokesSettled().then(function () {
-      status('sending ' + megabytes(img.bytes.length) + '...');
-      return postBytes('place?name=' + encodeURIComponent(name) + '&w=' + img.width + '&h=' + img.height +
-                       (S.activeLayer !== null ? '&above=' + S.activeLayer : ''), img.bytes);
+      return postImage('place?name=' + encodeURIComponent(name) +
+                       (S.activeLayer !== null ? '&above=' + S.activeLayer : ''), img);
     }).then(function (res) {
       S.activeLayer = res.active;
       S.undoDepth = 0;
@@ -4255,6 +4399,41 @@
               doc.layers.length === count && renderDiff(before, S.renderExact()).maxDiff === 0);
       });
     }).then(function () {
+      // Only content new to the page crosses the network (syncPixels):
+      // an adjustment layer fetches no pixels, a new raster layer its
+      // own alone with the rest copied on the GPU, a move to the bottom
+      // (every raster layer at a new index) none at all; the GPU still
+      // shows the CPU's picture, and the deletes give it back.
+      function fetched() { return S.stats.pixelFetches || 0; }
+      function copied() { return S.stats.pixelCopies || 0; }
+      var before = S.renderExact(), count = doc.layers.length, rasters = doc.rasterCount;
+      var f = fetched(), c = copied();
+      return S.layerOp({ op: 'add', kind: 'curves', above: count - 1 }).then(function () {
+        check('an adjustment layer added fetches no pixels',
+              fetched() === f && copied() === c, { fetched: fetched() - f, copied: copied() - c });
+        return S.layerOp({ op: 'add', kind: 'raster', above: count });
+      }).then(function () {
+        check('a raster layer added fetches its own pixels alone; the rest are copied on the GPU',
+              fetched() === f + 1 && copied() === c + rasters, { fetched: fetched() - f, copied: copied() - c });
+        f = fetched(); c = copied();
+        return S.layerOp({ op: 'move', layer: doc.layers.length - 1, delta: -doc.layers.length });
+      }).then(function () {
+        check('a layer moved to the bottom fetches nothing: every raster layer is copied to its new place',
+              fetched() === f && copied() === c + rasters + 1 && doc.layers[0].kind === 'raster',
+              { fetched: fetched() - f, copied: copied() - c });
+        return S.parity();
+      }).then(function (p) {
+        check('after the stack edits the GPU shows the CPU picture', p.maxDiff <= 1, p);
+        f = fetched();
+        return S.layerOp({ op: 'delete', layer: 0 });
+      }).then(function () {
+        return S.layerOp({ op: 'delete', layer: doc.layers.length - 1 });
+      }).then(function () {
+        check('deleting both gives the picture back exactly, with nothing fetched',
+              doc.layers.length === count && fetched() === f && renderDiff(before, S.renderExact()).maxDiff === 0,
+              { layers: doc.layers.length, fetched: fetched() - f });
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -4297,7 +4476,8 @@
   var promptLog = null;
 
   // The page brought up to date with the server after changes made
-  // outside its own calls: the structure, every pixel, the selection.
+  // outside its own calls: the structure, the selection, and whatever
+  // pixels the page does not already hold.
   S.refreshAll = function () {
     return fetchJSON(api('doc')).then(function (d) {
       doc = d;
@@ -4308,7 +4488,7 @@
       S.undoDepth = doc.undoDepth;
       S.redoDepth = doc.redoDepth;
       buildPanel();
-      return uploadPixels();
+      return syncPixels();
     }).then(function () {
       return loadSelection(doc.selection);
     }).then(function () { status(); requestDraw(); });
@@ -4425,6 +4605,8 @@
       buildPanel();
       return uploadPixels();
     }).then(function () {
+      // whatever a failed open left waiting for a reload that never came
+      if (window.caches) caches.delete(STASH).catch(function () {});
       return loadSelection(doc.selection);
     }).then(function () {
       status();

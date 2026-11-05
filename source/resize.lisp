@@ -102,7 +102,7 @@ in premultiplied linear light.  The same size comes back unchanged."
   "DOC's layer specs with every raster layer's pixels and every mask's
 bytes written in, as they are now."
   (mapcar (lambda (layer)
-            (let ((spec (the-object layer spec-now)))
+            (let ((spec (without-stamps (the-object layer spec-now))))
               (when (eql (the-object layer kind) :raster)
                 (setf spec (plist-merge (list :pixels (the-object layer pixels) :source '(:solid)) spec)))
               (when (the-object layer has-mask?)

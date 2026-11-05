@@ -281,11 +281,22 @@ after it.  Where the model is reached is `(stratum:configure-agent!
 reached the box shows what its server said, changes nothing, and
 keeps the prompt for another try.
 
-An opened image travels to the server as raw pixels, four bytes each,
-so the limit is in pixels, not in the file's size: 100 MB, about 25
-megapixels (`stratum::*max-upload-bytes*`).  The page says so before it
-sends anything, and the server refuses in words when its heap has no
-room.
+The browser decodes an opened image and sends its pixels as rows of
+differences (each byte less the same channel of the pixel to its
+left), deflated by the browser's own compressor: every pixel exact, at
+about a fifth of the raw bytes for a photograph.  The limit is on the
+decoded image, not the file: 100 MB of RGBA, about 25 megapixels
+(`stratum::*max-upload-bytes*`).  The page says so before it sends
+anything, and the server refuses in words when its heap has no room.
+On a secure page the reload that follows takes the pixels it has just
+sent from the browser's cache storage instead of fetching them back.
+
+Every raster layer's pixels and every mask carry a content stamp in
+the document's JSON (`pixelStamp`, `maskStamp`): equal stamps are
+equal bytes.  After any change the page fetches only content new to
+it, and moves what it already holds between texture layers on the
+GPU, so adding an adjustment layer or reordering the stack of a
+photograph sends no pixels at all.
 
 ### Private beta: invite links
 

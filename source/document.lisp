@@ -32,6 +32,29 @@
             do (setf result (append result (list k v))))
     result))
 
+;;; Content stamps.  The page keeps every layer's pixels on its GPU and
+;;; must know after any change which of them to fetch again; a 5184 x
+;;; 3456 layer is 72 MB.  Each raster layer's pixels and each mask carry
+;;; a stamp, a number no other content has had: equal stamps mean equal
+;;; bytes.  A stamp is renewed whenever the version counter moves (a
+;;; stroke, a filter, an undo), and rides in the spec across a change of
+;;; the stack, which makes every layer object anew -- but only while the
+;;; spec still holds the very array (and source) the stamp was given
+;;; for, so a spec copied and given other pixels can never keep it.
+
+(defvar *content-stamp* (* 1000 (get-universal-time))
+  "The last content stamp given out.")
+
+(defun next-content-stamp ()
+  (incf *content-stamp*))
+
+(defun without-stamps (spec)
+  "SPEC less its content stamps, which hold the arrays themselves: for
+what is written to a file or made into another document."
+  (loop for (key value) on spec by #'cddr
+        unless (member key '(:pixel-stamp :mask-stamp))
+          append (list key value)))
+
 (define-object image-layer ()
   :documentation
   (:description "What every layer of an image-document has, from its
@@ -62,6 +85,14 @@ never the plan."
                              (generate-mask (the mask-spec) (the doc-width) (the doc-height))))))
    (effective-opacity (if (the visible?) (coerce (the opacity) 'double-float) 0.0))
    (mask-index (position self (the parent masked-layers)))
+   ("Integer, or nil without a mask.  The mask's content stamp (see above)."
+    mask-stamp (when (the has-mask?)
+                 (let ((kept (getf (the spec) :mask-stamp)))
+                   (if (and (zerop (the mask-version)) kept
+                            (eq (second kept) (the own-mask))
+                            (eq (third kept) (the mask-spec)))
+                       (first kept)
+                       (next-content-stamp)))))
    ("List of keywords. The numeric settings the page shows as sliders and
 may set; each is a settable slot of this layer."
     setting-names nil)
@@ -83,6 +114,8 @@ layer carries across one."
     (plist-merge (list* :kind (the kind) :name (the layer-name)
                         :opacity (the opacity) :visible? (the visible?)
                         :mask (the mask-spec) :mask-pixels (the own-mask)
+                        :mask-stamp (when (the has-mask?)
+                                      (list (the mask-stamp) (the own-mask) (the mask-spec)))
                         (the own-state))
                  (the spec)))
 
@@ -150,7 +183,15 @@ rectangles instead (see brush.lisp)."
    (texture-index (position self (the parent raster-layers)))
    (plan-entry (list :raster :tex (the texture-index) :blend (the blend-mode)
                      :mask (the mask-index) :param (the index)))
-   (own-state (list :blend (the blend-mode) :pixels (the own-pixels))))
+   ("Integer.  The pixels' content stamp (see above)."
+    pixel-stamp (let ((kept (getf (the spec) :pixel-stamp)))
+                  (if (and (zerop (the paint-version)) kept
+                           (eq (second kept) (the own-pixels))
+                           (eq (third kept) (the source)))
+                      (first kept)
+                      (next-content-stamp))))
+   (own-state (list :blend (the blend-mode) :pixels (the own-pixels)
+                    :pixel-stamp (list (the pixel-stamp) (the own-pixels) (the source)))))
 
   :functions
   ((ensure-own-pixels!
@@ -387,10 +428,14 @@ than the ends; its new index."
    (duplicate-layer!
     (i)
     "A copy of layer I just above it, with its own copy of any painted
-pixels; the copy's index."
+pixels and of any painted mask; the copy's index."
     (let* ((spec (the (layer i) spec-now))
            (copy (plist-merge (list :name (format nil "~a copy" (getf spec :name))
-                                    :pixels (and (getf spec :pixels) (copy-seq (getf spec :pixels))))
+                                    :pixels (and (getf spec :pixels) (copy-seq (getf spec :pixels)))
+                                    ;; its own buffer: a stroke on one mask
+                                    ;; painted the other's as well
+                                    :mask-pixels (and (getf spec :mask-pixels)
+                                                      (copy-seq (getf spec :mask-pixels))))
                               spec)))
       (the (add-layer! copy i))))
 

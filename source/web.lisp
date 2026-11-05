@@ -171,6 +171,8 @@ history source taken if it has none (the state at the first request)."
      "texIndex" (when (eql kind :raster) (the-object layer texture-index))
      "paintVersion" (when (eql kind :raster) (the-object layer paint-version))
      "maskVersion" (the-object layer mask-version)
+     "pixelStamp" (when (eql kind :raster) (the-object layer pixel-stamp))
+     "maskStamp" (the-object layer mask-stamp)
      "lutRow" (when (typep layer 'lut-layer) (the-object layer lut-row))
      "settings" (let ((names (the-object layer setting-names)))
                   (when names
@@ -275,6 +277,8 @@ mask index)."
                "x" (first rect) "y" (second rect) "w" (third rect) "h" (fourth rect)
                "paintVersion" (if (eql (the-object layer kind) :raster) (the-object layer paint-version) 0)
                "maskVersion" (the-object layer mask-version)
+               "pixelStamp" (when (eql (the-object layer kind) :raster) (the-object layer pixel-stamp))
+               "maskStamp" (the-object layer mask-stamp)
                "undoDepth" (length (the-object doc undo-entries))
                "redoDepth" (length (the-object doc redo-entries))))
 
@@ -668,17 +672,76 @@ body at its peak.  Nil when it is longer than LIMIT."
       (read-request-octets req *max-upload-bytes*)
       (error "The body is over ~a bytes." *max-upload-bytes*)))
 
+;;; The page sends an image as rows of differences, each byte less the
+;;; same channel of the pixel to its left, deflated by the browser's own
+;;; compressor (?enc=sub3 for an opaque image at three bytes a pixel,
+;;; sub4 with alpha): every pixel exact at about a fifth of the raw
+;;; bytes for a photograph (5184 x 3456: 72 MB raw, 14 MB so).
+
+(defun inflate-exactly (octets count)
+  "COUNT bytes inflated from the zlib stream OCTETS, into a vector made
+for them: a stream holding fewer or more is an error, so a body cannot
+have the server allocate past what its stated size admits."
+  (let ((out (make-array count :element-type '(unsigned-byte 8)))
+        (state (chipz:make-dstate 'chipz:zlib)))
+    (multiple-value-bind (consumed produced) (chipz:decompress out state octets)
+      (unless (= produced count)
+        (error "The image's data ended after ~a of ~a bytes." produced count))
+      (let ((scratch (make-array 16 :element-type '(unsigned-byte 8))))
+        (when (plusp (nth-value 1 (chipz:decompress scratch state octets :input-start consumed)))
+          (error "The image's data runs past its stated size.")))
+      out)))
+
+(defun unfilter-rows (filtered w h channels)
+  "RGBA8 of W x H from FILTERED, rows of CHANNELS bytes a pixel (3:
+opaque) in which each byte is the difference from the same channel of
+the pixel to its left."
+  (let ((out (make-rgba w h)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) filtered out)
+             (type fixnum w h channels))
+    (parallel-ranges
+     h
+     (lambda (start end)
+       (declare (type fixnum start end))
+       (loop for y of-type fixnum from start below end
+             do (dotimes (x w)
+                  (let ((i (* channels (+ x (* y w))))
+                        (o (* 4 (+ x (* y w)))))
+                    (dotimes (c channels)
+                      (setf (aref out (+ o c))
+                            (logand 255 (+ (aref filtered (+ i c))
+                                           (if (> x 0) (aref out (+ o -4 c)) 0)))))
+                    (when (= channels 3) (setf (aref out (+ o 3)) 255)))))))
+    out))
+
+(defun ensure-room (bytes)
+  "An error in words unless the heap has room for BYTES of image and
+what working on it takes."
+  (flet ((short? () (let ((free (heap-free-bytes)))
+                      (and free (< free (* *upload-heap-factor* bytes))))))
+    (when (and (short?) (progn (full-gc) (short?)))
+      (error "The server has no room for an image this size just now. Try a smaller one, or try again later."))))
+
 (defun request-image (req)
   "(values pixels w h): the image in the body -- a PNG file, decoded
-here (read-png), or raw RGBA8 with W x H from the query."
+here (read-png); or with W x H from the query, rows of differences
+deflated (?enc=sub3 or sub4, see above) or raw RGBA8."
   (let ((octets (request-octets req)))
     (if (png-octets-p octets)
         (read-png octets)
         (let ((w (parse-integer (or (net.aserve:request-query-value "w" req) "0")))
-              (h (parse-integer (or (net.aserve:request-query-value "h" req) "0"))))
-          (unless (and (< 0 w) (< 0 h) (= (length octets) (* 4 w h)))
-            (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
-          (values octets w h)))))
+              (h (parse-integer (or (net.aserve:request-query-value "h" req) "0")))
+              (enc (net.aserve:request-query-value "enc" req)))
+          (unless (and (< 0 w) (< 0 h) (<= (* 4 w h) *max-upload-bytes*))
+            (error "An image of ~a x ~a is not one this server takes." w h))
+          (cond ((member enc '("sub3" "sub4") :test #'equal)
+                 (let ((channels (if (equal enc "sub3") 3 4)))
+                   (ensure-room (* 4 w h))
+                   (values (unfilter-rows (inflate-exactly octets (* channels w h)) w h channels) w h)))
+                (t
+                 (unless (= (length octets) (* 4 w h))
+                   (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
+                 (values octets w h)))))))
 
 (defun handle-open (req)
   "A new document from the image in the body (a PNG file, or raw RGBA8

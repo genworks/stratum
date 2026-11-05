@@ -1646,6 +1646,60 @@ out of memory failing alone."
                results)))
     (fmakunbound operator)))
 
+(defun test-stamps ()
+  "Content stamps: equal stamps are equal bytes, across every change of
+the stack, and a stamp never outlives its pixels."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal)))
+    (stratum-api:use-document "parity")
+    (flet ((stamps ()
+             (mapcar (lambda (l)
+                       (list (and (eql (the-object l kind) :raster) (the-object l pixel-stamp))
+                             (the-object l mask-stamp)))
+                     (the-object stratum-api:*document* layer-list)))
+           (doc () stratum-api:*document*))
+      (let ((start (stamps)))
+        (check "every raster layer and every mask has a stamp of its own"
+               (let ((all (remove nil (apply #'append start))))
+                 (and (= (length all) (+ (length (the-object (doc) raster-layers))
+                                         (length (the-object (doc) masked-layers))))
+                      (= (length all) (length (remove-duplicates all)))))
+               start)
+        (stratum-api:add-layer :curves :name "Stamp test")
+        (check "an adjustment layer added renews no stamp"
+               (equal (butlast (stamps)) start) (stamps))
+        (stratum-api:levels 0 :gamma 1.2)
+        (let ((after (butlast (stamps))))
+          (check "a filter renews its layer's stamp alone"
+                 (and (/= (first (first after)) (first (first start)))
+                      (equal (rest after) (rest start)))
+                 after)
+          (stratum-api:move-layer 0 1)
+          (check "a move carries each stamp with its layer"
+                 (and (equal (first (stamps)) (second after)) (equal (second (stamps)) (first after))))
+          (stratum-api:move-layer 1 -1))
+        (let ((painted (first (first (stamps)))))
+          (stratum-api:duplicate-layer 0)
+          (check "a painted layer's copy has pixels and a stamp of its own"
+                 (and (= (first (first (stamps))) painted)
+                      (/= (first (second (stamps))) painted)
+                      (not (eq (the-object (doc) (layer 0) pixels) (the-object (doc) (layer 1) pixels)))
+                      (equalp (the-object (doc) (layer 0) pixels) (the-object (doc) (layer 1) pixels)))))
+        ;; a mask painted, then its layer copied: two buffers, two stamps
+        (let ((masked (position-if (lambda (l) (the-object l has-mask?)) (the-object (doc) layer-list))))
+          (apply-brush-stroke (the-object (doc) (layer masked))
+                              (list :points '((40 40) (90 60)) :radius 12 :color '(0 0 0))
+                              :target :mask)
+          (stratum-api:duplicate-layer masked)
+          (let ((a (the-object (doc) (layer masked))) (b (the-object (doc) (layer (1+ masked)))))
+            (check "a painted mask's copy has a buffer and a stamp of its own"
+                   (and (not (eq (the-object a mask-pixels) (the-object b mask-pixels)))
+                        (equalp (the-object a mask-pixels) (the-object b mask-pixels))
+                        (/= (the-object a mask-stamp) (the-object b mask-stamp))))))
+        (check "a saved document carries no stamp"
+               (notany (lambda (spec) (or (getf spec :pixel-stamp) (getf spec :mask-stamp)))
+                       (materialized-specs (doc))))))))
+
 (defun free-port ()
   "A port nothing listens on just now."
   (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
@@ -1712,6 +1766,35 @@ no invite gets the gate's page with the body unread."
              (check "byte for byte, as octets"
                     (and (typep seen '(simple-array (unsigned-byte 8) (*))) (equalp seen bytes))
                     (and seen (length seen)))
+             ;; an image as the page sends it: rows of differences, deflated
+             (let* ((w 31) (h 17)
+                    (rgba (let ((v (test-noise (* 4 w h))))
+                            (loop for i from 3 below (length v) by 4 do (setf (aref v i) 255))
+                            v))
+                    (image nil))
+               (flet ((packed (channels)
+                        (let ((rows (make-array (* channels w h) :element-type '(unsigned-byte 8))))
+                          (dotimes (y h)
+                            (dotimes (x w)
+                              (dotimes (c channels)
+                                (setf (aref rows (+ c (* channels (+ x (* y w)))))
+                                      (logand 255 (- (aref rgba (+ c (* 4 (+ x (* y w)))))
+                                                     (if (> x 0) (aref rgba (+ c (* 4 (+ x -1 (* y w))))) 0)))))))
+                          (coerce (deflate-octets rows) '(simple-array (unsigned-byte 8) (*)))))
+                      (path (enc &optional (height h)) (format nil "/img?w=~d&h=~d&enc=~a" w height enc)))
+                 (publish-door server nil "/img" "application/json"
+                               (lambda (req) (setf image (request-image req)) "{}") :upload? t)
+                 (check "rows of differences, three bytes a pixel, come back as the image"
+                        (and (eql (first (post (path "sub3") (packed 3))) 200) (equalp image rgba)))
+                 (setf (aref rgba 3) 7 (aref rgba 131) 0)
+                 (check "four bytes a pixel, with its alpha"
+                        (and (eql (first (post (path "sub4") (packed 4))) 200) (equalp image rgba)))
+                 (let ((answer (post (path "sub3" (1+ h)) (packed 3))))
+                   (check "data shorter than its stated size is refused"
+                          (and (eql (first answer) 500) (search "ended after" (second answer))) answer))
+                 (let ((answer (post (path "sub3" (1- h)) (packed 3))))
+                   (check "data longer than its stated size is refused"
+                          (and (eql (first answer) 500) (search "runs past" (second answer))) answer))))
              (setf *max-upload-bytes* 1000 *max-request-bytes* 1000)
              (let ((answer (post "/up" bytes)))
                (check "an upload over the limit is told why"
@@ -1825,7 +1908,7 @@ picture, the reference and the rules."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-api test-prompt
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

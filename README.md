@@ -45,7 +45,9 @@ slider is dragged exactly as the server does, equal to the last bit.
 
 Compositing happens in linear light on premultiplied color, following
 the W3C Compositing and Blending formulas (normal, multiply, screen,
-add). Raster layers are stored as sRGB RGBA8 with straight alpha. The
+add, and color: the layer's hue and saturation at the luminance of
+what is under it, the one mode no channel decides alone). Raster
+layers are stored as sRGB RGBA8 with straight alpha. The
 GPU decodes them through `SRGB8_ALPHA8` textures, and the CPU through a
 256-entry table.
 
@@ -273,9 +275,16 @@ The panel's prompt box takes an edit in words.  `POST
 words with a small picture of it, and the request to a language model
 (Gendl's `sexp-agent`, gwl/source/sexp-agent.lisp); the model answers
 with forms, which run through a sandbox that admits only the API's
-operations with literal arguments; the page then redraws.  The work
-runs on its own thread: the door answers a job id and the page asks
-after it.  Where the model is reached is `(stratum:configure-agent!
+operations with literal arguments; the page then redraws.  The model
+can look before it acts: `(look x y w h)` among its forms brings it a
+picture of that part of the document at full resolution, captioned
+with how picture pixels map to document pixels and with the selection
+drawn on it, and it answers again -- to outline a thing closely, then
+to check the outline, then the result (`stratum::*prompt-looks*`
+rounds, four by default; this needs a Gendl whose sexp-agent carries
+`:looks`, and without one the model works from the first picture
+alone).  The work runs on its own thread: the door answers a job id
+and the page asks after it, showing how far it has got.  Where the model is reached is `(stratum:configure-agent!
 :messages-url ...)`: a key-holding gate in production, or the API with
 `:api-key-file` on a trusted machine.  When the model cannot be
 reached the box shows what its server said, changes nothing, and
@@ -436,8 +445,9 @@ entries, nothing more), holding `stack.xml`, one PNG per layer,
 of `ora-layer`s, top first; `read-ora`, `ora-octets`, a small XML
 reader of its own). The mapping onto a document is
 `source/ora-document.lisp`. A raster layer goes out as its pixels
-with the mask baked into the alpha, Normal, Multiply, Screen and Add
-as `svg:src-over`, `svg:multiply`, `svg:screen` and `svg:plus`. An
+with the mask baked into the alpha, Normal, Multiply, Screen, Add and
+Color as `svg:src-over`, `svg:multiply`, `svg:screen`, `svg:plus` and
+`svg:color`. An
 adjustment layer has no OpenRaster shape, so it goes out as a hidden,
 empty layer carrying its spec in Stratum's own attribute,
 `stratum:spec`, which Stratum reads back whole and other editors show

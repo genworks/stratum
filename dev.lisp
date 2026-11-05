@@ -36,18 +36,26 @@
 
 ;; Two of Gendl's gwl files (2026-11-04) an image built before them
 ;; does not carry: the invite gate and sexp-agent (the prompt box's
-;; agent).  From the image when it has them, else the one file from a
-;; Gendl checkout beside this one, or wherever INVITE_GATE_FILE and
-;; SEXP_AGENT_FILE point.
-(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate")
-                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent")))
-  (destructuring-bind (package variable name) need
-    (unless (find-package package)
+;; agent).  From the image when it has them as Stratum needs them --
+;; the last name of each entry is a function the image's copy must
+;; have, when there is one: sexp-agent learned to send pictures back to
+;; the model after the first images carried it -- else the one file
+;; from a Gendl checkout beside this one, or wherever INVITE_GATE_FILE
+;; and SEXP_AGENT_FILE point.  An image with an older copy and no file
+;; to be found keeps its copy.
+(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "PICTURES-SHOWN")))
+  (destructuring-bind (package variable name proof) need
+    (unless (and (find-package package)
+                 (or (null proof)
+                     (let ((symbol (find-symbol proof package)))
+                       (and symbol (fboundp symbol)))))
       (let ((file (or (uiop:getenv variable)
                       (probe-file (format nil "/projects/gw/gendl/gwl/source/~a.lisp" name))
-                      (probe-file (merge-pathnames (format nil "../gendl/gwl/source/~a.lisp" name) *load-truename*))
-                      (error "Stratum needs ~a (gendl gwl/source/~a.lisp): set ~a." package name variable))))
-        (load file)))))
+                      (probe-file (merge-pathnames (format nil "../gendl/gwl/source/~a.lisp" name) *load-truename*)))))
+        (cond (file (load file))
+              ((find-package package))
+              (t (error "Stratum needs ~a (gendl gwl/source/~a.lisp): set ~a." package name variable)))))))
 
 (asdf:load-system :stratum)
 

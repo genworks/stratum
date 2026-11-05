@@ -2798,7 +2798,7 @@
                  [head, el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'opacity' }), range, val])]);
     if (L.kind === 'raster') {
       var sel = el('select', { 'class': 'st-blend' });
-      ['normal', 'multiply', 'screen', 'add'].forEach(function (m) {
+      ['normal', 'multiply', 'screen', 'add', 'color'].forEach(function (m) {
         var o = el('option', { value: m, text: m });
         if (m === L.blend) o.selected = true;
         sel.appendChild(o);
@@ -3435,6 +3435,20 @@
         return S.parity();
       }).then(function (p) {
         check('parity after restore', p.maxDiff <= 1, p);
+        // the Color blend, which no channel decides alone: the GPU's
+        // against the CPU's
+        L.blend = 'color';
+        return post({ layer: L.index, slot: 'blend', value: 'color' });
+      }).then(function () {
+        return S.parity();
+      }).then(function (p) {
+        check('parity under the Color blend', p.maxDiff <= 1, p);
+        L.blend = original;
+        return post({ layer: L.index, slot: 'blend', value: original });
+      }).then(function () {
+        return S.parity();
+      }).then(function (p) {
+        check('parity after the Color blend is taken off', p.maxDiff <= 1, p);
       });
     }).then(function () {
       // A rectangle of the second raster layer back from the server into
@@ -4609,6 +4623,8 @@
     return new Promise(function (resolve, reject) {
       function poll() {
         fetchJSON(api('prompt?job=' + encodeURIComponent(id))).then(function (res) {
+          // the model may look and answer several times: say how far it is
+          if (res.status === 'working' && res.note && S.promptNote) S.promptNote(res.note);
           if (res.status === 'working') setTimeout(poll, 1500);
           else if (res.status === 'done') resolve(res);
           else reject(new Error(res.error || ('the prompt job is ' + res.status)));
@@ -4657,6 +4673,7 @@
       if (!text || go.disabled) return;
       go.disabled = true;
       busy.textContent = 'working...';
+      S.promptNote = function (note) { busy.textContent = 'working... ' + note; };
       S.prompt(text).then(function () { box.value = ''; }, function () {})
         .then(function () { go.disabled = false; busy.textContent = ''; });
     }

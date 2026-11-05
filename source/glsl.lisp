@@ -149,6 +149,18 @@ float lut(int row, float x) {
   int j = min(i + 1, 255);
   return mix(texelFetch(u_luts, ivec2(i, row), 0).r, texelFetch(u_luts, ivec2(j, row), 0).r, f);
 }
+// The Color blend: the layer's hue and saturation at the backdrop's
+// luminance, on linear light (color-blend in cpu.lisp is its twin).
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 blend_color(vec3 b, vec3 s) {
+  float l = luminance(b);
+  vec3 c = s + vec3(l - luminance(s));
+  float n = min(c.r, min(c.g, c.b));
+  if (n < 0.0) c = vec3(l) + (c - vec3(l)) * (l / (l - n));
+  float x = max(c.r, max(c.g, c.b));
+  if (x > 1.0) c = vec3(l) + (c - vec3(l)) * ((1.0 - l) / (x - l));
+  return c;
+}
 float hue_channel(float p, float q, float t) {
   t = t - floor(t);
   if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
@@ -203,7 +215,8 @@ void main() {
     (:normal "s.rgb")
     (:multiply "cb * s.rgb")
     (:screen "cb + s.rgb - cb * s.rgb")
-    (:add "min(cb + s.rgb, vec3(1.0))")))
+    (:add "min(cb + s.rgb, vec3(1.0))")
+    (:color "blend_color(cb, s.rgb)")))
 
 (defun glsl-mask (mask)
   (if mask (format nil " * masked(~d, p)" mask) ""))

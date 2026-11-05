@@ -88,14 +88,46 @@ the shader's hue_saturation() does it."
       `(/ (float (aref ,(mask-var mask) idx) 1.0) 255.0)
       1.0))
 
+(declaim (inline color-blend))
+(defun color-blend (br bg bb sr sg sb)
+  "The Color blend on linear light: the source's hue and saturation at
+the backdrop's luminance, three values (blend_color in the shader is
+its twin)."
+  (declare (type double-float br bg bb sr sg sb)
+           (optimize (speed 3) (safety 0)))
+  (flet ((luminance (r g b) (+ (* 0.2126 r) (* 0.7152 g) (* 0.0722 b))))
+    (declare (inline luminance))
+    (let* ((l (luminance br bg bb))
+           (d (- l (luminance sr sg sb)))
+           (r (+ sr d))
+           (g (+ sg d))
+           (b (+ sb d))
+           (n (min r g b)))
+      (declare (type double-float l d r g b n))
+      (when (< n 0.0)
+        (let ((k (/ l (- l n))))
+          (setf r (+ l (* (- r l) k))
+                g (+ l (* (- g l) k))
+                b (+ l (* (- b l) k)))))
+      (let ((x (max r g b)))
+        (when (> x 1.0)
+          (let ((k (/ (- 1.0 l) (- x l))))
+            (setf r (+ l (* (- r l) k))
+                  g (+ l (* (- g l) k))
+                  b (+ l (* (- b l) k))))))
+      (values r g b))))
+
 (defun lisp-blend (mode)
-  "Forms over backdrop B? and source S? for each channel."
+  "Forms over backdrop B? and source S? for each channel; for :color,
+which no channel decides alone, the three values of color-blend, which
+lisp-entry binds."
   (flet ((each (fn) (mapcar fn '(br bg bb) '(sr sg sb))))
     (ecase mode
       (:normal (each (lambda (b s) (declare (ignore b)) s)))
       (:multiply (each (lambda (b s) `(* ,b ,s))))
       (:screen (each (lambda (b s) `(- (+ ,b ,s) (* ,b ,s)))))
-      (:add (each (lambda (b s) `(min 1.0 (+ ,b ,s))))))))
+      (:add (each (lambda (b s) `(min 1.0 (+ ,b ,s)))))
+      (:color '(cr cg cb)))))
 
 (defun lisp-entry (entry)
   (destructuring-bind (kind &key tex blend mask param lut) entry
@@ -115,10 +147,15 @@ the shader's hue_saturation() does it."
               (declare (type fixnum p)
                        (type double-float sr sg sb a br bg bb)
                        (ignorable br bg bb))
-              (setf kr (+ (* (+ (* (- 1.0 ao) sr) (* ao ,mr)) a) (* kr (- 1.0 a)))
-                    kg (+ (* (+ (* (- 1.0 ao) sg) (* ao ,mg)) a) (* kg (- 1.0 a)))
-                    kb (+ (* (+ (* (- 1.0 ao) sb) (* ao ,mb)) a) (* kb (- 1.0 a)))
-                    ao (+ a (* ao (- 1.0 a))))))))
+              ,(let ((store `(setf kr (+ (* (+ (* (- 1.0 ao) sr) (* ao ,mr)) a) (* kr (- 1.0 a)))
+                                   kg (+ (* (+ (* (- 1.0 ao) sg) (* ao ,mg)) a) (* kg (- 1.0 a)))
+                                   kb (+ (* (+ (* (- 1.0 ao) sb) (* ao ,mb)) a) (* kb (- 1.0 a)))
+                                   ao (+ a (* ao (- 1.0 a))))))
+                 (if (eql blend :color)
+                     `(multiple-value-bind (cr cg cb) (color-blend br bg bb sr sg sb)
+                        (declare (type double-float cr cg cb))
+                        ,store)
+                     store))))))
       (:hue-saturation
        `(let* ((a (* (aref opacity ,param) ,(lisp-mask mask))))
           (declare (type double-float a))

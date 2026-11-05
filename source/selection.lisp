@@ -78,11 +78,12 @@ nil when it has none."
 
 (defun combine-masks (old mask mode)
   "MASK as the new selection (MODE :new), added to OLD (:add, the
-larger coverage) or taken from it (:subtract, OLD where MASK is not).
-OLD may be nil."
+larger coverage), taken from it (:subtract, OLD where MASK is not) or
+kept where both cover (:intersect).  OLD may be nil: everything."
   (cond ((or (eql mode :new) (null old)) (if (eql mode :subtract) (make-array (length mask) :element-type '(unsigned-byte 8) :initial-element 0) mask))
         ((eql mode :add) (map '(simple-array (unsigned-byte 8) (*)) #'max old mask))
         ((eql mode :subtract) (map '(simple-array (unsigned-byte 8) (*)) (lambda (o m) (min o (- 255 m))) old mask))
+        ((eql mode :intersect) (map '(simple-array (unsigned-byte 8) (*)) #'min old mask))
         (t (error "Unknown selection mode ~s." mode))))
 
 (defun set-selection-mask! (doc mask mode)

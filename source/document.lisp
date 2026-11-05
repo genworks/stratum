@@ -22,7 +22,7 @@
 ;; `build-counts' shows it: [shader builds, kernel builds].
 ;;
 
-(defparameter *blend-modes* '(:normal :multiply :screen :add))
+(defparameter *blend-modes* '(:normal :multiply :screen :add :color))
 
 (defun plist-merge (new old)
   "A plist with NEW's keys and values first and OLD's remaining ones after."
@@ -154,7 +154,7 @@ supplies `luts'.")
 (define-object raster-layer (image-layer)
   :documentation
   (:description "Pixels from :source (a generator spec), composited
-with :blend (:normal, :multiply, :screen or :add).")
+with :blend (:normal, :multiply, :screen, :add or :color).")
 
   :input-slots
   ((blend-mode (getf (the spec) :blend :normal) :settable)

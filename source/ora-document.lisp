@@ -19,7 +19,7 @@
 ;; - A raster layer goes out as its pixels, its mask baked into the
 ;;   alpha (a layer under a black mask is transparent in GIMP, as it is
 ;;   here); :normal, :multiply, :screen and :add map onto svg:src-over,
-;;   svg:multiply, svg:screen and svg:plus.
+;;   svg:multiply, svg:screen, svg:plus and svg:color.
 ;; - An adjustment layer (curves, levels, hue/saturation) has no
 ;;   OpenRaster shape.  It goes out as a hidden, empty 1 x 1 layer that
 ;;   keeps its name, with Stratum's own attribute `stratum:spec' holding
@@ -34,7 +34,7 @@
 
 (defparameter *ora-blend-ops*
   '((:normal . "svg:src-over") (:multiply . "svg:multiply")
-    (:screen . "svg:screen") (:add . "svg:plus")))
+    (:screen . "svg:screen") (:add . "svg:plus") (:color . "svg:color")))
 
 (defparameter *stratum-xmlns*
   '("stratum" . "https://github.com/genworks/stratum")

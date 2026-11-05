@@ -29,7 +29,7 @@
            #:add-layer #:delete-layer #:duplicate-layer #:move-layer #:merge-down #:flatten
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
-           #:invert-selection #:feather #:selection
+           #:invert-selection #:feather #:selection #:look
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
@@ -44,7 +44,7 @@
   "The document the operations work on; use-document sets it.")
 
 (defparameter *prompt-operators*
-  '(documents describe-document document-info layers layer-info
+  '(documents describe-document document-info layers layer-info look
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
     select-rect select-polygon select-wand select-all select-none invert-selection feather selection
     fill-selection clear-selection paint gradient move-pixels transform copy cut paste
@@ -236,7 +236,7 @@ above layer ABOVE, or on top; NAME names it.  Its layer-info."
 
 (defun set-layer (layer &rest changes &key opacity visible blend &allow-other-keys)
   "LAYER's state changed: :opacity 0-1, :visible t or nil, :blend
-(:normal :multiply :screen :add, raster layers), a levels layer's
+(:normal :multiply :screen :add :color, raster layers), a levels layer's
 :in-black :in-white :gamma :out-black :out-white, a hue/saturation
 layer's :hue :saturation :lightness, a curves layer's :master :red
 :green :blue (points ((x y) ...) on 0-1).  Its layer-info after."
@@ -282,13 +282,15 @@ The undo list is emptied.  The layer-info after."
     ((:new nil) :new)
     (:add :add)
     (:subtract :subtract)
-    (t (error "A selection mode is :new, :add or :subtract, not ~s." mode))))
+    (:intersect :intersect)
+    (t (error "A selection mode is :new, :add, :subtract or :intersect, not ~s." mode))))
 
 (defun selection-result () (list :selection (selection)))
 
 (defun select-rect (x y w h &key (mode :new))
-  "The W x H rectangle at X, Y selected; MODE :new, :add or :subtract.
-The selection's bounds."
+  "The W x H rectangle at X, Y selected; MODE :new, :add, :subtract or
+:intersect (what both the old selection and this one cover).  The
+selection's bounds."
   (stratum::select-rect! (doc) (round x) (round y) (round w) (round h) (mode-key mode))
   (selection-result))
 

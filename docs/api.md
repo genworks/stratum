@@ -41,6 +41,63 @@ document, which belong to the page.
 - `(selection)` — the selection's bounds `(x y w h)`, or `nil` when
   everything is selected.
 - `(documents)` — the names of the open documents.
+- `(look)`, `(look x y w h)` — a picture of the document, or of that
+  rectangle of it, flattened as the page shows it.  A rectangle up to
+  1280 pixels on its longer side comes at full resolution, one picture
+  pixel a document pixel; a larger one is reduced by a whole factor,
+  and one under 400 pixels enlarged by one.  The picture's caption
+  gives the mapping, for example "picture pixel (px, py) is document
+  pixel (3300 + px, 1400 + py)".  When something is selected the
+  picture is dimmed outside the selection and the selection's edge is
+  drawn in magenta; `:selection nil` after the other arguments leaves
+  that out.
+
+## Seeing what you are doing
+
+The picture that comes with a request shows the whole document, most
+often much reduced: its caption says by how much.  It is enough to
+find things and to judge tone and color.  It is not enough to outline
+anything: on a photograph a point read off it may be twenty document
+pixels from where it should be.  So before any operation that needs
+exact places, end the block with `look` at a rectangle around the
+thing, with a margin, small enough to come at full resolution; the
+forms up to it run, the picture arrives, and you answer again with
+the forms that remain.  A few looks may be asked in one request, so
+spend them where they matter: once to see the thing closely, once
+to check the selection or the result.
+
+To change one thing in a photograph (recolor the horns, brighten the
+eyes, blur a sign):
+
+1. `look` at it closely.
+2. Select it.  `select-polygon` with a point every 10 to 25 document
+   pixels along its edge, on the edge and not inside or outside it:
+   thirty points and more for a curved shape, each a document pixel
+   worked out from the caption's mapping.  Or, when its color differs
+   from what surrounds it, a loose polygon around it and then
+   `select-wand` on a point inside it with `:mode :intersect`.
+   Separate things are separate selections joined with `:mode :add`.
+   Where the thing stands against something plain (sky, snow, a
+   wall), outline it generously on that side and take the plain part
+   away: `select-wand` on a point of the background with `:mode
+   :subtract` (and `:contiguous nil` when the background shows
+   through in several places) leaves the selection on the thing's
+   own edge, closer than points can.
+3. `look` again, at the same rectangle: the magenta edge should lie on
+   the thing's edge.  Correct it with `:add`, `:subtract` or
+   `:intersect` where it does not.  `:intersect` and `:subtract` act
+   on the whole selection, so with several things selected an
+   `:intersect` meant for one drops the others: correct each thing
+   before adding the next.
+4. `(feather 1)` to `(feather 3)` for a thing with a hard edge, so the
+   change does not end in a jagged line; more only for soft things
+   (fur, smoke, a glow).
+5. Make the change.  To recolor, fill the selection on a new raster
+   layer and set that layer's `:blend` to `:color`: the layer gives
+   hue and saturation, what is under it gives light and dark, so
+   shading and texture stay.  `:multiply` darkens as it tints,
+   `:normal` paints over.
+6. `(select-none)`.
 
 ## Layers
 
@@ -60,7 +117,9 @@ change.
   under it.  `(flatten)` — everything into one.
 - `(set-layer layer &key opacity visible blend ...)` — the layer's
   state: `:opacity` 0-1; `:visible` `t` or `nil`; `:blend` `:normal`,
-  `:multiply`, `:screen` or `:add` on a raster layer; a levels layer's
+  `:multiply`, `:screen`, `:add` or `:color` (the layer's hue and
+  saturation at the lightness of what is under it) on a raster layer;
+  a levels layer's
   `:in-black :in-white :gamma :out-black :out-white`; a hue/saturation
   layer's `:hue` (degrees) `:saturation` (-1..1) `:lightness` (-1..1);
   a curves layer's `:master :red :green :blue`, each a list of points
@@ -79,8 +138,9 @@ change.
 ## The selection
 
 Every pixel operation acts inside the selection; with no selection
-it acts on the whole layer.  `mode` is `:new` (the default), `:add` or
-`:subtract`.
+it acts on the whole layer.  `mode` is `:new` (the default), `:add`,
+`:subtract` or `:intersect` (what the old selection and this one both
+cover).
 
 - `(select-rect x y w h &key mode)`
 - `(select-polygon points &key mode)` — points `((x y) ...)`.
@@ -138,6 +198,26 @@ undo list.
 (select-none)
 ```
 
+```lisp
+;; recolor one thing, first reply: look closely and stop
+(look 3250 1400 650 800)
+```
+
+```lisp
+;; second reply, after the picture: outline it and check
+(select-polygon ((3391 1489) (3402 1512) (3410 1538) (3421 1566) (3436 1590)))
+(look 3250 1400 650 800)
+```
+
+```lisp
+;; third reply, the selection being right: recolor, keeping the shading
+(feather 2)
+(add-layer :raster :name "Red horn")
+(fill-selection "Red horn" (200 30 30))
+(set-layer "Red horn" :blend :color)
+(select-none)
+```
+
 ## The whole image
 
 Each of these remakes the document at a new size; the page reloads.
@@ -190,6 +270,8 @@ per form, stopping at the first failure.  The prompt door, `POST
 /stratum/api/prompt?doc=NAME&s=SESSION` with `{"prompt": "..."}`,
 starts the model's work and answers `{job}`; `GET
 /stratum/api/prompt?job=ID` answers `{status: "working"}` until the
-forms have run, then `{status: "done", reply, forms, results, ok,
-width, height}`, or `{status: "failed", error}`.  `GET
+forms have run (with `note`, how far the work is), then `{status:
+"done", reply, forms, results, ok, width, height}`, or `{status:
+"failed", error}`.  The model may look and answer again up to
+`stratum::*prompt-looks*` times in one prompt.  `GET
 /stratum/api/reference` serves this document.

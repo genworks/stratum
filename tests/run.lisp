@@ -1957,13 +1957,183 @@ picture, the reference and the rules."
   (check "base64 of a known vector"
          (equal (sexp-agent:base64-encode (coerce '(77 97 110) '(simple-array (unsigned-byte 8) (*)))) "TWFu")))
 
+(defun stub-model-reply (text)
+  "A Messages response whose one text block is TEXT."
+  (flet ((obj (&rest kv)
+           (let ((o (make-hash-table :test 'equal)))
+             (loop for (k v) on kv by #'cddr do (setf (gethash k o) v))
+             o)))
+    (yason:with-output-to-string* ()
+      (yason:encode (obj "id" "msg_stub" "type" "message" "role" "assistant"
+                         "content" (list (obj "type" "thinking" "thinking" "")
+                                         (obj "type" "text" "text" text))
+                         "stop_reason" "end_turn"
+                         "usage" (obj "input_tokens" 100 "output_tokens" 10))))))
+
+(defun call-with-stub-model (replies fn)
+  "FN called with an agent whose model is a stand-in on a server of its
+own, answering REPLIES, texts, in turn (an empty block when they run
+out), and with a function answering the requests it has had, parsed,
+oldest first."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (requests '())
+         (agent (sexp-agent:make-agent :name "Stratum" :package :stratum-api
+                                       :operators stratum-api:*prompt-operators*
+                                       :reference "The reference."
+                                       :messages-url (format nil "http://127.0.0.1:~d/messages" port))))
+    (unwind-protect
+         (progn
+           (net.aserve:publish
+            :path "/messages" :server server :content-type "application/json"
+            :function (lambda (req ent)
+                        (push (yason:parse (gwl:request-body-text req)) requests)
+                        (net.aserve:with-http-response (req ent :content-type "application/json")
+                          (net.aserve:with-http-body (req ent)
+                            (write-string (stub-model-reply (or (pop replies) (format nil "```lisp~%```")))
+                                          (net.aserve:request-reply-stream req))))))
+           (funcall fn agent (lambda () (reverse requests))))
+      (net.aserve:shutdown :server server))))
+
+(defun last-user-content (request)
+  "The content blocks of REQUEST's last message: (values images texts)."
+  (let ((content (gethash "content" (car (last (gethash "messages" request))))))
+    (values (remove "image" content :key (lambda (b) (gethash "type" b)) :test-not #'equal)
+            (format nil "~{~a~}" (loop for b in content
+                                       when (equal (gethash "type" b) "text") collect (gethash "text" b))))))
+
+(defun test-looks ()
+  "Seeing: the Color blend, :intersect, the pictures (look) makes, and
+prompts in which the model looks before it acts and after -- against a
+stand-in for the model."
+  (flet ((near (a b) (< (abs (- a b)) 1d-9))
+         (luminance (r g b) (+ (* 0.2126d0 r) (* 0.7152d0 g) (* 0.0722d0 b))))
+    (multiple-value-bind (r g b) (color-blend 0.5d0 0.5d0 0.5d0 0.8d0 0.1d0 0.1d0)
+      (check "color blend: the backdrop's luminance, the source's hue"
+             (and (near (luminance r g b) 0.5d0) (> r g) (near g b) (<= 0d0 g) (<= r 1d0)) (list r g b)))
+    (multiple-value-bind (r g b) (color-blend 0.2d0 0.6d0 0.1d0 0.5d0 0.5d0 0.5d0)
+      (check "color blend: a gray source leaves the backdrop's gray"
+             (let ((l (luminance 0.2d0 0.6d0 0.1d0))) (and (near r l) (near g l) (near b l))) (list r g b)))
+    (multiple-value-bind (r g b) (color-blend 0d0 0d0 0d0 0.8d0 0.1d0 0.1d0)
+      (check "color blend: black stays black" (and (near r 0d0) (near g 0d0) (near b 0d0)) (list r g b)))
+    (multiple-value-bind (r g b) (color-blend 1d0 1d0 1d0 1d0 0d0 0d0)
+      (check "color blend: white stays white" (and (near r 1d0) (near g 1d0) (near b 1d0)) (list r g b))))
+  (check "an OpenRaster file names the Color blend" (equal (cdr (assoc :color *ora-blend-ops*)) "svg:color"))
+  (let ((gray (coerce '(0 2 4 6  10 12 14 16  100 100 100 100  200 200 200 204) '(simple-array (unsigned-byte 8) (*)))))
+    (check "scale-rect: reduced, each pixel the mean of its block"
+           (equalp (scale-rect gray 4 1 0 0 4 4 2 1) #(6 10 150 151)) (scale-rect gray 4 1 0 0 4 4 2 1))
+    (check "scale-rect: a rectangle enlarged, each pixel a block"
+           (equalp (scale-rect gray 4 1 1 0 2 1 1 2) #(2 2 4 4 2 2 4 4)) (scale-rect gray 4 1 1 0 2 1 1 2)))
+  (let ((stratum-api:*document* nil)
+        (*documents* (make-hash-table :test 'equal)))
+    (stratum-api:use-document "parity")
+    (let* ((doc stratum-api:*document*)
+           (before (copy-seq (the-object doc (render-cpu))))
+           (layer (find-if (lambda (info) (and (eql (getf info :kind) :raster) (plusp (getf info :index))))
+                           (stratum-api:layers)))
+           (index (getf layer :index)))
+      (stratum-api:set-layer index :blend :color)
+      (check "a layer set to Color: the shader blends it so, and the CPU picture moves"
+             (and (search "blend_color(cb, s.rgb)" (the-object doc shader-source))
+                  (not (equalp before (the-object doc (render-cpu))))))
+      (stratum-api:set-layer index :blend (getf layer :blend))
+      (check "and back: the picture as it was" (equalp before (the-object doc (render-cpu)))))
+    (stratum-api:select-rect 10 10 50 40)
+    (stratum-api:select-rect 30 20 100 100 :mode :intersect)
+    (check "a selection intersected: what both cover"
+           (equal (stratum-api:selection) '(30 20 30 30)) (stratum-api:selection))
+    (stratum-api:select-none)
+    (let ((whole (stratum-api:look)) (small (stratum-api:look 10 10 50 40)))
+      (check "look: the whole document, a pixel a pixel"
+             (and (picture-p whole) (= (picture-width whole) 320) (= (picture-height whole) 200)
+                  (search "one picture pixel a document pixel" (picture-note whole))
+                  (search "Nothing is selected" (picture-note whole)))
+             (picture-note whole))
+      (check "look: a small rectangle comes enlarged, and says how to read it"
+             (and (= (picture-width small) 400) (= (picture-height small) 320)
+                  (search "(10 + px / 8, 10 + py / 8)" (picture-note small)))
+             (picture-note small)))
+    (check "a picture larger than it may be is reduced by a whole factor"
+           (search "(5 px, 5 py)" (picture-note (document-picture stratum-api:*document* :size 64))))
+    (let ((plain (read-png (picture-png (stratum-api:look)))))
+      (stratum-api:select-rect 100 50 100 80)
+      (let ((shown (read-png (picture-png (stratum-api:look))))
+            (hidden (read-png (picture-png (stratum-api:look :selection nil)))))
+        (flet ((px (pixels x y) (subseq pixels (* 4 (+ x (* 320 y))) (+ 3 (* 4 (+ x (* 320 y)))))))
+          (check "look shows the selection: magenta on its edge, the inside as it is, the outside dimmer"
+                 (and (equalp (px shown 100 90) #(255 0 255))
+                      (equalp (px shown 150 90) (px plain 150 90))
+                      (every #'<= (px shown 20 20) (px plain 20 20))
+                      (not (equalp shown plain)))
+                 (list (px shown 100 90) (px shown 150 90) (px plain 150 90)))
+          (check "and leaves it out when asked" (equalp hidden plain)))))
+    (stratum-api:select-none)
+    (let ((results (stratum:run-forms "(look 0 0 100 100) (look 1 2)")))
+      (check "the sandbox admits look, and look says how it is called"
+             (and (picture-p (getf (first results) :value))
+                  (not (getf (second results) :ok))
+                  (search "four numbers" (getf (second results) :error)))
+             results))
+    ;; a prompt in which the model looks, selects, looks again and fills
+    (let ((doc stratum-api:*document*))
+      (setf (gethash "parity" *documents*) doc)
+      (call-with-stub-model
+       (list (format nil "I will look first.~%```lisp~%(look 0 0 100 100)~%```")
+             (format nil "Now the selection, and a check.~%```lisp~%(select-rect 10 10 50 40)~%(look 0 0 100 100)~%```")
+             (format nil "It is right.~%```lisp~%(fill-selection 0 (200 10 10))~%(select-none)~%```"))
+       (lambda (agent requests)
+         (let* ((*agent* agent)
+                (answer (prompt-document doc "make that corner red"))
+                (requests (funcall requests)))
+           (check "a prompt with two looks: three calls of the model, every form run"
+                  (and (= (length requests) 3) (getf answer :ok) (= (length (getf answer :results)) 5))
+                  (list (length requests) answer))
+           (multiple-value-bind (images text) (last-user-content (first requests))
+             (check "the request carries the document's picture and says how to read it"
+                    (and (= (length images) 1) (search "The picture with this message is" text)
+                         (search "make that corner red" text))
+                    text))
+           (multiple-value-bind (images text) (last-user-content (second requests))
+             (check "a look comes back as a picture with its caption"
+                    (and (= (length images) 1) (search "Picture 1: the document's rectangle x 0 y 0 w 100 h 100" text)
+                         (search "more pictures" text))
+                    text))
+           (multiple-value-bind (images text) (last-user-content (third requests))
+             (check "the second look shows the selection"
+                    (and (= (length images) 1) (search "The selection is shown" text)) text))
+           (check "a look's value on the page is its caption"
+                  (search "the document's rectangle" (getf (first (getf answer :results)) :value))
+                  (first (getf answer :results)))
+           (check "the reply is every round's prose"
+                  (and (search "I will look first." (getf answer :reply)) (search "It is right." (getf answer :reply)))
+                  (getf answer :reply))
+           (check "the fill went on the undo list and the turn on the document"
+                  (and (= (length (the-object doc undo-entries)) 1)
+                       (search "(look 0 0 100 100)" (cdr (first (the-object doc prompt-log)))))))))
+      (stratum-api:undo)
+      ;; the looks are counted
+      (call-with-stub-model
+       (list (format nil "Looking.~%```lisp~%(look 0 0 100 100)~%```")
+             (format nil "Looking again.~%```lisp~%(look 0 0 50 50)~%```")
+             (format nil "Never asked.~%```lisp~%(levels 0 :gamma 2)~%```"))
+       (lambda (agent requests)
+         (let* ((*agent* agent)
+                (*prompt-looks* 1)
+                (answer (prompt-document doc "look around"))
+                (requests (funcall requests)))
+           (check "one look allowed: the second picture is not sent, and the model is told"
+                  (and (= (length requests) 2)
+                       (search "Do not ask for another picture" (nth-value 1 (last-user-content (second requests))))
+                       (= (length (getf answer :results)) 2))
+                  (list (length requests) (getf answer :results)))))))))
+
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

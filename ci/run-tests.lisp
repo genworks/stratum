@@ -48,17 +48,23 @@
     (asdf:register-preloaded-system name)))
 
 ;;; Two of Gendl's gwl files, the invite gate and sexp-agent: from the
-;;; image when it carries them, else the files INVITE_GATE_FILE and
+;;; image when it carries them as Stratum needs them (the last name of
+;;; an entry is a function the image's copy must have: an image built
+;;; before sexp-agent could send pictures back to the model has the
+;;; package and not that), else the files INVITE_GATE_FILE and
 ;;; SEXP_AGENT_FILE name (.gitlab-ci.yml fetches them from the Gendl
 ;;; repository).
-(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate")
-                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent")))
-  (destructuring-bind (package variable name) need
+(dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "PICTURES-SHOWN")))
+  (destructuring-bind (package variable name proof) need
     (handler-case
-        (unless (find-package package)
+        (unless (and (find-package package)
+                     (or (null proof)
+                         (let ((symbol (find-symbol proof package)))
+                           (and symbol (fboundp symbol)))))
           (let ((file (or (uiop:getenv variable)
                           (probe-file (format nil "/projects/gw/gendl/gwl/source/~a.lisp" name))
-                          (ci-exit 2 "CI: no ~a in the image; set ~a." package variable))))
+                          (ci-exit 2 "CI: no ~a in the image that Stratum can use; set ~a." package variable))))
             (load file)))
       (error (e) (ci-exit 2 "CI: ~a did not load: ~a" package e)))))
 

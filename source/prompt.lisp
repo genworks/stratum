@@ -16,6 +16,11 @@
 ;; answers with forms; sexp-agent (Gendl's gwl/source/sexp-agent.lisp)
 ;; runs them through its sandbox -- only *prompt-operators*, only
 ;; literal arguments -- on the page's document, and the page redraws.
+;; One of the operations is (look x y w h): a picture of part of the
+;; document at full resolution, which goes back to the model, and the
+;; model answers again.  So it looks closely before it outlines
+;; anything and checks what it selected or changed, a few times in one
+;; prompt (*prompt-looks*).
 ;; The model is reached at *agent*'s messages-url: a key-holding gate
 ;; in production (configure-agent! from the room's services-init), or
 ;; the API with a key file on a trusted development ship.
@@ -33,10 +38,25 @@
       (uiop:read-file-string *api-reference-file*)
       (format nil "The reference document ~a is missing." *api-reference-file*)))
 
+(defun agent-looks? ()
+  "Whether this image's sexp-agent sends a picture back to the model
+and lets it answer again: Gendl's of 2026-11-05 and after."
+  (let ((symbol (find-symbol "PICTURES-SHOWN" :sexp-agent)))
+    (and symbol (fboundp symbol) t)))
+
+(defun prompt-operators ()
+  "The operations the agent admits: *prompt-operators*, without look in
+an image whose sexp-agent cannot show the model what look made.  There
+the model's (look ...) is refused as no operation of Stratum, and it
+goes on from the picture it was sent, as it did before there was one."
+  (if (agent-looks?)
+      stratum-api:*prompt-operators*
+      (remove 'stratum-api:look stratum-api:*prompt-operators*)))
+
 (defvar *agent*
   (sexp-agent:make-agent :name "Stratum"
                          :package :stratum-api
-                         :operators stratum-api:*prompt-operators*
+                         :operators (prompt-operators)
                          :reference #'api-reference
                          :max-tokens 8000)
   "The prompt box's agent.")
@@ -88,22 +108,159 @@ answers.  The same door the prompt box's forms go through."
     (let ((results (nreverse results)))
       (values results (every (lambda (r) (getf r :ok)) results)))))
 
-(defparameter *prompt-picture-size* 640
-  "The longer side, in pixels, of the picture of the document the
-model is shown with each prompt.")
+;;; What the model sees.  A picture is a rectangle of the document,
+;;; flattened as the page shows it, at a scale that is a whole number
+;;; either way -- reduced K to 1 when the rectangle is larger than the
+;;; picture may be, enlarged 1 to M when it is very small -- so that a
+;;; point in the picture is a document pixel by one multiplication,
+;;; which the caption states.  The request carries one of the whole
+;;; document; (look x y w h) in the model's forms brings one of a part
+;;; of it, at full resolution when it fits, and with it the model's
+;;; next turn (sexp-agent's :looks): it looks closer before it outlines
+;;; anything, and checks the selection or the result after.
+
+(defparameter *prompt-picture-size* 1280
+  "The longer side, in pixels, a picture shown to the model may have.
+Its images are read at up to 2576 pixels a side, about a token for
+each 28 x 28 pixels: 1280 x 853 is some 1400 tokens.")
+
+(defparameter *prompt-picture-least* 400
+  "A rectangle smaller than this on its longer side is shown enlarged,
+by a whole factor up to eight.")
+
+(defparameter *prompt-looks* 4
+  "How many times the model may look, and answer again, in one prompt.")
+
+(defstruct (picture (:constructor make-picture (png note width height)))
+  "What (look) answers: PNG octets WIDTH x HEIGHT and NOTE, the words
+that place the picture in the document."
+  png note width height)
+
+(defmethod print-object ((picture picture) stream)
+  (print-unreadable-object (picture stream)
+    (format stream "picture ~a x ~a: ~a" (picture-width picture) (picture-height picture)
+            (picture-note picture))))
+
+(defun scale-rect (pixels width channels x y w h k m)
+  "The W x H rectangle at X, Y of PIXELS (WIDTH wide, CHANNELS bytes a
+pixel), reduced by the whole factor K (each pixel the mean of K x K,
+fewer at the far edges) or enlarged by M (each pixel M x M): (values
+octets picture-width picture-height)."
+  (declare (type (simple-array (unsigned-byte 8) (*)) pixels)
+           (type fixnum width channels x y w h k m))
+  (let* ((pw (if (> k 1) (ceiling w k) (* w m)))
+         (ph (if (> k 1) (ceiling h k) (* h m)))
+         (out (make-array (* pw ph channels) :element-type '(unsigned-byte 8))))
+    (declare (type fixnum pw ph))
+    (dotimes (py ph)
+      (dotimes (px pw)
+        (let* ((x0 (+ x (if (> k 1) (* px k) (floor px m))))
+               (y0 (+ y (if (> k 1) (* py k) (floor py m))))
+               (x1 (min (+ x w) (+ x0 k)))
+               (y1 (min (+ y h) (+ y0 k)))
+               (count (* (- x1 x0) (- y1 y0)))
+               (o (* channels (+ px (* py pw)))))
+          (declare (type fixnum x0 y0 x1 y1 count o))
+          (dotimes (c channels)
+            (let ((sum 0))
+              (declare (type fixnum sum))
+              (loop for sy of-type fixnum from y0 below y1
+                    do (loop for sx of-type fixnum from x0 below x1
+                             do (incf sum (aref pixels (+ c (* channels (+ sx (* sy width))))))))
+              (setf (aref out (+ o c)) (round sum count)))))))
+    (values out pw ph)))
+
+(defun show-selection! (rgba mask pw ph)
+  "RGBA (PW x PH) dimmed where MASK, the selection at the same size,
+does not cover, and the selection's edge drawn in magenta: how a
+picture shows the model what is selected."
+  (declare (type (simple-array (unsigned-byte 8) (*)) rgba mask) (type fixnum pw ph))
+  (flet ((in? (px py) (and (<= 0 px) (< px pw) (<= 0 py) (< py ph)
+                           (>= (aref mask (+ px (* py pw))) 128))))
+    (dotimes (py ph rgba)
+      (dotimes (px pw)
+        (let ((o (* 4 (+ px (* py pw)))))
+          (if (and (in? px py)
+                   ;; two pixels of edge: one is hard to see
+                   (not (and (in? (1- px) py) (in? (1+ px) py) (in? px (1- py)) (in? px (1+ py))
+                             (in? (- px 2) py) (in? (+ px 2) py) (in? px (- py 2)) (in? px (+ py 2))))
+                   ;; the picture's own border is no edge of the selection
+                   (< 1 px (- pw 2)) (< 1 py (- ph 2)))
+              (setf (aref rgba o) 255 (aref rgba (+ o 1)) 0 (aref rgba (+ o 2)) 255 (aref rgba (+ o 3)) 255)
+              (let ((keep (+ 140 (floor (* 115 (aref mask (+ px (* py pw)))) 255))))
+                (dotimes (c 3)
+                  (setf (aref rgba (+ o c)) (floor (* keep (aref rgba (+ o c))) 255))))))))))
+
+(defun document-picture (doc &key x y w h (size *prompt-picture-size*) (selection t))
+  "A picture of the W x H rectangle of DOC at X, Y (all of it when
+unsaid; clipped to the document), its longer side at most SIZE.  With
+SELECTION and something selected, the selection shows."
+  (let* ((dw (the-object doc doc-width))
+         (dh (the-object doc doc-height))
+         (x0 (max 0 (min dw (round (or x 0)))))
+         (y0 (max 0 (min dh (round (or y 0)))))
+         (x1 (max 0 (min dw (round (+ (or x 0) (or w dw))))))
+         (y1 (max 0 (min dh (round (+ (or y 0) (or h dh))))))
+         (rw (- x1 x0))
+         (rh (- y1 y0)))
+    (unless (and (plusp rw) (plusp rh))
+      (error "The rectangle x ~a y ~a w ~a h ~a is not inside the document, which is ~a x ~a." x y w h dw dh))
+    ;; the render is a layer's worth of bytes: make room before, not
+    ;; after it has failed
+    (ensure-room (* 4 dw dh))
+    (let* ((k (max 1 (ceiling (max rw rh) size)))
+           (m (if (= k 1) (max 1 (min 8 (floor *prompt-picture-least* (max rw rh)))) 1))
+           (mask (and selection (the-object doc selection) (getf (the-object doc selection) :mask))))
+      (multiple-value-bind (rgba pw ph) (scale-rect (the-object doc (render-cpu)) dw 4 x0 y0 rw rh k m)
+        (when mask
+          (show-selection! rgba (scale-rect mask dw 1 x0 y0 rw rh k m) pw ph))
+        (make-picture
+         (png-octets rgba pw ph)
+         (format nil "the document's rectangle x ~d y ~d w ~d h ~d, shown ~d x ~d pixels~a.  A point at picture pixel (px, py) is document pixel (~a, ~a).~a"
+                 x0 y0 rw rh pw ph
+                 (cond ((> k 1) (format nil ", reduced ~d to 1" k))
+                       ((> m 1) (format nil ", enlarged 1 to ~d" m))
+                       (t ", one picture pixel a document pixel"))
+                 (picture-axis x0 "px" k m) (picture-axis y0 "py" k m)
+                 (cond ((not selection) "")
+                       (mask "  The selection is shown: the picture is dimmed outside it and its edge is drawn in magenta.")
+                       (t "  Nothing is selected.")))
+         pw ph)))))
+
+(defun picture-axis (origin name k m)
+  "One coordinate of the caption's mapping: '3300 + px', '5 px',
+'3300 + px / 4'."
+  (let ((term (cond ((> k 1) (format nil "~d ~a" k name))
+                    ((> m 1) (format nil "~a / ~d" name m))
+                    (t name))))
+    (if (zerop origin) term (format nil "~d + ~a" origin term))))
 
 (defun document-picture-png (doc &optional (size *prompt-picture-size*))
-  "The document flattened and scaled so its longer side is SIZE, as PNG
-octets."
-  (let* ((w (the-object doc doc-width))
-         (h (the-object doc doc-height))
-         (scale (min 1 (/ size (max w h))))
-         (tw (max 1 (round (* w scale))))
-         (th (max 1 (round (* h scale)))))
-    (png-octets (rgba-thumb (the-object doc (render-cpu)) w h tw th 4) tw th)))
+  "The document flattened and reduced so its longer side is at most
+SIZE, as PNG octets."
+  (picture-png (document-picture doc :size size :selection nil)))
+
+(defun stratum-api:look (&rest where)
+  "(look) or (look x y w h), either with :selection nil after: a
+picture of the W x H rectangle of the document at X, Y, or of all of
+it, flattened as the page shows it, at full resolution when the
+rectangle fits a picture and reduced by a whole factor when it does
+not, with the selection showing unless :selection is nil.  To the
+prompt box's model the picture comes back with its next turn."
+  (let ((rect (loop while (realp (first where)) collect (pop where))))
+    (unless (and (member (length rect) '(0 4))
+                 (or (null where) (and (eq (first where) :selection) (= (length where) 2))))
+      (error "(look) shows the whole document and (look x y w h) a rectangle of it, four numbers; :selection nil after either leaves the selection out."))
+    (destructuring-bind (&optional x y w h) rect
+      (document-picture (stratum-api::doc) :x x :y y :w w :h h
+                                           :selection (getf where :selection t)))))
 
 (defparameter *prompt-history-turns* 6
   "How many earlier turns on a document go with each prompt.")
+
+(defvar *prompt-progress* (lambda (note) (declare (ignore note)))
+  "Called with a few words after each round of the model's forms; the
+prompt door binds it to put them on the job, for the page.")
 
 (defun printed (value)
   "VALUE as the page shows it, in the API package, at most 400 characters."
@@ -121,22 +278,38 @@ octets."
 the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document.  A plist for the page: :reply :forms
 :results :ok :usage :width :height."
-  (let (state picture history)
+  (let ((name (the-object doc doc-name))
+        (ran 0)
+        state picture history)
     (bt:with-lock-held (*lock*)
       (let ((stratum-api:*document* doc))
         (setf state (stratum-api:describe-document)))
-      (setf picture (document-picture-png doc)
+      (setf picture (document-picture doc)
             history (reverse (the-object doc prompt-log))))
     (let ((answer (sexp-agent:ask *agent* prompt
-                                  :state-text state
-                                  :image-png picture
+                                  :state-text (format nil "~a~%The picture with this message is ~a"
+                                                      state (picture-note picture))
+                                  :image-png (picture-png picture)
                                   :session-id (and session (format nil "stratum-~a" session))
                                   :history history
-                                  :runner (lambda (code) (run-forms code doc)))))
+                                  ;; a form that remade the document (crop, a
+                                  ;; resize) registered the new one under the
+                                  ;; name: each round runs on the one there now
+                                  :runner (lambda (code)
+                                            (multiple-value-bind (results passed)
+                                                (run-forms code (or (gethash name *documents*) doc))
+                                              (incf ran (length results))
+                                              (funcall *prompt-progress* (format nil "~d form~:p run" ran))
+                                              (values results passed)))
+                                  :looks *prompt-looks*
+                                  :picture-of (lambda (value)
+                                                (when (picture-p value)
+                                                  (values (picture-png value) (picture-note value))))
+                                  ;; a Gendl whose sexp-agent has no looks yet
+                                  ;; runs the forms and stops there
+                                  :allow-other-keys t)))
       (bt:with-lock-held (*lock*)
-        ;; a form that remade the document (crop, a resize) registered
-        ;; the new one under the name; the turn goes on that one
-        (let ((doc (or (gethash (the-object doc doc-name) *documents*) doc)))
+        (let ((doc (or (gethash name *documents*) doc)))
           (the-object doc (set-slot! :prompt-log
                                      (subseq (cons (cons prompt (getf answer :assistant))
                                                    (the-object doc prompt-log))
@@ -204,7 +377,15 @@ turn kept on the document.  A plist for the page: :reply :forms
     (bt:make-thread
      (lambda ()
        (let ((outcome (handler-case
-                          (let ((*documents* documents))
+                          (let ((*documents* documents)
+                                (*prompt-progress*
+                                  (lambda (note)
+                                    (bt:with-lock-held (*prompt-jobs-lock*)
+                                      (let ((job (gethash id *prompt-jobs*)))
+                                        (when (eql (getf job :status) :working)
+                                          (setf (gethash id *prompt-jobs*)
+                                                (list :status :working :started (getf job :started)
+                                                      :note note))))))))
                             (list :status :done :result (prompt-json (prompt-document doc prompt :session session))))
                         (serious-condition (e)
                           (list :status :failed :error (princ-to-string e))))))
@@ -219,7 +400,7 @@ turn kept on the document.  A plist for the page: :reply :forms
 ...the result}, {status: failed, error}, or {status: unknown}."
   (let ((job (bt:with-lock-held (*prompt-jobs-lock*) (gethash id *prompt-jobs*))))
     (case (getf job :status)
-      (:working (json-string (json-object "status" "working")))
+      (:working (json-string (json-object "status" "working" "note" (getf job :note))))
       (:done (let ((result (yason:parse (getf job :result))))
                (setf (gethash "status" result) "done")
                (json-string result)))

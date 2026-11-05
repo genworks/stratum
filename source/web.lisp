@@ -325,14 +325,20 @@ own."
 
 (defun entry-json (doc entry)
   "The rectangle an undo ENTRY put back, as rect-json gives it; for a
-mode change, {mode, group: [one rectangle per layer]}."
-  (if (eql (first entry) :mode)
-      (json-object "mode" (string-downcase (the-object doc color-mode))
-                   "group" (mapcar (lambda (e) (rect-json doc (the-object doc (layer (first e))) (second e) (cddr e)))
-                                   (cdddr entry))
-                   "undoDepth" (length (the-object doc undo-entries))
-                   "redoDepth" (length (the-object doc redo-entries)))
-      (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry))))
+mode change, {mode, group: [one rectangle per layer]}; for a prompt,
+{whole: true}: the stack itself changed, and the page asks for it."
+  (case (first entry)
+    (:prompt
+     (json-object "whole" 'yason:true
+                  "undoDepth" (length (the-object doc undo-entries))
+                  "redoDepth" (length (the-object doc redo-entries))))
+    (:mode
+     (json-object "mode" (string-downcase (the-object doc color-mode))
+                  "group" (mapcar (lambda (e) (rect-json doc (the-object doc (layer (first e))) (second e) (cddr e)))
+                                  (cdddr entry))
+                  "undoDepth" (length (the-object doc undo-entries))
+                  "redoDepth" (length (the-object doc redo-entries))))
+    (t (rect-json doc (the-object doc (layer (first entry))) (second entry) (cddr entry)))))
 
 (defun handle-mode (req)
   "Image > Mode: {mode: \"rgb\" | \"grayscale\"}; answers {mode, group:

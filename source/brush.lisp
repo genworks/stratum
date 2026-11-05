@@ -319,10 +319,12 @@ trims these lists first when the heap runs short.)")
 
 (defun entry-bytes (entry)
   "The bytes an undo ENTRY holds: a layer or mask entry's, or all of a
-mode change's (:mode from to . entries)."
-  (if (eql (first entry) :mode)
-      (reduce #'+ (cdddr entry) :key #'entry-bytes)
-      (length (seventh entry))))
+mode change's (:mode from to . entries) or a prompt's (:prompt specs
+selection mode . items)."
+  (case (first entry)
+    (:mode (reduce #'+ (cdddr entry) :key #'entry-bytes))
+    (:prompt (reduce #'+ (nthcdr 4 entry) :key #'entry-bytes))
+    (t (length (seventh entry)))))
 
 (defun trimmed-entries (entry entries)
   "ENTRY in front of ENTRIES, kept to *undo-depth* entries and
@@ -337,10 +339,78 @@ mode change's (:mode from to . entries)."
              (push e kept))
     (nreverse kept)))
 
+;;; A prompt is one undo.  Its forms may add and delete layers, set
+;;; opacities and blend modes and the selection, none of which the undo
+;;; list holds, and a change to the stack empties that list.  So while
+;;; a prompt runs the document keeps a journal: the stack's specs, the
+;;; selection and the mode as they were, and the bytes of every in-place
+;;; change, by array, since the layer objects and their indices do not
+;;; last.  The specs hold the arrays themselves; the bytes put those
+;;; arrays back.  At the end the journal is one entry, (:prompt specs
+;;; selection mode . items), on the undo list as it stood when the
+;;; prompt began: undoing it restores the stack those older entries were
+;;; made on, so they stay good.  An item is (array channels x y w h
+;;; bytes), newest first.
+
+(defstruct (prompt-journal (:constructor make-prompt-journal (specs selection mode undo)))
+  specs selection mode undo (items nil))
+
+(defun begin-prompt-journal! (doc)
+  "A journal for a prompt on DOC, now running on it; nil when one is
+running already, whose journal this prompt's changes then join."
+  (unless (the-object doc prompt-journal)
+    (let ((journal (make-prompt-journal (the-object doc specs-now) (the-object doc selection)
+                                        (the-object doc color-mode) (the-object doc undo-entries))))
+      (the-object doc (set-slot! :prompt-journal journal))
+      journal)))
+
+(defun end-prompt-journal! (doc journal changed?)
+  "The prompt is over: with CHANGED? its journal goes on the undo list
+as one entry, over the list as it stood when the prompt began."
+  (when journal
+    (the-object doc (set-slot! :prompt-journal nil))
+    (when changed?
+      (the-object doc (set-slot! :undo-entries
+                                 (trimmed-entries (list* :prompt (prompt-journal-specs journal)
+                                                         (prompt-journal-selection journal)
+                                                         (prompt-journal-mode journal)
+                                                         (prompt-journal-items journal))
+                                                  (prompt-journal-undo journal))))
+      (the-object doc (set-slot! :redo-entries nil)))))
+
+(defun note-bytes! (doc array channels x y w h bytes)
+  "BYTES, the W x H rectangle of ARRAY at X, Y before a change, into the
+running prompt's journal, unless an older item holds that rectangle: it
+is the older bytes that go back, so a whole layer is kept once however
+many filters a prompt runs on it.  No array is one the journal's specs
+do not hold, which goes when they come back."
+  (let ((journal (the-object doc prompt-journal)))
+    (when (and journal array
+               (notany (lambda (item)
+                         (destructuring-bind (a c ix iy iw ih b) item
+                           (declare (ignore c b))
+                           (and (eq a array) (<= ix x) (<= iy y)
+                                (<= (+ x w) (+ ix iw)) (<= (+ y h) (+ iy ih)))))
+                       (prompt-journal-items journal)))
+      (push (list array channels x y w h bytes) (prompt-journal-items journal)))))
+
+(defun note-entry! (doc entry)
+  "An undo ENTRY's bytes into the running prompt's journal."
+  (when (the-object doc prompt-journal)
+    (case (first entry)
+      (:mode (dolist (e (cdddr entry)) (note-entry! doc e)))
+      (:prompt nil)
+      (t (destructuring-bind (index target x y w h bytes) entry
+           (let ((layer (the-object doc (layer index))))
+             (if (eql target :layer)
+                 (note-bytes! doc (the-object layer own-pixels) 4 x y w h bytes)
+                 (note-bytes! doc (the-object layer own-mask) 1 x y w h bytes))))))))
+
 (defun push-undo! (doc entry &key keep-redo)
   "ENTRY, (layer-index target x y w h bytes), onto DOC's undo list, which
 keeps at most *undo-depth* entries and *undo-bytes* bytes.  A new change
 empties the redo list; an undo being redone (KEEP-REDO) does not."
+  (note-entry! doc entry)
   (the-object doc (set-slot! :undo-entries (trimmed-entries entry (the-object doc undo-entries))))
   (unless keep-redo
     (the-object doc (set-slot! :redo-entries nil))))
@@ -490,11 +560,36 @@ renders see the change; the plan is untouched."
                (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version)))))))
           (list x y w h))))))
 
+(defun swap-prompt-entry! (doc entry)
+  "A prompt's entry put back: the bytes, newest first, then the stack,
+the selection and the mode.  The mirror image, for the other list.  The
+stack goes in by its slot: replace-specs! would empty the lists, whose
+older entries this stack is the one for."
+  (destructuring-bind (specs selection mode &rest items) (rest entry)
+    (let ((width (the-object doc doc-width))
+          (height (the-object doc doc-height))
+          (now-specs (the-object doc specs-now))
+          (now-selection (the-object doc selection))
+          (now-mode (the-object doc color-mode))
+          (mirror '()))
+      (dolist (item items)
+        (destructuring-bind (array channels x y w h bytes) item
+          (let ((now (rgba-rect array width height x y w h channels)))
+            (replace-rect! array width x y w h bytes channels)
+            (note-bytes! doc array channels x y w h now)
+            (push (list array channels x y w h now) mirror))))
+      (the-object doc (set-slot! :layer-specs specs))
+      (the-object doc (set-slot! :selection selection))
+      (the-object doc (set-slot! :color-mode mode))
+      (list* :prompt now-specs now-selection now-mode mirror))))
+
 (defun swap-entry! (doc entry)
   "Put ENTRY's bytes back into its layer and return the entry holding
 what they replaced: the mirror image, for the other list.  A mode
 change's entry, (:mode from to . entries), puts every layer back and
-the mode with them."
+the mode with them; a prompt's, the document as it was."
+  (when (eql (first entry) :prompt)
+    (return-from swap-entry! (swap-prompt-entry! doc entry)))
   (when (eql (first entry) :mode)
     (destructuring-bind (from to &rest entries) (rest entry)
       (let ((swapped (mapcar (lambda (e) (swap-entry! doc e)) entries)))
@@ -507,11 +602,13 @@ the mode with them."
       (ecase target
         (:layer
          (let ((now (rgba-rect (the-object layer own-pixels) width height x y w h 4)))
+           (note-bytes! doc (the-object layer own-pixels) 4 x y w h now)
            (replace-rect! (the-object layer own-pixels) width x y w h bytes 4)
            (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
            (list index target x y w h now)))
         (:mask
          (let ((now (rgba-rect (the-object layer own-mask) width height x y w h 1)))
+           (note-bytes! doc (the-object layer own-mask) 1 x y w h now)
            (replace-rect! (the-object layer own-mask) width x y w h bytes 1)
            (the-object layer (set-slot! :mask-version (1+ (the-object layer mask-version))))
            (list index target x y w h now)))))))
@@ -524,7 +621,7 @@ nil when nothing is left to undo."
     (when entry
       (the-object doc (set-slot! :undo-entries (rest (the-object doc undo-entries))))
       (push-redo! doc (swap-entry! doc entry))
-      (if (eql (first entry) :mode) entry (butlast entry)))))
+      (if (member (first entry) '(:mode :prompt)) entry (butlast entry)))))
 
 (defun redo-stroke! (doc)
   "Put back what the last undo took away, exactly, and return
@@ -533,4 +630,4 @@ nil when nothing is left to undo."
     (when entry
       (the-object doc (set-slot! :redo-entries (rest (the-object doc redo-entries))))
       (push-undo! doc (swap-entry! doc entry) :keep-redo t)
-      (if (eql (first entry) :mode) entry (butlast entry)))))
+      (if (member (first entry) '(:mode :prompt)) entry (butlast entry)))))

@@ -129,8 +129,24 @@ each 28 x 28 pixels: 1280 x 853 is some 1400 tokens.")
   "A rectangle smaller than this on its longer side is shown enlarged,
 by a whole factor up to eight.")
 
-(defparameter *prompt-looks* 4
-  "How many times the model may look, and answer again, in one prompt.")
+(defparameter *prompt-looks* 5
+  "How many times the model may look, and answer again, in one prompt:
+at a thing closely, at a selection of it, at a second thing and its
+selection, and once more at the result.")
+
+(defparameter *reading-operators*
+  '(stratum-api:documents stratum-api:describe-document stratum-api:document-info
+    stratum-api:layers stratum-api:layer-info stratum-api:selection stratum-api:look
+    stratum-api:drawing-sources stratum-api:undo stratum-api:redo)
+  "The operations that leave nothing for a prompt's own undo to take
+back.  Undo and redo are among them: 'undo that' is not itself a change
+to undo, and the lists stand as those forms left them.")
+
+(defun changing-result? (result)
+  "Whether RESULT, of run-forms, is of a form that may have changed the
+document, passed or not."
+  (let ((form (getf result :form)))
+    (and (consp form) (not (member (car form) *reading-operators*)))))
 
 (defstruct (picture (:constructor make-picture (png note width height)))
   "What (look) answers: PNG octets WIDTH x HEIGHT and NOTE, the words
@@ -277,17 +293,22 @@ prompt door binds it to put them on the job, for the page.")
 (defun prompt-document (doc prompt &key session)
   "PROMPT done to DOC: the document described, pictured and sent with
 the prompt to the model; its forms run under the lock on DOC; the
-turn kept on the document.  A plist for the page: :reply :forms
-:results :ok :usage :width :height."
+turn kept on the document, and what its forms did one undo, however
+it ended (brush.lisp), unless they remade the document, which like
+Image > Crop has no undo.  A plist for the page: :reply :forms :results
+:ok :usage :width :height."
   (let ((name (the-object doc doc-name))
         (ran 0)
-        state picture history)
+        (changed nil)
+        journal state picture history)
     (bt:with-lock-held (*lock*)
       (let ((stratum-api:*document* doc))
         (setf state (stratum-api:describe-document)))
       (setf picture (document-picture doc)
-            history (reverse (the-object doc prompt-log))))
-    (let ((answer (sexp-agent:ask *agent* prompt
+            history (reverse (the-object doc prompt-log))
+            journal (begin-prompt-journal! doc)))
+    (unwind-protect
+         (let ((answer (sexp-agent:ask *agent* prompt
                                   :state-text (format nil "~a~%The picture with this message is ~a"
                                                       state (picture-note picture))
                                   :image-png (picture-png picture)
@@ -300,6 +321,7 @@ turn kept on the document.  A plist for the page: :reply :forms
                                             (multiple-value-bind (results passed)
                                                 (run-forms code (or (gethash name *documents*) doc))
                                               (incf ran (length results))
+                                              (when (some #'changing-result? results) (setf changed t))
                                               (funcall *prompt-progress* (format nil "~d form~:p run" ran))
                                               (values results passed)))
                                   :looks *prompt-looks*
@@ -326,7 +348,10 @@ turn kept on the document.  A plist for the page: :reply :forms
                 :ok (getf answer :ok)
                 :usage (getf answer :usage)
                 :width (the-object doc doc-width)
-                :height (the-object doc doc-height)))))))
+                :height (the-object doc doc-height)))))
+      (bt:with-lock-held (*lock*)
+        (end-prompt-journal! doc journal
+                             (and changed (eq doc (or (gethash name *documents*) doc))))))))
 
 (defun prompt-json (result)
   (json-string

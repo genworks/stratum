@@ -311,7 +311,10 @@ which paints everywhere.  selection.lisp makes and uses it."
    ("List.  The prompt box's turns on this document, newest first, each
 (prompt . the model's reply), the context of the next prompt
 (prompt.lisp)."
-    prompt-log nil :settable))
+    prompt-log nil :settable)
+   ("Prompt-journal or nil.  While a prompt runs, what it will take to
+put the document back in one undo (brush.lisp)."
+    prompt-journal nil :settable))
 
   :objects
   ((layers :type (:sequence (the layer-types))

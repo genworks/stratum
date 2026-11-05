@@ -1193,6 +1193,8 @@
   function tookRect(res) {
     S.undoDepth = res.undoDepth;
     S.redoDepth = res.redoDepth || 0;
+    // a prompt, undone or redone whole: the stack is another one
+    if (res.whole) return S.refreshAll();
     if (res.group) {
       // a mode change, or its undo: the mode, then every layer it turned
       doc.mode = res.mode;
@@ -1778,11 +1780,18 @@
     return coverage;
   }
 
+  // The selection is announced with its mask, not before: a stroke
+  // begun in between would be previewed as if nothing were selected,
+  // and on a slow link the mask takes a while.  Only the last asked of
+  // several in flight counts.
+  var selectionAsked = 0;
   function loadSelection(rect) {
-    S.selection = rect || null;
-    if (!rect) { selectionMask = null; requestDraw(); return Promise.resolve(null); }
+    var asked = ++selectionAsked;
+    if (!rect) { S.selection = null; selectionMask = null; requestDraw(); return Promise.resolve(null); }
     return fetchPixels(api('selection')).then(function (bytes) {
+      if (asked !== selectionAsked) return rect;
       if (bytes.length !== doc.width * doc.height) throw new Error('selection: ' + bytes.length + ' bytes');
+      S.selection = rect;
       selectionMask = bytes;
       if (!texSelection || texSelection.docWidth !== doc.width || texSelection.docHeight !== doc.height) {
         selectionTexture(doc.width, doc.height);

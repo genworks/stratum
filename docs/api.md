@@ -62,9 +62,9 @@ pixels from where it should be.  So before any operation that needs
 exact places, end the block with `look` at a rectangle around the
 thing, with a margin, small enough to come at full resolution; the
 forms up to it run, the picture arrives, and you answer again with
-the forms that remain.  A few looks may be asked in one request, so
-spend them where they matter: once to see the thing closely, once
-to check the selection or the result.
+the forms that remain.  Only a few looks may be asked in one request,
+so spend them where they matter: once to see a thing closely, once to
+check its selection, and the last on the result.
 
 To change one thing in a photograph (recolor the horns, brighten the
 eyes, blur a sign):
@@ -97,7 +97,9 @@ eyes, blur a sign):
    hue and saturation, what is under it gives light and dark, so
    shading and texture stay.  `:multiply` darkens as it tints,
    `:normal` paints over.
-6. `(select-none)`.
+6. `(select-none)`, then `look` at the thing once more to see the
+   result, and put right what is wrong.  Keep your last look for this:
+   the caption says how many are left.
 
 ## Layers
 
@@ -230,7 +232,11 @@ Each of these remakes the document at a new size; the page reloads.
 - `(rotate turn)` — `:cw`, `:ccw`, `:180`, `:flip-h`, `:flip-v`, or
   degrees clockwise.
 - `(color-mode mode)` — `:rgb` or `:grayscale`.
-- `(undo)`, `(redo)`.
+- `(undo)`, `(redo)` — a whole earlier prompt comes back as one step,
+  layers, settings, selection and all, so "undo that" is one `(undo)`.
+  Within a prompt, a form that changes the stack ends what `undo` can
+  reach of the forms before it.  A prompt that remade the document
+  (crop, a resize, a rotation) has no undo.
 - `(set-history-source)` — the History Brush's source set to the
   document as it is now.
 

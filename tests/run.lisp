@@ -2138,13 +2138,118 @@ stand-in for the model."
                        (= (length (getf answer :results)) 2))
                   (list (length requests) (getf answer :results)))))))))
 
+(defun prompt-with (doc forms)
+  "A prompt on DOC whose model answers FORMS, text, and then nothing."
+  (call-with-stub-model
+   (list (format nil "Done.~%```lisp~%~a~%```" forms))
+   (lambda (agent requests)
+     (declare (ignore requests))
+     (let ((*agent* agent))
+       (prompt-document doc "do it")))))
+
+(defun test-prompt-undo ()
+  "A prompt is one undo: whatever its forms did to the stack, the
+settings, the selection, the mode and the pixels comes back at once,
+and comes back again on redo; the undo list before it stays good."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (untouched (copy-seq (the-object doc (render-cpu)))))
+    (flet ((picture () (copy-seq (the-object doc (render-cpu))))
+           (depths () (list (length (the-object doc undo-entries)) (length (the-object doc redo-entries))))
+           (layer-names () (mapcar (lambda (i) (getf i :name)) (stratum-api:layers)))
+           (opacity () (getf (stratum-api:layer-info 0) :opacity)))
+      ;; a stroke from before the prompt
+      (stratum-api:select-rect 5 5 20 20)
+      (stratum-api:fill-selection 0 '(0 200 0))
+      (stratum-api:select-none)
+      (let ((before (picture)) (names (layer-names)) (was (opacity)))
+        (prompt-with doc "(select-rect 40 40 60 60)
+(fill-selection 0 (10 10 200))
+(add-layer :raster :name \"Tint\")
+(fill-selection \"Tint\" (200 30 30))
+(set-layer \"Tint\" :blend :color)
+(set-layer 0 :opacity 0.5)
+(gaussian-blur 0 2)
+(feather 2)")
+        (let ((after (picture)) (selected (stratum-api:selection)))
+          (check "a prompt that added a layer: one entry over the stroke before it"
+                 (and (equal (depths) '(2 0)) (not (equalp before after))
+                      (= (length (layer-names)) (1+ (length names))))
+                 (depths))
+          (stratum-api:undo)
+          (check "one undo: the picture, byte for byte"
+                 (equalp (picture) before))
+          (check "and the stack, the setting and the selection"
+                 (and (equal (layer-names) names) (= (opacity) was) (null (stratum-api:selection))
+                      (equal (depths) '(1 1)))
+                 (list (layer-names) (opacity) (depths)))
+          (stratum-api:redo)
+          (check "redo: the prompt's picture, byte for byte, and its selection"
+                 (and (equalp (picture) after) (equal (stratum-api:selection) selected)
+                      (equal (depths) '(2 0)) (search "Tint" (format nil "~a" (layer-names))))
+                 (depths))
+          (stratum-api:undo)
+          (stratum-api:undo)
+          (check "the undo list before the prompt still works: the stroke comes off"
+                 (equalp (picture) untouched))
+          (stratum-api:redo)
+          (stratum-api:redo)
+          (check "and both come back" (equalp (picture) after))
+          ;; the words 'undo that'
+          (prompt-with doc "(undo)")
+          (check "a prompt of (undo) takes the last prompt back and leaves no entry of its own"
+                 (and (equalp (picture) before) (equal (depths) '(1 1))) (depths))
+          (prompt-with doc "(redo)")
+          (check "and (redo) brings it back" (and (equalp (picture) after) (equal (depths) '(2 0))) (depths))
+          (stratum-api:undo)))
+      (let ((before (picture)))
+        (prompt-with doc "(look 0 0 50 50) (layers) (selection)")
+        (check "a prompt that only looked leaves no undo" (equal (depths) '(1 1)) (depths))
+        (prompt-with doc "(color-mode :grayscale)")
+        (check "grayscale from a prompt, taken back whole"
+               (and (eql (the-object doc color-mode) :grayscale)
+                    (progn (stratum-api:undo)
+                           (and (eql (the-object doc color-mode) :rgb) (equalp (picture) before)))))
+        (prompt-with doc "(add-layer :raster :name \"Masked\")
+(set-mask 0 :reveal)
+(paint 0 ((30 30) (60 60)) :radius 8 :color (0 0 0) :target :mask)
+(levels 0 :gamma 1.4)
+(levels 0 :gamma 0.8)
+(delete-layer \"Masked\")")
+        (stratum-api:undo)
+        (check "a mask made and painted, two filters and a layer deleted: back in one"
+               (and (equalp (picture) before) (not (getf (stratum-api:layer-info 0) :mask)))))
+      (prompt-with doc "(select-rect 10 10 30 30) (undefined-operation 1)")
+      (check "a prompt that failed part way is one undo as well"
+             (and (equal (stratum-api:selection) '(10 10 30 30))
+                  (progn (stratum-api:undo) (null (stratum-api:selection))))
+             (stratum-api:selection))
+      (check "the journal is put away when a prompt ends" (null (the-object doc prompt-journal)))
+      (let ((name (the-object doc doc-name)))
+        (prompt-with doc "(crop 0 0 100 100)")
+        (let ((new (gethash name *documents*)))
+          (check "a prompt that remade the document has no undo, as a crop has none"
+                 (and (not (eq new doc)) (= (the-object new doc-width) 100)
+                      (null (the-object doc prompt-journal))
+                      (null (the-object new undo-entries))))))
+      (check "a whole layer goes in the journal once"
+             (let* ((stratum-api:*document* nil)
+                    (d (progn (stratum-api:use-document "demo") stratum-api:*document*))
+                    (journal (begin-prompt-journal! d)))
+               (stratum-api:levels 0 :gamma 1.2)
+               (stratum-api:levels 0 :gamma 0.9)
+               (stratum-api:gaussian-blur 0 1)
+               (prog1 (= (length (prompt-journal-items journal)) 1)
+                 (end-prompt-journal! d journal t)))))))
+
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

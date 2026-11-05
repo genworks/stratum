@@ -281,10 +281,14 @@ picture of that part of the document at full resolution, captioned
 with how picture pixels map to document pixels and with the selection
 drawn on it, and it answers again -- to outline a thing closely, then
 to check the outline, then the result (`stratum::*prompt-looks*`
-rounds, four by default; this needs a Gendl whose sexp-agent carries
+rounds, five by default; this needs a Gendl whose sexp-agent carries
 `:looks`, and without one the model works from the first picture
-alone).  The work runs on its own thread: the door answers a job id
-and the page asks after it, showing how far it has got.  Where the model is reached is `(stratum:configure-agent!
+alone).  A prompt is one step of undo, whatever its forms did to the
+stack, the settings and the selection, and the undo list before it
+stays good; only a prompt that remade the document (a crop, a resize)
+has none, as those have none from the menus.  The work runs on its
+own thread: the door answers a job id and the page asks after it,
+showing how far it has got.  Where the model is reached is `(stratum:configure-agent!
 :messages-url ...)`: a key-holding gate in production, or the API with
 `:api-key-file` on a trusted machine.  When the model cannot be
 reached the box shows what its server said, changes nothing, and

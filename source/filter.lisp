@@ -134,32 +134,164 @@ pixels, rows then columns: a fresh array of the same kind."
                                               (aref pass2 (+ o 3)) (float a 1f0))))))))
       pass2)))
 
+;;; One plane at a time.  The channels of a blur never meet, so a layer
+;;; can go through a channel at a time with the numbers of
+;;; gaussian-blur-premul to the last bit, at a quarter of the floats: a
+;;; 5184 x 3456 photo is 72 MB a plane and 287 MB as four channels, and
+;;; three of those at once did not fit the heap.
+
+(defun make-plane (count)
+  (make-array count :element-type 'single-float))
+
+(defun premul-plane! (pixels channel plane count)
+  "PLANE filled with CHANNEL of PIXELS (RGBA8 straight) as decode-premul
+gives it, 3 being alpha."
+  (let ((decode *srgb-decode*))
+    (declare (type (simple-array (unsigned-byte 8) (*)) pixels)
+             (type (simple-array single-float (*)) plane)
+             (type (simple-array double-float (256)) decode)
+             (type fixnum channel count))
+    (parallel-ranges
+     count
+     (lambda (start end)
+       (declare (type fixnum start end))
+       (loop for i of-type fixnum from start below end
+             do (let* ((o (* 4 i))
+                       (a (/ (float (aref pixels (+ o 3)) 1d0) 255d0)))
+                  (setf (aref plane i)
+                        (if (= channel 3)
+                            (float a 1f0)
+                            (float (* a (aref decode (aref pixels (+ o channel)))) 1f0)))))))
+    plane))
+
+(defun blur-plane! (plane scratch w h sigma)
+  "PLANE (W x H single floats) blurred in place by SIGMA pixels, rows
+into SCRATCH and columns back, as gaussian-blur-premul blurs a channel."
+  (multiple-value-bind (weights extent) (gaussian-kernel (float sigma 1d0))
+    (declare (type (simple-array double-float (*)) weights) (type fixnum extent)
+             (type (simple-array single-float (*)) plane scratch)
+             (type fixnum w h))
+    (parallel-ranges h
+                     (lambda (start end)
+                       (declare (type fixnum start end))
+                       (loop for y of-type fixnum from start below end
+                             do (dotimes (x w)
+                                  (let ((v 0d0))
+                                    (declare (type double-float v))
+                                    (loop for i of-type fixnum from (- extent) to extent
+                                          do (let ((sx (max 0 (min (1- w) (+ x i)))))
+                                               (incf v (* (aref weights (+ i extent))
+                                                          (aref plane (+ sx (* y w)))))))
+                                    (setf (aref scratch (+ x (* y w))) (float v 1f0)))))))
+    (parallel-ranges w
+                     (lambda (start end)
+                       (declare (type fixnum start end))
+                       (loop for x of-type fixnum from start below end
+                             do (dotimes (y h)
+                                  (let ((v 0d0))
+                                    (declare (type double-float v))
+                                    (loop for i of-type fixnum from (- extent) to extent
+                                          do (let ((sy (max 0 (min (1- h) (+ y i)))))
+                                               (incf v (* (aref weights (+ i extent))
+                                                          (aref scratch (+ x (* sy w)))))))
+                                    (setf (aref plane (+ x (* y w))) (float v 1f0)))))))
+    plane))
+
+(defun encode-channel! (out channel plane alpha count)
+  "Channel CHANNEL of OUT from PLANE over ALPHA, as encode-premul does;
+3 is alpha itself, and an empty pixel is zero in every channel."
+  (declare (type (simple-array (unsigned-byte 8) (*)) out)
+           (type (simple-array single-float (*)) plane alpha)
+           (type fixnum channel count))
+  (parallel-ranges
+   count
+   (lambda (start end)
+     (declare (type fixnum start end))
+     (loop for i of-type fixnum from start below end
+           do (let ((a (float (aref alpha i) 1d0))
+                    (o (+ channel (* 4 i))))
+                (setf (aref out o)
+                      (cond ((<= a 0d0) 0)
+                            ((= channel 3) (unit->byte a))
+                            (t (unit->byte (linear->srgb (/ (float (aref plane i) 1d0) a)))))))))))
+
 (defun gaussian-blur-rgba (pixels w h sigma)
   "PIXELS (W x H RGBA8, straight alpha) blurred by SIGMA pixels: a fresh
 RGBA8 vector."
-  (encode-premul (gaussian-blur-premul (decode-premul pixels w h) w h sigma) w h))
+  (let* ((count (* w h))
+         (alpha (make-plane count))
+         (plane (make-plane count))
+         (scratch (make-plane count))
+         (out (make-rgba w h)))
+    (premul-plane! pixels 3 alpha count)
+    (blur-plane! alpha scratch w h sigma)
+    (dotimes (channel 3)
+      (premul-plane! pixels channel plane count)
+      (blur-plane! plane scratch w h sigma)
+      (encode-channel! out channel plane alpha count))
+    (encode-channel! out 3 alpha alpha count)
+    out))
 
 (defun unsharp-mask-rgba (pixels w h radius amount threshold)
   "PIXELS sharpened: each color channel moved away from its blur (RADIUS)
 by AMOUNT (1 = 100%) of the difference, where the difference exceeds
-THRESHOLD levels; alpha untouched."
-  (let* ((premul (decode-premul pixels w h))
-         (blur (gaussian-blur-premul premul w h (max 0.1d0 (float radius 1d0))))
-         (out (make-array (* 4 w h) :element-type 'single-float))
+THRESHOLD levels; alpha untouched.  A channel at a time, on two float
+planes.  With a threshold, whether a pixel sharpens is a matter of all
+three channels, so a first round of blurs marks the pixels; with none,
+a pixel that no channel moves is left as it is by the arithmetic."
+  (let* ((count (* w h))
+         (sigma (max 0.1d0 (float radius 1d0)))
          (amount (float amount 1d0))
-         (limit (/ (float threshold 1d0) 255d0)))
-    (declare (type (simple-array single-float (*)) premul blur out))
-    (dotimes (i (* w h))
-      (let* ((o (* 4 i))
-             (dr (- (aref premul o) (aref blur o)))
-             (dg (- (aref premul (+ o 1)) (aref blur (+ o 1))))
-             (db (- (aref premul (+ o 2)) (aref blur (+ o 2))))
-             (on (> (max (abs dr) (abs dg) (abs db)) limit)))
-        (setf (aref out o) (if on (float (max 0d0 (+ (aref premul o) (* amount dr))) 1f0) (aref premul o))
-              (aref out (+ o 1)) (if on (float (max 0d0 (+ (aref premul (+ o 1)) (* amount dg))) 1f0) (aref premul (+ o 1)))
-              (aref out (+ o 2)) (if on (float (max 0d0 (+ (aref premul (+ o 2)) (* amount db))) 1f0) (aref premul (+ o 2)))
-              (aref out (+ o 3)) (aref premul (+ o 3)))))
-    (encode-premul out w h)))
+         (limit (/ (float threshold 1d0) 255d0))
+         (plane (make-plane count))
+         (scratch (make-plane count))
+         (marks (when (> limit 0d0)
+                  (make-array count :element-type '(unsigned-byte 8) :initial-element 0)))
+         (out (make-rgba w h))
+         (decode *srgb-decode*))
+    (declare (type (simple-array single-float (*)) plane scratch)
+             (type (simple-array (unsigned-byte 8) (*)) pixels out)
+             (type (simple-array double-float (256)) decode)
+             (type double-float amount limit)
+             (type fixnum count))
+    (flet ((each-pixel (fn)
+             ;; FN of the pixel's index, its alpha and CHANNEL's premultiplied value
+             (lambda (channel)
+               (declare (type fixnum channel))
+               (parallel-ranges
+                count
+                (lambda (start end)
+                  (declare (type fixnum start end))
+                  (loop for i of-type fixnum from start below end
+                        do (let* ((o (* 4 i))
+                                  (a0 (/ (float (aref pixels (+ o 3)) 1d0) 255d0)))
+                             (funcall fn i channel (float a0 1f0)
+                                      (float (* a0 (aref decode (aref pixels (+ o channel)))) 1f0)))))))))
+      (when marks
+        (let ((mark (each-pixel (lambda (i channel a p)
+                                  (declare (ignore channel a) (type fixnum i) (type single-float p))
+                                  (when (> (abs (- p (aref plane i))) limit)
+                                    (setf (aref marks i) 1))))))
+          (dotimes (channel 3)
+            (blur-plane! (premul-plane! pixels channel plane count) scratch w h sigma)
+            (funcall mark channel))))
+      (let ((sharpen (each-pixel
+                      (lambda (i channel a p)
+                        (declare (type fixnum i channel) (type single-float a p))
+                        (let* ((d (- p (aref plane i)))
+                               (v (if (or (null marks) (= (aref marks i) 1))
+                                      (float (max 0d0 (+ p (* amount d))) 1f0)
+                                      p))
+                               (alpha (float a 1d0))
+                               (o (* 4 i)))
+                          (setf (aref out (+ o channel))
+                                (if (> alpha 0d0) (unit->byte (linear->srgb (/ (float v 1d0) alpha))) 0))
+                          (when (= channel 2)
+                            (setf (aref out (+ o 3)) (if (> alpha 0d0) (unit->byte alpha) 0))))))))
+        (dotimes (channel 3)
+          (blur-plane! (premul-plane! pixels channel plane count) scratch w h sigma)
+          (funcall sharpen channel))))
+    out))
 
 (defun noise-hash (x y c seed)
   "A number in [0, 1) from pixel X, Y, channel C and SEED, the integer

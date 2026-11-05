@@ -142,23 +142,74 @@ composited picture (nil, or any other layer)."
                      (the-object doc (render-cpu)))))
     (set-selection-mask! doc (wand-mask pixels w h x y (max 0 (min 255 (round tolerance))) contiguous) mode)))
 
+(defparameter *feather-exact-sigma* 12d0
+  "Up to this radius a feather is the exact blur.  Past it the mask is
+blurred at a reduced size and scaled back: a mask that soft has nothing
+left at full size for the blur to keep, and the exact kernel over a
+photo is minutes of work under the server's lock.")
+
+(defun feather-mask-exact (mask w h sigma)
+  "MASK (W x H bytes) blurred by SIGMA: fresh bytes."
+  (let* ((count (* w h))
+         (plane (make-plane count))
+         (scratch (make-plane count))
+         (out (make-gray w h)))
+    (dotimes (i count)
+      (setf (aref plane i) (/ (float (aref mask i) 1f0) 255f0)))
+    (blur-plane! plane scratch w h sigma)
+    (dotimes (i count out)
+      (setf (aref out i) (unit->byte (float (aref plane i) 1d0))))))
+
+(defun feather-mask-reduced (mask w h sigma)
+  "MASK blurred by SIGMA at a reduced size: averaged down by K, blurred,
+and scaled back bilinearly, the blur narrowed by what the averaging
+already does (a box of K has a variance of K squared over twelve)."
+  (let* ((k (max 2 (floor sigma 6)))
+         (sw (ceiling w k))
+         (sh (ceiling h k))
+         (small (make-plane (* sw sh)))
+         (scratch (make-plane (* sw sh)))
+         (reduced-sigma (/ (sqrt (max 1d0 (- (* sigma sigma) (/ (* k k) 12d0)))) k))
+         (out (make-gray w h)))
+    (dotimes (sy sh)
+      (dotimes (sx sw)
+        (let ((sum 0) (n 0))
+          (loop for y from (* sy k) below (min h (* (1+ sy) k))
+                do (loop for x from (* sx k) below (min w (* (1+ sx) k))
+                         do (incf sum (aref mask (+ x (* y w))))
+                            (incf n)))
+          (setf (aref small (+ sx (* sy sw))) (float (/ sum (* 255d0 n)) 1f0)))))
+    (blur-plane! small scratch sw sh reduced-sigma)
+    (flet ((axis (p limit)
+             ;; the reduced cell under P and the way to the next one
+             (let* ((s (max 0d0 (min (float (1- limit) 1d0) (- (/ (+ p 0.5d0) k) 0.5d0))))
+                    (i (min (max 0 (- limit 2)) (floor s))))
+               (values i (- s i)))))
+      (dotimes (y h out)
+        (multiple-value-bind (y0 fy) (axis y sh)
+          (let ((y1 (min (1- sh) (1+ y0))))
+            (dotimes (x w)
+              (multiple-value-bind (x0 fx) (axis x sw)
+                (let* ((x1 (min (1- sw) (1+ x0)))
+                       (top (+ (* (- 1d0 fx) (aref small (+ x0 (* y0 sw)))) (* fx (aref small (+ x1 (* y0 sw))))))
+                       (bottom (+ (* (- 1d0 fx) (aref small (+ x0 (* y1 sw)))) (* fx (aref small (+ x1 (* y1 sw)))))))
+                  (setf (aref out (+ x (* y w)))
+                        (unit->byte (+ (* (- 1d0 fy) top) (* fy bottom)))))))))))))
+
 (defun feather-selection! (doc radius)
-  "The selection's edge softened by a Gaussian blur of RADIUS pixels
-(the mask riding in an alpha channel through gaussian-blur-premul);
+  "The selection's edge softened by a Gaussian blur of RADIUS pixels;
 nothing without a selection."
   (let ((selection (the-object doc selection))
         (w (the-object doc doc-width))
-        (h (the-object doc doc-height)))
+        (h (the-object doc doc-height))
+        (sigma (max 0.1d0 (float radius 1d0))))
     (when selection
-      (let* ((mask (getf selection :mask))
-             (premul (make-array (* 4 w h) :element-type 'single-float :initial-element 0f0)))
-        (dotimes (i (* w h))
-          (setf (aref premul (+ 3 (* 4 i))) (/ (float (aref mask i) 1f0) 255f0)))
-        (let ((blurred (gaussian-blur-premul premul w h (max 0.1d0 (float radius 1d0))))
-              (out (make-gray w h)))
-          (dotimes (i (* w h))
-            (setf (aref out i) (unit->byte (float (aref blurred (+ 3 (* 4 i))) 1d0))))
-          (the-object doc (set-slot! :selection (make-selection out w h))))))))
+      (let ((mask (getf selection :mask)))
+        (the-object doc (set-slot! :selection
+                                   (make-selection (if (> sigma *feather-exact-sigma*)
+                                                       (feather-mask-reduced mask w h sigma)
+                                                       (feather-mask-exact mask w h sigma))
+                                                   w h)))))))
 
 (defun select-all! (doc)
   (select-rect! doc 0 0 (the-object doc doc-width) (the-object doc doc-height)))

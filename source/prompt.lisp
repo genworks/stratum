@@ -58,9 +58,35 @@ high) and the SESSION-HEADER a gate reads.  The agent as it stands."
   "FORMS, a string or a list, run through the agent's sandbox on
 DOCUMENT (the current one) under the lock: what sexp-agent:run-forms
 answers.  The same door the prompt box's forms go through."
-  (bt:with-lock-held (*lock*)
-    (let ((stratum-api:*document* document))
-      (sexp-agent:run-forms *agent* forms))))
+  (let ((forms (if (stringp forms)
+                   (handler-case (sexp-agent:read-forms *agent* forms)
+                     (error (e)
+                       (return-from run-forms
+                         (values (list (list :form forms :ok nil
+                                             :error (format nil "The forms could not be read: ~a" e)))
+                                 nil))))
+                   forms))
+        (results '()))
+    (bt:with-lock-held (*lock*)
+      (let ((stratum-api:*document* document))
+        ;; one at a time: heap exhausted is no ERROR, so a sandbox that
+        ;; catches errors alone would lose every result with it, and leave
+        ;; the page not knowing what the forms before it had done
+        (dolist (form forms)
+          (let ((result (handler-case (first (sexp-agent:run-forms *agent* (list form)))
+                          ;; an image whose compiled sexp-agent catches errors alone
+                          (serious-condition (e)
+                            (list :form form :ok nil
+                                  :error (if (typep e 'storage-condition)
+                                             "There is not enough memory for this operation."
+                                             (princ-to-string e)))))))
+            (push result results)
+            (unless (getf result :ok)
+              ;; what the failed form left behind goes before the next request
+              (full-gc)
+              (return))))))
+    (let ((results (nreverse results)))
+      (values results (every (lambda (r) (getf r :ok)) results)))))
 
 (defparameter *prompt-picture-size* 640
   "The longer side, in pixels, of the picture of the document the

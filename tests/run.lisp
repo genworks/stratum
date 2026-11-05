@@ -1576,6 +1576,76 @@ no file, no gate."
              (check "revoking twice does nothing" (not (stratum::revoke-invite! token)))))
       (when (probe-file file) (delete-file file)))))
 
+(defun test-noise (count &optional (seed 20261104))
+  "COUNT bytes of noise, the same on every run and every implementation
+(a linear congruential generator, not RANDOM, whose states differ)."
+  (let ((v (make-array count :element-type '(unsigned-byte 8))))
+    (dotimes (i count v)
+      (setf seed (mod (+ (* seed 1103515245) 12345) 2147483648))
+      (setf (aref v i) (ldb (byte 8 16) seed)))))
+
+(defun reference-unsharp (pixels w h radius amount threshold)
+  "Unsharp Mask as it was before it went a plane at a time, every
+channel at once: what unsharp-mask-rgba must equal to the last bit."
+  (let* ((premul (decode-premul pixels w h))
+         (blur (gaussian-blur-premul premul w h (max 0.1d0 (float radius 1d0))))
+         (out (make-array (* 4 w h) :element-type 'single-float))
+         (amount (float amount 1d0))
+         (limit (/ (float threshold 1d0) 255d0)))
+    (dotimes (i (* w h))
+      (let* ((o (* 4 i))
+             (dr (- (aref premul o) (aref blur o)))
+             (dg (- (aref premul (+ o 1)) (aref blur (+ o 1))))
+             (db (- (aref premul (+ o 2)) (aref blur (+ o 2))))
+             (on (> (max (abs dr) (abs dg) (abs db)) limit)))
+        (setf (aref out o) (if on (float (max 0d0 (+ (aref premul o) (* amount dr))) 1f0) (aref premul o))
+              (aref out (+ o 1)) (if on (float (max 0d0 (+ (aref premul (+ o 1)) (* amount dg))) 1f0) (aref premul (+ o 1)))
+              (aref out (+ o 2)) (if on (float (max 0d0 (+ (aref premul (+ o 2)) (* amount db))) 1f0) (aref premul (+ o 2)))
+              (aref out (+ o 3)) (aref premul (+ o 3)))))
+    (encode-premul out w h)))
+
+(defun test-planes ()
+  "The filters a plane at a time: the same numbers as every channel at
+once, the reduced feather close to the exact one, and a form that runs
+out of memory failing alone."
+  (let* ((w 97) (h 61)
+         (pixels (let ((v (test-noise (* 4 w h))))
+                   ;; some empty and nearly empty pixels among them
+                   (loop for i from 3 below (length v) by 4
+                         when (< (aref v i) 80) do (setf (aref v i) (mod (aref v i) 2)))
+                   v)))
+    (check "blur a plane at a time equals every channel at once"
+           (equalp (gaussian-blur-rgba pixels w h 2.5d0)
+                   (encode-premul (gaussian-blur-premul (decode-premul pixels w h) w h 2.5d0) w h)))
+    (check "unsharp a plane at a time equals every channel at once"
+           (equalp (unsharp-mask-rgba pixels w h 2 1.5d0 0)
+                   (reference-unsharp pixels w h 2 1.5d0 0)))
+    (check "unsharp with a threshold, the same"
+           (equalp (unsharp-mask-rgba pixels w h 3 0.8d0 12)
+                   (reference-unsharp pixels w h 3 0.8d0 12))))
+  (let* ((w 420) (h 300)
+         (mask (rasterize-rect w h 90 70 240 160))
+         (exact (feather-mask-exact mask w h 40d0))
+         (reduced (feather-mask-reduced mask w h 40d0))
+         (worst (loop for i below (* w h)
+                      maximize (abs (- (aref exact i) (aref reduced i))))))
+    (check "the reduced feather stays within two levels of the exact one" (<= worst 2) worst))
+  (let* ((agent (sexp-agent::copy-agent *agent*))
+         (operator (intern "TEST-RUNS-OUT" :stratum-api))
+         (*agent* agent))
+    (setf (symbol-function operator) (lambda () (error (make-condition 'storage-condition))))
+    (setf (sexp-agent:agent-operators agent) (list* operator (sexp-agent:agent-operators agent)))
+    (let* ((stratum-api:*document* nil)
+           (*documents* (make-hash-table :test 'equal)))
+      (stratum-api:use-document "parity")
+      (multiple-value-bind (results ok) (run-forms "(selection) (test-runs-out) (selection)")
+        (check "a form out of memory fails alone, the one before it kept"
+               (and (not ok) (= (length results) 2)
+                    (getf (first results) :ok)
+                    (search "not enough memory" (getf (second results) :error)))
+               results)))
+    (fmakunbound operator)))
+
 (defun free-port ()
   "A port nothing listens on just now."
   (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
@@ -1755,7 +1825,7 @@ picture, the reference and the rules."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-api test-prompt
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-api test-prompt
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -4361,9 +4361,10 @@
       }
       return S.refreshAll().then(function () { return res; });
     }, function (e) {
-      showPromptTurn(text, { error: e.message });
-      status('prompt failed: ' + e.message);
-      throw e;
+      showPromptTurn(text, { error: plainError(e) });
+      status('prompt failed');
+      // forms may have run before it failed: show what is there now
+      return S.refreshAll().then(function () { throw e; }, function () { throw e; });
     });
   };
 

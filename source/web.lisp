@@ -939,21 +939,37 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 
 (defparameter *response-payload-too-large* (net.aserve::make-resp 413 "Payload Too Large"))
 
-(defun reply-text (req ent response text)
+(defparameter *response-unsupported-media-type* (net.aserve::make-resp 415 "Unsupported Media Type"))
+
+(defun reply-text (req ent response text &key (drain *drained-body-bytes*))
   "Answer TEXT with RESPONSE and close the connection, so a body the
 door could not read is not read now, outside any handler.  A body
-within reason is dropped first, in pieces, so the words arrive."
-  (drain-body! req *drained-body-bytes*)
+within DRAIN bytes is dropped first, in pieces, so the words arrive."
+  (drain-body! req drain)
   (net.aserve:with-http-response (req ent :content-type "text/plain" :response response)
     (close-after-reply! req)
     (net.aserve:with-http-body (req ent)
       (write-string text (net.aserve:request-reply-stream req)))))
 
+(defun form-body? (req)
+  "True for a form-encoded body, which asking for any query value
+reads whole, as a string.  No door here takes one."
+  (and (member (net.aserve:request-method req) '(:post :put :patch))
+       (search "application/x-www-form-urlencoded"
+               (or (net.aserve:header-slot-value req :content-type) "")
+               :test #'char-equal)))
+
 (defun door-admits? (req ent limit &key upload?)
   "True when REQ may come in: a live invite, and a body within LIMIT
 that an upload has room for.  Otherwise REQ is answered here, with its
-body unread, and the answer is nil."
-  (cond ((not (invite-allowed? req)) (refuse req ent) nil)
+body unread, and the answer is nil.  A form body is turned away before
+the gate is asked, since the gate looks at the query: that holds in an
+image whose compiled invite-gate reads it."
+  (cond ((form-body? req)
+         (reply-text req ent *response-unsupported-media-type* "This door takes no form posts."
+                     :drain *refused-body-bytes*)
+         nil)
+        ((not (invite-allowed? req)) (refuse req ent) nil)
         (t (ensure-invite-cookie! req)
            (let ((refusal (body-refusal (request-content-length req) limit :upload? upload?)))
              (when refusal (reply-text req ent *response-payload-too-large* refusal))
@@ -1017,6 +1033,27 @@ publish-stratum! runs, for files loaded after this one (prompt.lisp).
 Not gwl:*publishers*, which the stratum package inherits: those are
 the image's own, called with one argument at its start.")
 
+(defun publish-prefix-doors (server host)
+  "Two doors that read no body.  The invite link answers GET alone.
+Everything else under /stratum, which the proxy sends here whether or
+not it is published, gets a 404 from here: AllegroServe's own reads
+the body of a POST first, as one string, which a large POST turns into
+a worker lost for good."
+  (let ((invite-prefix "/stratum/invite/"))
+    (net.aserve:publish-prefix
+     :prefix invite-prefix :server server :host host
+     :function (lambda (req ent)
+                 (if (eq (net.aserve:request-method req) :get)
+                     (invite-gate:invite-door *gate* req ent
+                                              (subseq (net.uri:uri-path (net.aserve:request-uri req))
+                                                      (length invite-prefix)))
+                     (refuse req ent)))))
+  (net.aserve:publish-prefix
+   :prefix "/stratum" :server server :host host
+   :function (lambda (req ent)
+               (reply-text req ent net.aserve:*response-not-found* "Not found."
+                           :drain *refused-body-bytes*))))
+
 (defun publish-stratum! (&key host)
   "Publish the page at /stratum/ and its API under /stratum/api/."
   (gwl:with-all-servers (server)
@@ -1024,7 +1061,7 @@ the image's own, called with one argument at its start.")
              (publish-door server host path content-type fn :upload? upload?)))
       ;; the invite link of the private beta (invite.lisp): no gate
       ;; without an invites file
-      (invite-gate:publish-invite-door *gate* :server server :host host)
+      (publish-prefix-doors server host)
       (pub "/stratum" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/" "text/html" (lambda (req) (declare (ignore req)) (page-html)))
       (pub "/stratum/viewer.js" "application/javascript"

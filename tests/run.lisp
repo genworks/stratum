@@ -1583,14 +1583,15 @@ no file, no gate."
     (usocket:socket-close socket)
     port))
 
-(defun raw-post (port path bytes)
+(defun raw-post (port path bytes &optional (content-type "application/octet-stream"))
   "POST BYTES to PATH over a plain socket and read the answer to the
 end: (status text).  A connection reset here, the reply lost to bytes
 left unread at the close, is a failure, as it is for a person."
   (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
          (stream (usocket:socket-stream socket))
-         (head (format nil "POST ~a HTTP/1.1~c~cHost: 127.0.0.1~c~cConnection: close~c~cContent-Type: application/octet-stream~c~cContent-Length: ~d~c~c~c~c"
-                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline
+         (head (format nil "POST ~a HTTP/1.1~c~cHost: 127.0.0.1~c~cConnection: close~c~cContent-Type: ~a~c~cContent-Length: ~d~c~c~c~c"
+                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                       content-type #\Return #\Newline
                        (length bytes) #\Return #\Newline #\Return #\Newline)))
     (unwind-protect
          (progn
@@ -1628,12 +1629,14 @@ no invite gets the gate's page with the body unread."
          (old-max *max-upload-bytes*)
          (old-small *max-request-bytes*)
          (file (format nil "/tmp/stratum-upload-test-~d.sexp" (get-universal-time))))
-    (flet ((post (path body) (raw-post port path body)))
+    (flet ((post (path body &optional (content-type "application/octet-stream"))
+             (raw-post port path body content-type)))
       (unwind-protect
            (progn
              (publish-door server nil "/up" "application/json"
                            (lambda (req) (setf seen (request-octets req)) "{}") :upload? t)
              (publish-door server nil "/small" "application/json" (lambda (req) (declare (ignore req)) "{}"))
+             (publish-prefix-doors server nil)
              (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
              (check "an upload arrives whole" (eql (first (post "/up" bytes)) 200))
              (check "byte for byte, as octets"
@@ -1651,6 +1654,14 @@ no invite gets the gate's page with the body unread."
              (let ((answer (post "/up" bytes)))
                (check "no invite: the gate's page, the body unread"
                       (and (eql (first answer) 403) (search "private beta" (second answer))) answer))
+             (let ((answer (post "/up" bytes "application/x-www-form-urlencoded")))
+               (check "a form post is turned away before the gate reads it"
+                      (and (eql (first answer) 415) (search "no form posts" (second answer))) answer))
+             (let ((answer (post "/stratum/nothing-here" bytes "application/x-www-form-urlencoded")))
+               (check "nothing published: our 404, the body unread"
+                      (and (eql (first answer) 404) (search "Not found" (second answer))) answer))
+             (let ((answer (post "/stratum/invite/nobody" bytes)))
+               (check "the invite link answers GET alone" (eql (first answer) 403) answer))
              (check "the server still answers after a refusal"
                     (progn (configure-gate! :invites-file nil)
                            (eql (first (post "/up" bytes)) 200))))

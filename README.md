@@ -298,6 +298,23 @@ it, and moves what it already holds between texture layers on the
 GPU, so adding an adjustment layer or reordering the stack of a
 photograph sends no pixels at all.
 
+What is fetched comes down packed.  A page that can inflate asks the
+pixel doors (`raster`, `mask`, `history`, `selection`) with `?enc=d`
+and is answered one byte, the step, then a zlib stream of the bytes,
+each less the byte that many before it (step 0: as they are): exact,
+like the way up.  A new, mostly empty layer or a mask comes to a
+hundredth of its bytes or less, the 1920 x 1080 demo sample to 2 MB
+from 50, and a photograph to about a third (the pure-Lisp compressor
+writes fixed codes only).
+
+The menus, tools and panel show as soon as the document's structure is
+known, and wait, dimmed, for its pixels.  After File > Open the status
+line says where the time went: decode, pack, send (with the server's
+own count of how long the body took to arrive and the document to
+make), and the load of the page that followed.  The page's two scripts
+are addressed with a version, so a cache between the server and the
+browser cannot pair an old script with a new server.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file

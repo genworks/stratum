@@ -67,6 +67,13 @@ free: the octets, an undo entry of them, and a render's working room.")
 (defvar *upload-octets* nil
   "The body of the upload being served, read before the lock is taken.")
 
+(defvar *upload-read-ms* nil
+  "How long that body took to arrive, in milliseconds.")
+
+(defun elapsed-ms (began)
+  "Milliseconds since BEGAN, a get-internal-real-time."
+  (round (* 1000 (- (get-internal-real-time) began)) internal-time-units-per-second))
+
 (defparameter *heap-high-water* 0.7
   "The fraction of the heap in use above which relieve-memory! acts.")
 
@@ -714,6 +721,49 @@ the pixel to its left."
                     (when (= channels 3) (setf (aref out (+ o 3)) 255)))))))
     out))
 
+;;; Pixels go down packed as well, when the page asks (?enc=d on a door
+;;; of pixels): one byte, the step, then a zlib stream of the bytes, each
+;;; less the byte STEP before it (step 0: as they are).  Exact, like the
+;;; way up.  salza2 writes fixed codes only, so a photograph comes to a
+;;; third or so of its bytes; a layer that is mostly empty, or a mask, to
+;;; a hundredth and less -- and a new layer is the common case.
+
+(defparameter *pack-band-bytes* 1048576
+  "Differences are taken this many bytes at a time, so packing a layer
+of a photograph does not need a second layer's worth of heap.")
+
+(defun pack-pixels (octets step)
+  "OCTETS as the page takes them under ?enc=d.  No pixels are the step
+alone: salza2's stream of nothing is not one every inflater reads."
+  (declare (type (simple-array (unsigned-byte 8) (*)) octets) (type fixnum step))
+  (let* ((n (length octets))
+         (chunks (list (make-array 1 :element-type '(unsigned-byte 8) :initial-element step)))
+         (total 1)
+         (compressor (make-instance 'salza2:zlib-compressor
+                                    :callback (lambda (buffer end)
+                                                (push (subseq buffer 0 end) chunks)
+                                                (incf total end)))))
+    (declare (type fixnum n total))
+    (when (zerop n) (return-from pack-pixels (first chunks)))
+    (if (zerop step)
+        (salza2:compress-octet-vector octets compressor)
+        (let* ((size (min n *pack-band-bytes*))
+               (band (make-array size :element-type '(unsigned-byte 8))))
+          (declare (type fixnum size))
+          (loop for start of-type fixnum from 0 below n by size
+                for end of-type fixnum = (min n (+ start size))
+                do (loop for k of-type fixnum from start below end
+                         do (setf (aref band (- k start))
+                                  (logand 255 (- (aref octets k)
+                                                 (if (>= k step) (aref octets (- k step)) 0)))))
+                   (salza2:compress-octet-vector band compressor :end (- end start)))))
+    (salza2:finish-compression compressor)
+    (let ((out (make-array total :element-type '(unsigned-byte 8))) (at 0))
+      (declare (type fixnum at))
+      (dolist (chunk (nreverse chunks) out)
+        (replace out chunk :start1 at)
+        (incf at (length chunk))))))
+
 (defun ensure-room (bytes)
   "An error in words unless the heap has room for BYTES of image and
 what working on it takes."
@@ -746,11 +796,15 @@ deflated (?enc=sub3 or sub4, see above) or raw RGBA8."
 (defun handle-open (req)
   "A new document from the image in the body (a PNG file, or raw RGBA8
 with ?w=&h=; ?name=), one Background layer; answers {doc, width,
-height}."
-  (multiple-value-bind (pixels w h) (request-image req)
-    (let ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled"))))
-      (setf (gethash name *documents*) (make-file-document name w h pixels))
-      (json-string (json-object "doc" name "width" w "height" h)))))
+height, readMs, workMs}: how long the body took to arrive here and the
+document to make, for the page's account of a slow open."
+  (let ((began (get-internal-real-time)))
+    (multiple-value-bind (pixels w h) (request-image req)
+      (let ((name (unique-document-name (or (net.aserve:request-query-value "name" req) "untitled"))))
+        (setf (gethash name *documents*) (make-file-document name w h pixels))
+        (json-string (json-object "doc" name "width" w "height" h
+                                  "readMs" (or *upload-read-ms* 0)
+                                  "workMs" (elapsed-ms began)))))))
 
 (defun handle-place (req)
   "The image in the body (a PNG file, or raw RGBA8 with ?w=&h=) as a new
@@ -961,6 +1015,10 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   white-space: pre-wrap; margin: 3px 0 0; }
 .st-prompt-forms .st-failed { color: #e07a7a; }
 .st-prompt-busy { color: #8a9099; font-style: italic; }
+body.st-loading #stratum-menubar, body.st-loading #stratum-tools, body.st-loading #stratum-view,
+body.st-loading #stratum-layers, body.st-loading #stratum-prompt { pointer-events: none; }
+body.st-loading #stratum-menubar, body.st-loading #stratum-tools,
+body.st-loading #stratum-layers, body.st-loading #stratum-prompt { opacity: .5; }
 @media (max-width: 700px) {
   #stratum-app { flex-direction: column; }
   #stratum-view { height: 60vh; flex: none; width: 100%; }
@@ -992,13 +1050,23 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
                (:div :id "stratum-status" "Loading...")
                (:div :id "stratum-layers" "")
                (:div :id "stratum-prompt" "")))
-           (:script :src "/stratum/dual.js" "")
-           (:script :src "/stratum/viewer.js" "")))))
+           ;; a version in each address: a cache between here and the
+           ;; browser keeps a script by its address, and would hand a new
+           ;; server's page the old one
+           (:script :src (format nil "/stratum/dual.js?v=~a" (sxhash (dual-functions-js))) "")
+           (:script :src (format nil "/stratum/viewer.js?v=~a" (viewer-version)) "")))))
 
-(defvar *page* nil)
+(defun viewer-version ()
+  (file-write-date (merge-pathnames "web/viewer.js" *stratum-dir*)))
+
+(defvar *page* nil
+  "(version . page): the page made for the viewer.js then on disk.")
 
 (defun page-html ()
-  (the-object (or *page* (setf *page* (make-object 'stratum-page))) main-sheet))
+  (let ((version (viewer-version)))
+    (unless (eql version (car *page*))
+      (setf *page* (cons version (make-object 'stratum-page))))
+    (the-object (cdr *page*) main-sheet)))
 
 (defparameter *response-payload-too-large* (net.aserve::make-resp 413 "Payload Too Large"))
 
@@ -1038,15 +1106,22 @@ image whose compiled invite-gate reads it."
              (when refusal (reply-text req ent *response-payload-too-large* refusal))
              (not refusal)))))
 
-(defun reply (req ent content-type thunk)
+(defun reply (req ent content-type thunk &key pack)
   "Run THUNK under the lock, then send its string or octets; a failure
-goes back as a 500 carrying the condition's text."
+goes back as a 500 carrying the condition's text.  With PACK, a step,
+the octets are pixels and go packed to a page that asks (?enc=d, see
+pack-pixels): outside the lock, a second or so for a photograph's
+layer."
   (let ((result nil) (failure nil))
     (bt:with-lock-held (*lock*)
       ;; serious-condition, not error: a heap exhausted inside a handler
       ;; is a storage-condition, and a worker that stopped in the
       ;; debugger on one would hold the lock against every request
       (handler-case (setf result (funcall thunk))
+        (serious-condition (e) (setf failure (princ-to-string e)))))
+    (when (and pack (not failure)
+               (equal (net.aserve:request-query-value "enc" req :post nil) "d"))
+      (handler-case (setf result (pack-pixels result pack))
         (serious-condition (e) (setf failure (princ-to-string e)))))
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)
@@ -1057,29 +1132,32 @@ goes back as a 500 carrying the condition's text."
                   (write-string result s)
                   (write-sequence result s))))))))
 
-(defun serve-door (req ent content-type fn)
+(defun serve-door (req ent content-type fn &key pack)
   (reply req ent content-type
          (lambda ()
            (let ((*documents* (request-session-table req)))
-             (funcall fn req)))))
+             (funcall fn req)))
+         :pack pack))
 
 (defun serve-upload (req ent content-type fn)
   "Read the body, outside the lock since a slow link can take minutes
 over it, then serve the door with it in *upload-octets*."
-  (let ((octets nil) (failure nil))
+  (let ((octets nil) (failure nil) (began (get-internal-real-time)))
     (handler-case (setf octets (read-request-octets req *max-upload-bytes*))
       (serious-condition (e) (setf failure (princ-to-string e))))
     (cond (failure (reply-text req ent net.aserve:*response-internal-server-error* failure))
           ((null octets)
            (reply-text req ent *response-payload-too-large*
                        (body-refusal (1+ *max-upload-bytes*) *max-upload-bytes*)))
-          (t (let ((*upload-octets* octets))
+          (t (let ((*upload-octets* octets)
+                   (*upload-read-ms* (elapsed-ms began)))
                (serve-door req ent content-type fn))))))
 
-(defun publish-door (server host path content-type fn &key upload?)
+(defun publish-door (server host path content-type fn &key upload? pack)
   "Publish FN, a function of the request answering a string or octets,
 at PATH: behind the invite gate, under the lock, the session's
-documents bound.  With UPLOAD? the door takes a large binary body."
+documents bound.  With UPLOAD? the door takes a large binary body; with
+PACK, a step, it answers pixels (see reply)."
   (net.aserve:publish :path path :server server :host host
                       :content-type content-type
                       :function (lambda (req ent)
@@ -1088,7 +1166,7 @@ documents bound.  With UPLOAD? the door takes a large binary body."
                                                       :upload? upload?)
                                     (if upload?
                                         (serve-upload req ent content-type fn)
-                                        (serve-door req ent content-type fn))))))
+                                        (serve-door req ent content-type fn :pack pack))))))
 
 (defvar *stratum-publishers* nil
   "Functions of (server host) that publish doors of their own when
@@ -1120,8 +1198,8 @@ a worker lost for good."
 (defun publish-stratum! (&key host)
   "Publish the page at /stratum/ and its API under /stratum/api/."
   (gwl:with-all-servers (server)
-    (flet ((pub (path content-type fn &key upload?)
-             (publish-door server host path content-type fn :upload? upload?)))
+    (flet ((pub (path content-type fn &key upload? pack)
+             (publish-door server host path content-type fn :upload? upload? :pack pack)))
       ;; the invite link of the private beta (invite.lisp): no gate
       ;; without an invites file
       (publish-prefix-doors server host)
@@ -1144,7 +1222,8 @@ a worker lost for good."
                  (if (q "w")
                      (rgba-rect pixels (the-object doc doc-width) (the-object doc doc-height)
                                 (or (q "x") 0) (or (q "y") 0) (q "w") (q "h"))
-                     pixels)))))
+                     pixels))))
+           :pack 4)
       (pub "/stratum/api/thumb" "application/octet-stream"
            (lambda (req)
              (let* ((doc (request-doc req))
@@ -1165,7 +1244,9 @@ a worker lost for good."
                  (if (q "w")
                      (rgba-rect mask (the-object doc doc-width) (the-object doc doc-height)
                                 (or (q "x") 0) (or (q "y") 0) (q "w") (q "h") 1)
-                     mask)))))
+                     mask))))
+           ;; as they are: differences make a hard-edged mask larger
+           :pack 0)
       (pub "/stratum/api/luts" "application/json"
            (lambda (req) (json-string (coerce (the-object (request-doc req) lut-vector) 'list))))
       (pub "/stratum/api/cpu" "application/octet-stream"
@@ -1186,13 +1267,15 @@ a worker lost for good."
       (pub "/stratum/api/mode" "application/json" #'handle-mode)
       (pub "/stratum/api/documents" "application/json" #'handle-documents)
       (pub "/stratum/api/history" "application/octet-stream"
-           (lambda (req) (history-pixels (request-doc req))))
+           (lambda (req) (history-pixels (request-doc req)))
+           :pack 4)
       (pub "/stratum/api/history-set" "application/json" #'handle-history-set)
       (pub "/stratum/api/select" "application/json" #'handle-select)
       (pub "/stratum/api/selection" "application/octet-stream"
            (lambda (req)
              (let ((selection (the-object (request-doc req) selection)))
-               (if selection (getf selection :mask) (make-array 0 :element-type '(unsigned-byte 8))))))
+               (if selection (getf selection :mask) (make-array 0 :element-type '(unsigned-byte 8)))))
+           :pack 0)
       (pub "/stratum/api/fill" "application/json" #'handle-fill)
       (pub "/stratum/api/move" "application/json" #'handle-move)
       (pub "/stratum/api/transform" "application/json" #'handle-transform)

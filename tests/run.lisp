@@ -1707,16 +1707,13 @@ the stack, and a stamp never outlives its pixels."
     (usocket:socket-close socket)
     port))
 
-(defun raw-post (port path bytes &optional (content-type "application/octet-stream"))
-  "POST BYTES to PATH over a plain socket and read the answer to the
-end: (status text).  A connection reset here, the reply lost to bytes
-left unread at the close, is a failure, as it is for a person."
+(defun raw-exchange (port path head bytes)
+  "Send HEAD, a string, and BYTES over a plain socket and read the
+answer to the end: a string, one character a byte.  A connection reset
+here, the reply lost to bytes left unread at the close, is a failure,
+as it is for a person."
   (let* ((socket (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
-         (stream (usocket:socket-stream socket))
-         (head (format nil "POST ~a HTTP/1.1~c~cHost: 127.0.0.1~c~cConnection: close~c~cContent-Type: ~a~c~cContent-Length: ~d~c~c~c~c"
-                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline
-                       content-type #\Return #\Newline
-                       (length bytes) #\Return #\Newline #\Return #\Newline)))
+         (stream (usocket:socket-stream socket)))
     (unwind-protect
          (progn
            (write-sequence (map '(vector (unsigned-byte 8)) #'char-code head) stream)
@@ -1724,14 +1721,46 @@ left unread at the close, is a failure, as it is for a person."
            (force-output stream)
            ;; a deadline, not usocket:wait-for-input: on CCL that answers
            ;; nothing with the first byte already there to read
-           (let ((text (handler-case
-                           (glisp:with-deadline (20)
-                             (with-output-to-string (out)
-                               (loop for byte = (read-byte stream nil nil)
-                                     while byte do (write-char (code-char byte) out))))
-                         (serious-condition (e) (error "No answer from ~a: ~a" path e)))))
-             (list (parse-integer text :start 9 :end 12) text)))
+           (handler-case
+               (glisp:with-deadline (20)
+                 (with-output-to-string (out)
+                   (loop for byte = (read-byte stream nil nil)
+                         while byte do (write-char (code-char byte) out))))
+             (serious-condition (e) (error "No answer from ~a: ~a" path e))))
       (usocket:socket-close socket))))
+
+(defun raw-post (port path bytes &optional (content-type "application/octet-stream"))
+  "POST BYTES to PATH: (status text)."
+  (let ((text (raw-exchange
+               port path
+               (format nil "POST ~a HTTP/1.1~c~cHost: 127.0.0.1~c~cConnection: close~c~cContent-Type: ~a~c~cContent-Length: ~d~c~c~c~c"
+                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                       content-type #\Return #\Newline
+                       (length bytes) #\Return #\Newline #\Return #\Newline)
+               bytes)))
+    (list (parse-integer text :start 9 :end 12) text)))
+
+(defun raw-get (port path)
+  "GET PATH as an HTTP/1.0 client, whose answer comes in one piece:
+(status body), the body as octets."
+  (let* ((text (raw-exchange port path
+                             (format nil "GET ~a HTTP/1.0~c~c~c~c" path #\Return #\Newline #\Return #\Newline)
+                             #()))
+         (blank (search (coerce '(#\Return #\Newline #\Return #\Newline) 'string) text)))
+    (list (parse-integer text :start 9 :end 12)
+          (map '(simple-array (unsigned-byte 8) (*)) #'char-code (subseq text (+ blank 4))))))
+
+(defun unpack-pixels (packed)
+  "What the page makes of pack-pixels' bytes (fetchPixels in viewer.js)."
+  (let ((step (aref packed 0))
+        (px (if (< (length packed) 2)
+                (make-array 0 :element-type '(unsigned-byte 8))
+                (coerce (chipz:decompress nil 'chipz:zlib (subseq packed 1))
+                        '(simple-array (unsigned-byte 8) (*))))))
+    (when (plusp step)
+      (loop for i from step below (length px)
+            do (setf (aref px i) (logand 255 (+ (aref px i) (aref px (- i step)))))))
+    px))
 
 (defun test-uploads ()
   "The doors over a real connection, on a server of their own: a body
@@ -1744,6 +1773,20 @@ no invite gets the gate's page with the body unread."
   (check "body-refusal: no heap on earth has room"
          (or (null (heap-free-bytes))
              (search "no room" (or (body-refusal (expt 10 12) (expt 10 13) :upload? t) ""))))
+  ;; pixels packed for the way down, several bands of them
+  (let ((noise (test-noise (* 4 31 17)))
+        (flat (make-array 400000 :element-type '(unsigned-byte 8) :initial-element 9))
+        (none (make-array 0 :element-type '(unsigned-byte 8)))
+        (*pack-band-bytes* 100))
+    (check "pack-pixels: differences four apart come back exactly"
+           (equalp (unpack-pixels (pack-pixels noise 4)) noise))
+    (check "pack-pixels: and the bytes as they are" (equalp (unpack-pixels (pack-pixels noise 0)) noise))
+    (check "pack-pixels: nothing packs to nothing"
+           (and (equalp (unpack-pixels (pack-pixels none 4)) none)
+                (equalp (unpack-pixels (pack-pixels none 0)) none)))
+    (check "pack-pixels: a flat layer is a hundredth of its bytes"
+           (and (< (length (pack-pixels flat 4)) 4000) (equalp (unpack-pixels (pack-pixels flat 4)) flat))
+           (length (pack-pixels flat 4))))
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
          (seen nil)
@@ -1795,6 +1838,18 @@ no invite gets the gate's page with the body unread."
                  (let ((answer (post (path "sub3" (1- h)) (packed 3))))
                    (check "data longer than its stated size is refused"
                           (and (eql (first answer) 500) (search "runs past" (second answer))) answer))))
+             ;; pixels on the way down: packed for a page that asks
+             (publish-door server nil "/px" "application/octet-stream"
+                           (lambda (req) (declare (ignore req)) bytes) :pack 4)
+             (let ((plain (raw-get port "/px")) (packed (raw-get port "/px?enc=d")))
+               (check "a door of pixels answers them as they are, unasked"
+                      (and (eql (first plain) 200) (equalp (second plain) bytes))
+                      (length (second plain)))
+               (check "and packed when asked: the same bytes, in fewer"
+                      (and (eql (first packed) 200)
+                           (< (length (second packed)) (length bytes))
+                           (equalp (unpack-pixels (second packed)) bytes))
+                      (length (second packed))))
              (setf *max-upload-bytes* 1000 *max-request-bytes* 1000)
              (let ((answer (post "/up" bytes)))
                (check "an upload over the limit is told why"

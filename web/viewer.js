@@ -126,6 +126,28 @@
     }).then(function (b) { return new Uint8Array(b); });
   }
 
+  // Pixels come down packed, as they go up (S.packPixels): one byte,
+  // the step, then a deflated stream of the bytes, each less the byte
+  // STEP before it (step 0: as they are).  Exact.  A layer that is
+  // mostly empty, or a mask, is a hundredth of its bytes so; a
+  // photograph about a third.  S.stats.wireBytes counts what crossed.
+  // Without the browser's inflater (an old browser) they come raw.
+  var canInflate = typeof DecompressionStream !== 'undefined';
+  function fetchPixels(url) {
+    if (!canInflate) return fetchBytes(url);
+    return fetchBytes(url + '&enc=d').then(function (packed) {
+      S.stats.wireBytes = (S.stats.wireBytes || 0) + packed.length;
+      var step = packed[0];
+      if (packed.length < 2) return new Uint8Array(0);
+      var stream = new Blob([packed.subarray(1)]).stream().pipeThrough(new DecompressionStream('deflate'));
+      return new Response(stream).arrayBuffer().then(function (buf) {
+        var px = new Uint8Array(buf);
+        if (step) for (var i = step; i < px.length; i++) px[i] += px[i - step];
+        return px;
+      });
+    });
+  }
+
   function fetchJSON(url, init) {
     return fetch(url, init).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(url + ': ' + r.status + ' ' + t); });
@@ -178,7 +200,7 @@
         });
       } else {
         chain = chain.then(function () {
-          return fetchBytes(api(path + '?i=' + j)).then(function (bytes) {
+          return fetchPixels(api(path + '?i=' + j)).then(function (bytes) {
             gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
             gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, format, gl.UNSIGNED_BYTE, bytes);
@@ -229,7 +251,7 @@
           var url = api('raster?i=' + i);
           return takeStashed(url, w * h * 4).then(function (kept) {
             if (kept) S.stashed++;
-            return kept || fetchBytes(url);
+            return kept || fetchPixels(url);
           }).then(function (bytes) {
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
             gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
@@ -240,7 +262,7 @@
     for (var j = 0; j < doc.maskCount; j++) {
       chain = chain.then((function (j) {
         return function () {
-          return fetchBytes(api('mask?i=' + j)).then(function (bytes) {
+          return fetchPixels(api('mask?i=' + j)).then(function (bytes) {
             gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
             gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, gl.RED, gl.UNSIGNED_BYTE, bytes);
           });
@@ -907,7 +929,7 @@
   // are rebuilt for the whole array: a per-region rebuild is the brush
   // engine's to add if a stroke's commit shows it.
   S.uploadRect = function (i, x, y, w, h) {
-    return fetchBytes(api('raster?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
+    return fetchPixels(api('raster?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
       .then(function (bytes) {
         if (bytes.length !== w * h * 4) throw new Error('uploadRect: ' + bytes.length + ' bytes for ' + w + ' x ' + h);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -1088,7 +1110,7 @@
   var texHistory = null, historyVersion = -1;
   function ensureHistory() {
     if (texHistory && historyVersion === doc.historyVersion) return Promise.resolve(texHistory);
-    return fetchBytes(api('history')).then(function (bytes) {
+    return fetchPixels(api('history')).then(function (bytes) {
       if (texHistory) gl.deleteTexture(texHistory);
       texHistory = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texHistory);
@@ -1136,7 +1158,7 @@
 
   // One rectangle of mask I back from the server into the mask array.
   S.uploadMaskRect = function (i, x, y, w, h) {
-    return fetchBytes(api('mask?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
+    return fetchPixels(api('mask?i=' + i + '&x=' + x + '&y=' + y + '&w=' + w + '&h=' + h))
       .then(function (bytes) {
         if (bytes.length !== w * h) throw new Error('uploadMaskRect: ' + bytes.length + ' bytes for ' + w + ' x ' + h);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -1743,7 +1765,7 @@
   function loadSelection(rect) {
     S.selection = rect || null;
     if (!rect) { selectionMask = null; requestDraw(); return Promise.resolve(null); }
-    return fetchBytes(api('selection')).then(function (bytes) {
+    return fetchPixels(api('selection')).then(function (bytes) {
       if (bytes.length !== doc.width * doc.height) throw new Error('selection: ' + bytes.length + ' bytes');
       selectionMask = bytes;
       if (!texSelection || texSelection.docWidth !== doc.width || texSelection.docHeight !== doc.height) {
@@ -2300,11 +2322,23 @@
     });
   };
 
+  // Where an open's time goes, for the status line of the page it lands
+  // on (S.openNote): each step in milliseconds, and the bytes sent.
+  var openTimes = null;
+  function timed(step, promise) {
+    var began = Date.now();
+    return promise.then(function (value) {
+      if (openTimes) openTimes[step] = Date.now() - began;
+      return value;
+    });
+  }
+
   function postImage(path, img) {
     status('packing ' + img.width + ' x ' + img.height + '...');
-    return S.packPixels(img).then(function (packed) {
+    return timed('pack', S.packPixels(img)).then(function (packed) {
       status('sending ' + megabytes(packed.body.length) + '...');
-      return postBytes(path + '&w=' + img.width + '&h=' + img.height + packed.enc, packed.body);
+      if (openTimes) openTimes.sent = packed.body.length;
+      return timed('send', postBytes(path + '&w=' + img.width + '&h=' + img.height + packed.enc, packed.body));
     });
   }
 
@@ -2337,7 +2371,8 @@
 
   S.openImage = function (img, name) {
     return postImage('open?name=' + encodeURIComponent(name), img).then(function (res) {
-      return stashPixels(res.doc, img.bytes).then(function () { return res; });
+      if (openTimes) { openTimes.read = res.readMs; openTimes.work = res.workMs; }
+      return timed('keep', stashPixels(res.doc, img.bytes)).then(function () { return res; });
     });
   };
 
@@ -2348,6 +2383,7 @@
   // shows on the new page's status line.
   S.openFile = function (file) {
     status('opening ' + (file.name || 'image') + '...');
+    openTimes = { began: Date.now() };
     var opened = /\.(stratum|ora)$/i.test(file.name || '')
       ? file.arrayBuffer().then(function (buf) {
           if (doc && doc.maxUploadBytes && buf.byteLength > doc.maxUploadBytes) {
@@ -2356,23 +2392,55 @@
           }
           return postBytes('load?name=' + encodeURIComponent(baseName(file)), new Uint8Array(buf));
         })
-      : S.decodeImage(file).then(function (img) { return S.openImage(img, baseName(file)); });
+      : timed('decode', S.decodeImage(file)).then(function (img) { return S.openImage(img, baseName(file)); });
     return opened.then(function (res) {
       if (res.unsupported && res.unsupported.length) {
         var note = res.unsupported.map(function (u) { return u[0] + ' (' + u[1] + ')'; }).join(', ');
         try { sessionStorage.setItem('stratum-open-note', 'blend modes set to Normal, not supported here: ' + note); } catch (e) {}
       }
+      openTimes.left = Date.now();
+      try { sessionStorage.setItem('stratum-open-times', JSON.stringify(openTimes)); } catch (e) {}
       location.search = '?doc=' + encodeURIComponent(res.doc);
     }).catch(function (e) {
+      openTimes = null;
       status('open failed');
       S.notice('Could not open ' + (file.name || 'the file'), plainError(e));
     });
   };
 
+  // The open's account in words: 'opened in 21.4 s: decode 1.1, pack
+  // 2.5, send 9.3 (15.2 MB; the server read it in 8.8 and worked 0.4),
+  // keep 0.3, load 1.2 (pixels kept)'.  Load is the page that came
+  // after: its pixels kept from the open, or fetched back.
+  function openAccount(t) {
+    function s(ms) { return (ms / 1000).toFixed(1); }
+    var now = Date.now(), parts = [];
+    if (t.decode != null) parts.push('decode ' + s(t.decode));
+    if (t.pack != null) parts.push('pack ' + s(t.pack));
+    if (t.send != null) {
+      parts.push('send ' + s(t.send) + ' (' + megabytes(t.sent) +
+                 (t.read != null ? '; the server read it in ' + s(t.read) + ' and worked ' + s(t.work) : '') + ')');
+    }
+    if (t.keep != null) parts.push('keep ' + s(t.keep));
+    parts.push('load ' + s(now - t.left) +
+               (S.stashed ? ' (pixels kept)' : ' (pixels fetched, ' + megabytes(S.stats.wireBytes || 0) + ')'));
+    return 'opened in ' + s(now - t.began) + ' s: ' + parts.join(', ');
+  }
+
   S.openNote = function () {
     try {
-      var note = sessionStorage.getItem('stratum-open-note');
-      if (note) { sessionStorage.removeItem('stratum-open-note'); status(note); }
+      var lines = [], note = sessionStorage.getItem('stratum-open-note');
+      var times = sessionStorage.getItem('stratum-open-times');
+      sessionStorage.removeItem('stratum-open-note');
+      sessionStorage.removeItem('stratum-open-times');
+      if (times) {
+        S.lastOpen = JSON.parse(times);
+        S.lastOpen.account = openAccount(S.lastOpen);
+        lines.push(S.lastOpen.account);
+        console.info(S.lastOpen.account);
+      }
+      if (note) lines.push(note);
+      if (lines.length) status(lines.join('\n'));
     } catch (e) {}
   };
 
@@ -3540,7 +3608,7 @@
       }).then(function () {
         var L = doc.layers[S.activeLayer];
         var ox = Math.floor((doc.width - w) / 2), oy = Math.floor((doc.height - h) / 2);
-        return fetchBytes(api('raster?i=' + L.texIndex + '&x=' + ox + '&y=' + oy + '&w=' + w + '&h=' + h)).then(function (b) {
+        return fetchPixels(api('raster?i=' + L.texIndex + '&x=' + ox + '&y=' + oy + '&w=' + w + '&h=' + h)).then(function (b) {
           check('a placed image lands centered on its own layer, byte for byte',
                 doc.layers.length === n + 1 && L.kind === 'raster' && L.name === 'placed' && same(b, want),
                 { layers: doc.layers.length, name: L.name });
@@ -3562,7 +3630,7 @@
         return pngBlob.arrayBuffer().then(function (buf) {
           return postBytes('open?name=pngtest', new Uint8Array(buf));
         }).then(function (res) {
-          return fetchBytes(apiFor(res.doc, 'raster?i=0')).then(function (b) {
+          return fetchPixels(apiFor(res.doc, 'raster?i=0')).then(function (b) {
             check('the server reads a PNG file to the bytes the browser decodes',
                   res.width === w && res.height === h && same(b, want), { width: res.width, height: res.height, bytes: b.length });
             return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
@@ -3820,7 +3888,7 @@
                  pointerId: 46, pointerType: 'mouse', bubbles: true };
       }
       function same(a, b) { if (a.length !== b.length) return false; for (var k = 0; k < a.length; k++) if (a[k] !== b[k]) return false; return true; }
-      function rect(tex) { return fetchBytes(api('raster?i=' + tex + '&x=' + rx + '&y=' + ry + '&w=' + rw + '&h=' + rh)); }
+      function rect(tex) { return fetchPixels(api('raster?i=' + tex + '&x=' + rx + '&y=' + ry + '&w=' + rw + '&h=' + rh)); }
       return S.select({ op: 'rect', x: rx, y: ry, w: rw, h: rh }).then(function () {
         S.setTool('move');
         canvas.dispatchEvent(new PointerEvent('pointerdown', at(rx + 5, ry + 5)));
@@ -3959,7 +4027,7 @@
       return postJSON('new', JSON.stringify({ name: 'newtest', width: 64, height: 48, background: 'transparent' })).then(function (res) {
         made = res.doc;
         return Promise.all([fetchJSON(apiFor(made, 'doc')),
-                            fetchBytes(apiFor(made, 'raster?i=0'))]);
+                            fetchPixels(apiFor(made, 'raster?i=0'))]);
       }).then(function (pair) {
         var d = pair[0], px = pair[1], clear = true;
         for (var k = 3; k < px.length; k += 4) if (px[k] !== 0) clear = false;
@@ -4034,7 +4102,7 @@
           var d = renderDiff(shown, after);
           check('release bakes what the gradient preview showed', d.maxDiff <= 2, d);
         }
-        return fetchBytes(api('raster?i=' + L.texIndex));
+        return fetchPixels(api('raster?i=' + L.texIndex));
       }).then(function (px) {
         function px4(x, y) { var o = (y * W + x) * 4; return [px[o], px[o + 1], px[o + 2], px[o + 3]]; }
         function near(a, b, tol) { return a.every(function (v, i) { return Math.abs(v - b[i]) <= tol; }); }
@@ -4100,7 +4168,7 @@
         S.cloneOffset = saved.offset;
         S.setActiveLayer(active, false);
       }
-      return fetchBytes(api('raster?i=' + L.texIndex)).then(function (px) {
+      return fetchPixels(api('raster?i=' + L.texIndex)).then(function (px) {
         bytesBefore = px;
         canvas.dispatchEvent(new PointerEvent('pointerdown', at(sx, sy, true)));
         canvas.dispatchEvent(new PointerEvent('pointerup', at(sx, sy, true)));
@@ -4119,7 +4187,7 @@
             var after = S.renderExact(), kept = renderDiff(shown, after);
             check('the stamp stroke changed the picture and the commit matches its preview',
                   renderDiff(before, after).maxDiff > 0 && kept.maxDiff <= 2, kept);
-            return fetchBytes(api('raster?i=' + L.texIndex));
+            return fetchPixels(api('raster?i=' + L.texIndex));
           });
         }).then(function (px) {
           var painted = px4(px, dx, dy), source = px4(bytesBefore, sx, sy);
@@ -4158,7 +4226,7 @@
               var after = S.renderExact(), kept = renderDiff(shown, after);
               check('the healing stroke changed the picture and the commit matches its preview',
                     renderDiff(before, after).maxDiff > 0 && (!S.filterPreviewSupported || kept.maxDiff <= 2), kept);
-              return fetchBytes(api('raster?i=' + L.texIndex));
+              return fetchPixels(api('raster?i=' + L.texIndex));
             });
           }).then(function (px) {
             var painted = px4(px, dx, dy), dest = px4(bytesBefore, dx, dy), source = px4(bytesBefore, sx, sy);
@@ -4217,7 +4285,7 @@
             var after = S.renderExact(), kept = renderDiff(shown, after);
             check('the history stroke changed the painted picture and the commit matches its preview',
                   renderDiff(painted, after).maxDiff > 0 && kept.maxDiff <= 2, kept);
-            return Promise.all([fetchBytes(api('raster?i=' + L.texIndex)), fetchBytes(api('history'))]);
+            return Promise.all([fetchPixels(api('raster?i=' + L.texIndex)), fetchPixels(api('history'))]);
           });
         }).then(function (pair) {
           var layer = px4(pair[0], cx, cy), hist = px4(pair[1], cx, cy);
@@ -4265,7 +4333,7 @@
       S.setBrush({ color: [200, 30, 30] });
       S.background = [20, 40, 220];
       return S.setMode('grayscale').then(function () {
-        return fetchBytes(api('raster?i=' + L.texIndex));
+        return fetchPixels(api('raster?i=' + L.texIndex));
       }).then(function (px) {
         var gray = true;
         for (var o = 0; o < px.length; o += 4) if (px[o] !== px[o + 1] || px[o] !== px[o + 2]) { gray = false; break; }
@@ -4397,6 +4465,28 @@
       }).then(function () {
         check('deleting the drawing gives the picture back exactly',
               doc.layers.length === count && renderDiff(before, S.renderExact()).maxDiff === 0);
+      });
+    }).then(function () {
+      // Pixels come down packed (fetchPixels): the server's bytes
+      // exactly, a layer and a mask, in fewer of them.
+      var wire = S.stats.wireBytes || 0;
+      function same(a, b) {
+        var ok = a.length === b.length;
+        for (var i = 0; i < a.length && ok; i++) ok = a[i] === b[i];
+        return ok;
+      }
+      var asked = [fetchBytes(api('raster?i=0')), fetchPixels(api('raster?i=0'))];
+      if (doc.maskCount) asked.push(fetchBytes(api('mask?i=0')), fetchPixels(api('mask?i=0')));
+      return Promise.all(asked).then(function (r) {
+        check('a layer fetched packed is the server\'s bytes exactly',
+              r[0].length === doc.width * doc.height * 4 && same(r[0], r[1]), { raw: r[0].length, packed: r[1].length });
+        if (r.length > 2) {
+          check('and a mask', r[2].length === doc.width * doc.height && same(r[2], r[3]),
+                { raw: r[2].length, packed: r[3].length });
+        }
+        var crossed = (S.stats.wireBytes || 0) - wire;
+        check('in fewer bytes over the network', !canInflate || (crossed > 0 && crossed < r[0].length),
+              { crossed: crossed, raw: r[0].length });
       });
     }).then(function () {
       // Only content new to the page crosses the network (syncPixels):
@@ -4591,6 +4681,13 @@
     texIdle = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texIdle);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1, 1);
+    // The menus, tools and panel show as soon as the document's
+    // structure is known, and wait, dimmed, for its pixels: nothing
+    // acts on a document half loaded.
+    function whileLoading(e) { if (!S.ready && !S.error) e.stopImmediatePropagation(); }
+    window.addEventListener('keydown', whileLoading, true);
+    window.addEventListener('keyup', whileLoading, true);
+    document.body.classList.add('st-loading');
     installNavigation();
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
@@ -4603,6 +4700,11 @@
       syncOpacity();
       uploadLuts();
       buildPanel();
+      installBenchButton();
+      installToolbar();
+      installTools();
+      installMenubar();
+      installPrompt();
       return uploadPixels();
     }).then(function () {
       // whatever a failed open left waiting for a reload that never came
@@ -4612,11 +4714,7 @@
       status();
       S.openNote();
       draw();
-      installBenchButton();
-      installToolbar();
-      installTools();
-      installMenubar();
-      installPrompt();
+      document.body.classList.remove('st-loading');
       S.ready = true;
       fetchJSON(api('documents')).then(function (r) { S.documents = r.documents; }).catch(function () {});
       if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);

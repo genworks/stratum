@@ -1630,6 +1630,28 @@ out of memory failing alone."
          (worst (loop for i below (* w h)
                       maximize (abs (- (aref exact i) (aref reduced i))))))
     (check "the reduced feather stays within two levels of the exact one" (<= worst 2) worst))
+  ;; the blur's fast loops against the plain one, at every shape where
+  ;; a row or a column is shorter than the kernel, the four-wide loop
+  ;; has a remainder, or a block of columns ends part way
+  (let ((*blur-block* 7))
+    (dolist (shape '((64 40) (1 1) (1 30) (30 1) (2 2) (3 50) (5 5) (9 13) (31 4) (33 33) (70 6)))
+      (destructuring-bind (w h) shape
+        (dolist (sigma '(0.1d0 0.7d0 1d0 2.5d0 9d0))
+          (let* ((noise (test-noise (* w h)))
+                 (plane (map '(simple-array single-float (*)) (lambda (b) (/ (float b 1f0) 255f0)) noise))
+                 (reference (plain-blur plane w h sigma))
+                 (scratch (make-plane (* w h))))
+            (check (format nil "the blur of ~a x ~a at ~a equals the plain loop to the last bit" w h sigma)
+                   (equalp (blur-plane! (copy-seq plane) scratch w h sigma) reference)))))))
+  (let* ((w 1100) (h 5)
+         (plane (map '(simple-array single-float (*)) (lambda (b) (/ (float b 1f0) 255f0)) (test-noise (* w h)))))
+    (check "the blur across the real block's edge equals the plain loop"
+           (equalp (blur-plane! (copy-seq plane) (make-plane (* w h)) w h 2d0) (plain-blur plane w h 2d0))))
+  (let* ((w 40) (h 30) (scratch (make-plane (* w h))))
+    (dolist (value '(1f0 0f0 0.37f0))
+      (let ((plane (make-array (* w h) :element-type 'single-float :initial-element value)))
+        (check (format nil "a plane of ~a alone equals the plain loop" value)
+               (equalp (blur-plane! (copy-seq plane) scratch w h 3d0) (plain-blur plane w h 3d0))))))
   ;; the feather works on the selection's bounds, to the same bytes: in
   ;; the middle, and with the kernel's reach cut off by each edge
   (let ((w 300) (h 200))
@@ -1710,6 +1732,27 @@ the stack, and a stamp never outlives its pixels."
         (check "a saved document carries no stamp"
                (notany (lambda (spec) (or (getf spec :pixel-stamp) (getf spec :mask-stamp)))
                        (materialized-specs (doc))))))))
+
+(defun plain-blur (plane w h sigma)
+  "PLANE blurred the plain way, rows then columns, each pixel's taps
+clamped and added in order: what blur-plane!'s loops must equal."
+  (multiple-value-bind (weights extent) (gaussian-kernel (float sigma 1d0))
+    (let ((scratch (make-plane (* w h)))
+          (out (make-plane (* w h))))
+      (dotimes (y h)
+        (dotimes (x w)
+          (let ((v 0d0))
+            (loop for i from (- extent) to extent
+                  do (incf v (* (aref weights (+ i extent))
+                                (aref plane (+ (max 0 (min (1- w) (+ x i))) (* y w))))))
+            (setf (aref scratch (+ x (* y w))) (float v 1f0)))))
+      (dotimes (x w out)
+        (dotimes (y h)
+          (let ((v 0d0))
+            (loop for i from (- extent) to extent
+                  do (incf v (* (aref weights (+ i extent))
+                                (aref scratch (+ x (* (max 0 (min (1- h) (+ y i))) w))))))
+            (setf (aref out (+ x (* y w))) (float v 1f0))))))))
 
 (defun free-port ()
   "A port nothing listens on just now."

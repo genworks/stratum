@@ -164,37 +164,122 @@ gives it, 3 being alpha."
                             (float (* a (aref decode (aref pixels (+ o channel)))) 1f0)))))))
     plane))
 
+(defparameter *blur-block* 1024
+  "Columns the column pass works through at a time: their sums stay in
+the first level of cache and the rows the kernel reaches in the second.")
+
+(defun blur-rows! (source target w start end weights extent)
+  "Rows START to END of SOURCE (W wide) through WEIGHTS into TARGET.
+Past the kernel's reach of either edge no tap needs clamping, and four
+pixels at a time keep four sums going: one alone waits on each addition
+for the last.  Each pixel's taps are added in order, so the numbers do
+not depend on how they are grouped."
+  (declare (type (simple-array single-float (*)) source target)
+           (type (simple-array double-float (*)) weights)
+           (type fixnum w start end extent)
+           (optimize (speed 3) (safety 0)))
+  (let* ((taps (+ 1 (* 2 extent)))
+         (left (min extent w))
+         (right (max left (- w extent))))
+    (declare (type fixnum taps left right))
+    (flet ((clamped (x base)
+             (declare (type fixnum x base))
+             (let ((v 0d0))
+               (declare (type double-float v))
+               (dotimes (k taps)
+                 (let ((sx (max 0 (min (1- w) (+ x k (- extent))))))
+                   (declare (type fixnum sx))
+                   (incf v (* (aref weights k) (aref source (+ base sx))))))
+               (setf (aref target (+ base x)) (float v 1f0)))))
+      (declare (inline clamped))
+      (loop for y of-type fixnum from start below end
+            do (let ((base (* y w))
+                     (x left))
+                 (declare (type fixnum base x))
+                 (dotimes (i left) (clamped i base))
+                 (loop while (<= (+ x 4) right)
+                       do (let ((at (+ base x (- extent)))
+                                (v0 0d0) (v1 0d0) (v2 0d0) (v3 0d0))
+                            (declare (type fixnum at) (type double-float v0 v1 v2 v3))
+                            (dotimes (k taps)
+                              (let ((weight (aref weights k))
+                                    (p (+ at k)))
+                                (declare (type double-float weight) (type fixnum p))
+                                (incf v0 (* weight (aref source p)))
+                                (incf v1 (* weight (aref source (+ p 1))))
+                                (incf v2 (* weight (aref source (+ p 2))))
+                                (incf v3 (* weight (aref source (+ p 3))))))
+                            (let ((o (+ base x)))
+                              (declare (type fixnum o))
+                              (setf (aref target o) (float v0 1f0)
+                                    (aref target (+ o 1)) (float v1 1f0)
+                                    (aref target (+ o 2)) (float v2 1f0)
+                                    (aref target (+ o 3)) (float v3 1f0)))
+                            (incf x 4)))
+                 (loop while (< x right)
+                       do (clamped x base)
+                          (incf x))
+                 (loop for i of-type fixnum from right below w
+                       do (clamped i base)))))))
+
+(defun blur-columns! (source target w h start end weights extent)
+  "Rows START to END of TARGET, the columns of SOURCE (W x H) through
+WEIGHTS.  A row at a time, tap by tap, into a row of sums, so memory is
+read along its rows: down a column every read is another cache line."
+  (declare (type (simple-array single-float (*)) source target)
+           (type (simple-array double-float (*)) weights)
+           (type fixnum w h start end extent)
+           (optimize (speed 3) (safety 0)))
+  (let* ((taps (+ 1 (* 2 extent)))
+         (block-size (max 1 (min w *blur-block*)))
+         (sums (make-array block-size :element-type 'double-float)))
+    (declare (type fixnum taps block-size)
+             (type (simple-array double-float (*)) sums))
+    (loop for x0 of-type fixnum from 0 below w by block-size
+          do (let ((n (min block-size (- w x0))))
+               (declare (type fixnum n))
+               (loop for y of-type fixnum from start below end
+                     do (fill sums 0d0)
+                        (dotimes (k taps)
+                          (let* ((sy (max 0 (min (1- h) (+ y k (- extent)))))
+                                 (from (+ x0 (* sy w)))
+                                 (weight (aref weights k)))
+                            (declare (type fixnum sy from) (type double-float weight))
+                            (dotimes (i n)
+                              (incf (aref sums i) (* weight (aref source (+ from i)))))))
+                        (let ((to (+ x0 (* y w))))
+                          (declare (type fixnum to))
+                          (dotimes (i n)
+                            (setf (aref target (+ to i)) (float (aref sums i) 1f0)))))))))
+
+(defun constant-plane (plane)
+  "The value every element of PLANE holds, or nil when they differ: the
+alpha of an opaque photograph."
+  (declare (type (simple-array single-float (*)) plane)
+           (optimize (speed 3) (safety 0)))
+  (when (plusp (length plane))
+    (let ((value (aref plane 0)))
+      (and (every (lambda (v) (declare (type single-float v)) (= v value)) plane) value))))
+
 (defun blur-plane! (plane scratch w h sigma)
   "PLANE (W x H single floats) blurred in place by SIGMA pixels, rows
-into SCRATCH and columns back, as gaussian-blur-premul blurs a channel."
+into SCRATCH and columns back, as gaussian-blur-premul blurs a channel,
+to the last bit.  A plane of one value is worked out once: every pixel
+of it adds the same taps of the same value."
   (multiple-value-bind (weights extent) (gaussian-kernel (float sigma 1d0))
     (declare (type (simple-array double-float (*)) weights) (type fixnum extent)
              (type (simple-array single-float (*)) plane scratch)
              (type fixnum w h))
-    (parallel-ranges h
-                     (lambda (start end)
-                       (declare (type fixnum start end))
-                       (loop for y of-type fixnum from start below end
-                             do (dotimes (x w)
-                                  (let ((v 0d0))
-                                    (declare (type double-float v))
-                                    (loop for i of-type fixnum from (- extent) to extent
-                                          do (let ((sx (max 0 (min (1- w) (+ x i)))))
-                                               (incf v (* (aref weights (+ i extent))
-                                                          (aref plane (+ sx (* y w)))))))
-                                    (setf (aref scratch (+ x (* y w))) (float v 1f0)))))))
-    (parallel-ranges w
-                     (lambda (start end)
-                       (declare (type fixnum start end))
-                       (loop for x of-type fixnum from start below end
-                             do (dotimes (y h)
-                                  (let ((v 0d0))
-                                    (declare (type double-float v))
-                                    (loop for i of-type fixnum from (- extent) to extent
-                                          do (let ((sy (max 0 (min (1- h) (+ y i)))))
-                                               (incf v (* (aref weights (+ i extent))
-                                                          (aref scratch (+ x (* sy w)))))))
-                                    (setf (aref plane (+ x (* y w))) (float v 1f0)))))))
+    (let ((constant (constant-plane plane)))
+      (if constant
+          (flet ((through (value)
+                   (let ((v 0d0))
+                     (dotimes (k (length weights) (float v 1f0))
+                       (incf v (* (aref weights k) value))))))
+            (fill plane (through (through constant))))
+          (progn
+            (parallel-ranges h (lambda (start end) (blur-rows! plane scratch w start end weights extent)))
+            (parallel-ranges h (lambda (start end) (blur-columns! scratch plane w h start end weights extent))))))
     plane))
 
 (defun encode-channel! (out channel plane alpha count)

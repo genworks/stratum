@@ -88,6 +88,17 @@ say (SBCL); nil elsewhere, and then relieve-memory! never acts."
   #+ccl (ccl:gc)
   #-(or sbcl ccl) nil)
 
+(defparameter *form-high-water* 0.5
+  "The fraction of the heap in use above which a form of the Lisp API
+is preceded by a collection: on a photograph one form can want a few
+hundred megabytes, and garbage counts as use until it is collected.")
+
+(defun collect-if-full! ()
+  "A full collection when the heap is above *form-high-water*."
+  (let ((used (heap-used-fraction)))
+    (when (and used (> used *form-high-water*))
+      (full-gc))))
+
 (defun relieve-memory! (keep-id)
   "When the heap is above *heap-high-water*: collect first, since the
 measure counts garbage not yet collected, and if it is still above,
@@ -1012,6 +1023,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-prompt-log { font-size: 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; }
 .st-prompt-turn { border-top: 1px solid #2c2f35; padding: 4px 0; }
 .st-prompt-you { color: #8a9099; }
+.st-prompt-reply { white-space: pre-line; }
 .st-prompt-forms { font: 11px/1.4 ui-monospace, Menlo, monospace; color: #c9cdd3;
   white-space: pre-wrap; margin: 3px 0 0; }
 .st-prompt-forms .st-failed { color: #e07a7a; }

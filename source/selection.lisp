@@ -149,17 +149,32 @@ blurred at a reduced size and scaled back: a mask that soft has nothing
 left at full size for the blur to keep, and the exact kernel over a
 photo is minutes of work under the server's lock.")
 
-(defun feather-mask-exact (mask w h sigma)
-  "MASK (W x H bytes) blurred by SIGMA: fresh bytes."
-  (let* ((count (* w h))
-         (plane (make-plane count))
-         (scratch (make-plane count))
-         (out (make-gray w h)))
-    (dotimes (i count)
-      (setf (aref plane i) (/ (float (aref mask i) 1f0) 255f0)))
-    (blur-plane! plane scratch w h sigma)
-    (dotimes (i count out)
-      (setf (aref out i) (unit->byte (float (aref plane i) 1d0))))))
+(defun feather-mask-exact (mask w h sigma &optional (rect (list 0 0 w h)))
+  "MASK (W x H bytes) blurred by SIGMA: fresh bytes.  RECT (x y w h)
+holds every nonzero byte of it, and only that rectangle and the
+kernel's reach around it are worked on: past that the blur has nothing
+but zeros to add, so the bytes are the same as a blur of the whole mask,
+for the memory and the time of the selection and not of the picture."
+  (destructuring-bind (rx ry rw rh) rect
+    (let* ((extent (nth-value 1 (gaussian-kernel (float sigma 1d0))))
+           (x0 (max 0 (- rx extent)))
+           (y0 (max 0 (- ry extent)))
+           (x1 (min w (+ rx rw extent)))
+           (y1 (min h (+ ry rh extent)))
+           (pw (- x1 x0))
+           (ph (- y1 y0))
+           (plane (make-plane (* pw ph)))
+           (scratch (make-plane (* pw ph)))
+           (out (make-gray w h)))
+      (dotimes (y ph)
+        (dotimes (x pw)
+          (setf (aref plane (+ x (* y pw)))
+                (/ (float (aref mask (+ x0 x (* (+ y0 y) w))) 1f0) 255f0))))
+      (blur-plane! plane scratch pw ph sigma)
+      (dotimes (y ph out)
+        (dotimes (x pw)
+          (setf (aref out (+ x0 x (* (+ y0 y) w)))
+                (unit->byte (float (aref plane (+ x (* y pw))) 1d0))))))))
 
 (defun feather-mask-reduced (mask w h sigma)
   "MASK blurred by SIGMA at a reduced size: averaged down by K, blurred,
@@ -209,7 +224,7 @@ nothing without a selection."
         (the-object doc (set-slot! :selection
                                    (make-selection (if (> sigma *feather-exact-sigma*)
                                                        (feather-mask-reduced mask w h sigma)
-                                                       (feather-mask-exact mask w h sigma))
+                                                       (feather-mask-exact mask w h sigma (getf selection :rect)))
                                                    w h)))))))
 
 (defun select-all! (doc)

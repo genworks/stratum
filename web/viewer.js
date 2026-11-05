@@ -725,7 +725,22 @@
                       contiguous: S.wand.contiguous, mode: selectionMode(e), layer: S.activeLayer });
   }
 
+  // The prompt's log is text a person may want: with the text cursor
+  // in it Ctrl+C copies the text and Ctrl+A selects the log, where
+  // elsewhere the two act on the document.  A press on the canvas takes
+  // the cursor out again.
+  function logKey(e, key) {
+    var sel = window.getSelection();
+    if (!promptLog || !sel || !sel.anchorNode || !promptLog.contains(sel.anchorNode)) return false;
+    if (key === 'a') { e.preventDefault(); sel.selectAllChildren(promptLog); return true; }
+    return key === 'c' && !sel.isCollapsed;
+  }
+
   function installNavigation() {
+    canvas.addEventListener('pointerdown', function () {
+      var sel = window.getSelection();
+      if (sel) sel.removeAllRanges();
+    });
     var drag = null, stroke = null, gesture = null, mover = null, grad = null;
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -843,6 +858,7 @@
     window.addEventListener('keydown', function (e) {
       if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       var mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+      if (mod && logKey(e, key)) return;
       if (e.code === 'Space') { if (!spaceHeld) { spaceHeld = true; setCursor(false); } e.preventDefault(); }
       else if (e.key === 'Enter' && S.transforming) { e.preventDefault(); S.transforming.commit(); }
       else if (e.key === 'Escape' && S.transforming) { e.preventDefault(); S.transforming.cancel(); }
@@ -4481,6 +4497,25 @@
               doc.layers.length === count && renderDiff(before, S.renderExact()).maxDiff === 0);
       });
     }).then(function () {
+      // Keys in the prompt's log are for its text, not the document.
+      var clipboard = S.clipboard, select = S.select, took = 0;
+      S.clipboard = S.select = function () { took++; return Promise.resolve(null); };
+      function press(k) {
+        return document.body.dispatchEvent(new KeyboardEvent('keydown', { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
+      }
+      showPromptTurn('a request', { reply: 'one\ntwo' });
+      var sel = window.getSelection(), turn = promptLog.firstChild;
+      sel.selectAllChildren(turn);
+      check('Ctrl+C on the log\'s text is left to the browser', press('c') && took === 0, { took: took });
+      sel.collapse(turn, 0);
+      check('Ctrl+A in the log selects the log, not the document',
+            !press('a') && took === 0 && sel.toString().indexOf('a request') >= 0, { took: took, text: sel.toString() });
+      sel.removeAllRanges();
+      check('elsewhere Ctrl+C acts on the document', !press('c') && took === 1, { took: took });
+      promptLog.removeChild(turn);
+      S.clipboard = clipboard;
+      S.select = select;
+    }).then(function () {
       // Pixels come down packed (fetchPixels): the server's bytes
       // exactly, a layer and a mask, in fewer of them.
       var wire = S.stats.wireBytes || 0;
@@ -4602,7 +4637,7 @@
     if (!promptLog) return;
     var turn = el('div', { 'class': 'st-prompt-turn' });
     turn.appendChild(el('div', { 'class': 'st-prompt-you', text: text }));
-    if (res.reply) turn.appendChild(el('div', { text: res.reply }));
+    if (res.reply) turn.appendChild(el('div', { 'class': 'st-prompt-reply', text: res.reply }));
     if (res.results && res.results.length) {
       var pre = el('div', { 'class': 'st-prompt-forms' });
       res.results.forEach(function (r) {

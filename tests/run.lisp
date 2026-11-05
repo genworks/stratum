@@ -1630,6 +1630,17 @@ out of memory failing alone."
          (worst (loop for i below (* w h)
                       maximize (abs (- (aref exact i) (aref reduced i))))))
     (check "the reduced feather stays within two levels of the exact one" (<= worst 2) worst))
+  ;; the feather works on the selection's bounds, to the same bytes: in
+  ;; the middle, and with the kernel's reach cut off by each edge
+  (let ((w 300) (h 200))
+    (dolist (rect '((120 80 40 30) (0 0 25 20) (270 170 30 30) (0 90 300 15) (1 1 298 198)))
+      (dolist (sigma '(0.1d0 2d0 7.5d0))
+        (destructuring-bind (x y rw rh) rect
+          (let ((mask (rasterize-polygon w h (list (list x y) (list (+ x rw) (+ y 3))
+                                                   (list (+ x rw -2) (+ y rh)) (list (+ x 4) (+ y rh -1))))))
+            (check (format nil "a feather of ~a on its bounds ~a is the whole mask's, byte for byte" sigma rect)
+                   (equalp (feather-mask-exact mask w h sigma)
+                           (feather-mask-exact mask w h sigma (mask-bounds mask w h)))))))))
   (let* ((agent (sexp-agent::copy-agent *agent*))
          (operator (intern "TEST-RUNS-OUT" :stratum-api))
          (*agent* agent))

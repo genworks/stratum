@@ -93,6 +93,7 @@ answers.  The same door the prompt box's forms go through."
         ;; catches errors alone would lose every result with it, and leave
         ;; the page not knowing what the forms before it had done
         (dolist (form forms)
+          (collect-if-full!)
           (let ((result (handler-case (first (sexp-agent:run-forms *agent* (list form)))
                           ;; an image whose compiled sexp-agent catches errors alone
                           (serious-condition (e)

@@ -1645,6 +1645,10 @@ out of memory failing alone."
     (check "one slice fails in the calling thread as it always did"
            (handler-case (progn (parallel-ranges 10 (lambda (s e) (declare (ignore s e)) (error "Alone."))) nil)
              (error (e) (search "Alone." (princ-to-string e))))))
+  (check "the undo list's limit is a sixteenth of the heap, and 128 MB at the least"
+         (and (>= *undo-bytes* (* 128 1024 1024))
+              #+sbcl (>= *undo-bytes* (floor (sb-ext:dynamic-space-size) 16)))
+         *undo-bytes*)
   ;; the blur's fast loops against the plain one, at every shape where
   ;; a row or a column is shorter than the kernel, the four-wide loop
   ;; has a remainder, or a block of columns ends part way

@@ -310,12 +310,17 @@ OPACITY.  The twin of the shader's masked()."
             (declare (type fixnum o) (type double-float m))
             (setf (aref mask o) (unit->byte (+ m (* (- gray m) a))))))))))
 
-(defparameter *undo-bytes* (* 128 1024 1024)
+(defparameter *undo-bytes*
+  (max (* 128 1024 1024)
+       #+sbcl (floor (sb-ext:dynamic-space-size) 16)
+       #-sbcl 0)
   "Integer. The most bytes a document's undo list keeps; the oldest
-entries go first.  A whole 4K layer is 33 MB.  (512 MB until
-2026-11-03: with documents per session on a 1 GB heap, four sessions'
-worth of 1080p undo entries exhausted it; relieve-memory! in web.lisp
-trims these lists first when the heap runs short.)")
+entries go first: a sixteenth of the heap where the Lisp can say, and
+128 MB at the least.  A whole 4K layer is 33 MB and a whole layer of an
+18-megapixel photograph 72.  (512 MB on any heap until 2026-11-03: with
+documents per session on a 1 GB heap, four sessions' worth of 1080p
+undo entries exhausted it; relieve-memory! in web.lisp trims these
+lists first when the heap runs short.)")
 
 (defun entry-bytes (entry)
   "The bytes an undo ENTRY holds: a layer or mask entry's, or all of a

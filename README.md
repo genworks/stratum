@@ -328,6 +328,19 @@ make), and the load of the page that followed.  The page's two scripts
 are addressed with a version, so a cache between the server and the
 browser cannot pair an old script with a new server.
 
+### Keeping a record of prompts
+
+`(stratum:configure-prompt-log! :directory "/path/" :turns 300)` keeps a
+directory per prompt under that path, closed to everyone but its owner:
+`turn.sexp` (who asked, by the name on their invite, the prompt, the
+document described, the forms with their results, the reply, the
+model and any failure) and small pictures, at most 640 pixels on a
+side, of what the model was shown (`before.png`, `look-1.png` ...) and
+how it ended (`after.png`).  The oldest go past `:turns`.  There is no
+log by default: the pictures are the visitors', so keeping them is the
+operator's decision, and the visitors should be told.  A log that
+cannot be written costs nobody their prompt.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file

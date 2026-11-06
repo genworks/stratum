@@ -2310,6 +2310,79 @@ the whole picture and 'paint the thumb green' turned all of it green."
       (check "a mask from nothing selected is refused"
              (not (getf (first (stratum:run-forms "(set-mask 0 :selection)")) :ok))))))
 
+(defun test-prompt-log ()
+  "The prompt log: nothing without a directory; with one, each prompt's
+words, forms and small pictures, however it ended; never a token; and a
+log that cannot be written costs nobody their prompt."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "demo") stratum-api:*document*))
+         (root (format nil "/tmp/stratum-prompt-log-~d/" (get-universal-time)))
+         (*prompt-log-directory* nil))
+    (flet ((turns () (sort (mapcar #'namestring (uiop:subdirectories root)) #'string<))
+           (read-turn (dir)
+             (with-open-file (in (merge-pathnames "turn.sexp" dir) :external-format :utf-8)
+               (let ((*package* (find-package :common-lisp)))
+                 (read in))))
+           (png-size (file)
+             (multiple-value-bind (pixels w h) (read-png (stratum-api::file-octets file))
+               (declare (ignore pixels))
+               (max w h))))
+      (unwind-protect
+           (progn
+             (prompt-with doc "(select-rect 10 10 20 20)")
+             (check "no directory, no log" (null (probe-file root)))
+             (stratum-api:select-none)
+             (let ((*prompt-log-turns* 2))
+               (check "configure-prompt-log! makes the directory"
+                      (and (configure-prompt-log! :directory root) (probe-file root)))
+               (call-with-stub-model
+                (list (format nil "Looking.~%```lisp~%(look 0 0 1000 800)~%```")
+                      (format nil "Done.~%```lisp~%(select-rect 40 40 60 60)~%```"))
+                (lambda (agent requests)
+                  (declare (ignore requests))
+                  (let ((*agent* agent))
+                    (prompt-document doc "make it blue — please" :session "s1" :who "Alice"))))
+               (let* ((dir (first (turns))) (turn (read-turn dir)) (outcome (getf turn :outcome)))
+                 (check "a prompt's words, who asked, its forms and how it went"
+                        (and (equal (getf turn :prompt) "make it blue — please")
+                             (equal (getf turn :who) "Alice")
+                             (equal (getf turn :rounds) 2)
+                             (search "index 0 is the bottom" (getf turn :state))
+                             (getf outcome :ok)
+                             (= (length (getf outcome :results)) 2)
+                             (search "Done." (getf outcome :reply)))
+                        turn)
+                 (check "the caption of what it looked at"
+                        (search "x 0 y 0 w 1000 h 800" (first (getf turn :looks))) (getf turn :looks))
+                 (check "the pictures, small: before, the look, after"
+                        (every (lambda (name) (<= (png-size (merge-pathnames name dir)) *prompt-log-picture-size*))
+                               '("before.png" "look-1.png" "after.png"))))
+               (stratum-api:select-none)
+               ;; a prompt that failed outright
+               (let ((*agent* (sexp-agent:make-agent :name "Stratum" :package :stratum-api
+                                                     :operators stratum-api:*prompt-operators*
+                                                     :reference "The reference."
+                                                     :messages-url (format nil "http://127.0.0.1:~d/none" (free-port)))))
+                 (handler-case (prompt-document doc "this one fails" :who "Bob")
+                   (error () nil)))
+               (let ((turn (read-turn (second (turns)))))
+                 (check "a prompt that failed is kept, with what went wrong"
+                        (and (equal (getf turn :prompt) "this one fails") (stringp (getf turn :failure))
+                             (null (getf turn :outcome)))
+                        turn))
+               (prompt-with doc "(select-none)")
+               (check "the oldest go past the limit"
+                      (and (= (length (turns)) 2)
+                           (equal (getf (read-turn (first (turns))) :prompt) "this one fails"))
+                      (turns)))
+             ;; a directory that cannot be written
+             (let ((*prompt-log-directory* (merge-pathnames "turn.sexp/" (first (turns)))))
+               (check "a log that cannot be written costs nobody their prompt"
+                      (getf (prompt-with doc "(select-none)") :ok))))
+        (setf *prompt-log-directory* nil)
+        (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))))))
+
 (defun prompt-with (doc forms)
   "A prompt on DOC whose model answers FORMS, text, and then nothing."
   (call-with-stub-model
@@ -2421,7 +2494,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

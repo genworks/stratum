@@ -148,15 +148,32 @@ document, passed or not."
   (let ((form (getf result :form)))
     (and (consp form) (not (member (car form) *reading-operators*)))))
 
-(defstruct (picture (:constructor make-picture (png note width height)))
+(defstruct (picture (:constructor make-picture (png note width height &optional small)))
   "What (look) answers: PNG octets WIDTH x HEIGHT and NOTE, the words
-that place the picture in the document."
-  png note width height)
+that place the picture in the document; SMALL, the same picture for the
+prompt log when there is a log and PNG is larger than the log's size."
+  png note width height small)
+
+(defun picture-log-png (picture)
+  "PICTURE's PNG octets for the prompt log."
+  (or (picture-small picture) (picture-png picture)))
 
 (defmethod print-object ((picture picture) stream)
   (print-unreadable-object (picture stream)
     (format stream "picture ~a x ~a: ~a" (picture-width picture) (picture-height picture)
             (picture-note picture))))
+
+(defvar *prompt-log-directory* nil
+  "Where each prompt's record goes (configure-prompt-log!): a directory
+of its own per prompt, with small pictures of what the model saw.  Nil
+keeps none, the default: the pictures are the visitor's, so keeping them
+is the operator's decision and something the visitors should be told.")
+
+(defparameter *prompt-log-turns* 300
+  "How many prompts the log keeps; the oldest go first.")
+
+(defparameter *prompt-log-picture-size* 640
+  "The longer side, in pixels, of a picture in the log.")
 
 (defun scale-rect (pixels width channels x y w h k m)
   "The W x H rectangle at X, Y of PIXELS (WIDTH wide, CHANNELS bytes a
@@ -208,6 +225,14 @@ picture shows the model what is selected."
                 (dotimes (c 3)
                   (setf (aref rgba (+ o c)) (floor (* keep (aref rgba (+ o c))) 255))))))))))
 
+(defun small-png (rgba pw ph)
+  "RGBA, a picture PW x PH, as PNG octets at the log's size, when there
+is a log and it is larger than that."
+  (when (and *prompt-log-directory* (> (max pw ph) *prompt-log-picture-size*))
+    (multiple-value-bind (small sw sh)
+        (scale-rect rgba pw 4 0 0 pw ph (ceiling (max pw ph) *prompt-log-picture-size*) 1)
+      (png-octets small sw sh))))
+
 (defun document-picture (doc &key x y w h (size *prompt-picture-size*) (selection t))
   "A picture of the W x H rectangle of DOC at X, Y (all of it when
 unsaid; clipped to the document), its longer side at most SIZE.  With
@@ -242,7 +267,8 @@ SELECTION and something selected, the selection shows."
                  (cond ((not selection) "")
                        (mask "  The selection is shown: the picture is dimmed outside it and its edge is drawn in magenta.")
                        (t "  Nothing is selected.")))
-         pw ph)))))
+         pw ph
+         (small-png rgba pw ph))))))
 
 (defun picture-axis (origin name k m)
   "One coordinate of the caption's mapping: '3300 + px', '5 px',
@@ -290,17 +316,86 @@ prompt door binds it to put them on the job, for the page.")
         (format nil "~a ..." (subseq text 0 400))
         text)))
 
-(defun prompt-document (doc prompt &key session)
+(defun configure-prompt-log! (&key (directory nil directory?) (turns nil turns?))
+  "Keep a record of each prompt under DIRECTORY, made if need be and
+closed to everyone but its owner, or none with nil; at most TURNS of
+them.  The directory."
+  (when turns? (setf *prompt-log-turns* turns))
+  (when directory?
+    (let ((path (and directory (uiop:ensure-directory-pathname directory))))
+      (when path
+        (ensure-directories-exist path)
+        #+unix (uiop:run-program (list "chmod" "700" (uiop:native-namestring path))
+                                 :ignore-error-status t))
+      (setf *prompt-log-directory* path)))
+  *prompt-log-directory*)
+
+(defun turn-directory ()
+  "A new directory for one prompt, named so that the names sort by time."
+  (multiple-value-bind (second minute hour day month year)
+      (decode-universal-time (get-universal-time) 0)
+    (merge-pathnames (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~36r/"
+                             year month day hour minute second
+                             (random (expt 36 4) (make-random-state t)))
+                     *prompt-log-directory*)))
+
+(defun write-octets-file (path octets)
+  (with-open-file (out path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
+    (write-sequence octets out)))
+
+(defun prune-prompt-log! ()
+  "The oldest prompts gone, past *prompt-log-turns*."
+  (let ((turns (sort (mapcar #'uiop:native-namestring (uiop:subdirectories *prompt-log-directory*))
+                     #'string>)))
+    (dolist (old (nthcdr *prompt-log-turns* turns))
+      (uiop:delete-directory-tree (uiop:ensure-directory-pathname old) :validate t))))
+
+(defun after-picture (doc)
+  "The document at the size of the log's pictures, or nil with no log."
+  (when *prompt-log-directory*
+    (collect-if-full!)
+    (document-picture doc :size *prompt-log-picture-size*)))
+
+(defun log-turn! (turn before looks after)
+  "TURN, a plist, and its pictures -- BEFORE, what the model was shown,
+LOOKS, what it asked to see, in order, AFTER, how it ended -- into a
+directory of their own: turn.sexp, before.png, look-1.png ..., after.png.
+No token goes in: a person is the name on their invite.  A log that
+cannot be written must not cost anyone their prompt."
+  (when *prompt-log-directory*
+    (handler-case
+        (let ((dir (turn-directory)))
+          (ensure-directories-exist dir)
+          (with-open-file (out (merge-pathnames "turn.sexp" dir) :direction :output
+                                                                 :external-format :utf-8 :if-exists :supersede)
+            (let ((*print-pretty* t) (*print-right-margin* 100) (*print-readably* nil)
+                  (*package* (find-package :common-lisp)) (*print-case* :downcase))
+              (prin1 (append turn (list :looks (mapcar #'picture-note looks))) out)
+              (terpri out)))
+          (write-octets-file (merge-pathnames "before.png" dir) (picture-log-png before))
+          (loop for look in looks
+                for n from 1
+                do (write-octets-file (merge-pathnames (format nil "look-~d.png" n) dir)
+                                      (picture-log-png look)))
+          (when after (write-octets-file (merge-pathnames "after.png" dir) (picture-log-png after)))
+          (prune-prompt-log!))
+      (serious-condition (e)
+        (let ((*print-readably* nil))
+          (format *error-output* "~&[stratum] prompt log: ~a~%" e))))))
+
+(defun prompt-document (doc prompt &key session who)
   "PROMPT done to DOC: the document described, pictured and sent with
 the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document, and what its forms did one undo, however
 it ended (brush.lisp), unless they remade the document, which like
-Image > Crop has no undo.  A plist for the page: :reply :forms :results
-:ok :usage :width :height."
+Image > Crop has no undo.  WHO is the invitee, for the prompt log.  A
+plist for the page: :reply :forms :results :ok :usage :width :height."
   (let ((name (the-object doc doc-name))
+        (began (get-internal-real-time))
         (ran 0)
         (changed nil)
-        journal state picture history)
+        (looks '())
+        journal state picture history answer outcome failure)
     (bt:with-lock-held (*lock*)
       (let ((stratum-api:*document* doc))
         (setf state (stratum-api:describe-document)))
@@ -308,50 +403,66 @@ Image > Crop has no undo.  A plist for the page: :reply :forms :results
             history (reverse (the-object doc prompt-log))
             journal (begin-prompt-journal! doc)))
     (unwind-protect
-         (let ((answer (sexp-agent:ask *agent* prompt
-                                  :state-text (format nil "~a~%The picture with this message is ~a"
-                                                      state (picture-note picture))
-                                  :image-png (picture-png picture)
-                                  :session-id (and session (format nil "stratum-~a" session))
-                                  :history history
-                                  ;; a form that remade the document (crop, a
-                                  ;; resize) registered the new one under the
-                                  ;; name: each round runs on the one there now
-                                  :runner (lambda (code)
-                                            (multiple-value-bind (results passed)
-                                                (run-forms code (or (gethash name *documents*) doc))
-                                              (incf ran (length results))
-                                              (when (some #'changing-result? results) (setf changed t))
-                                              (funcall *prompt-progress* (format nil "~d form~:p run" ran))
-                                              (values results passed)))
-                                  :looks *prompt-looks*
-                                  :picture-of (lambda (value)
-                                                (when (picture-p value)
-                                                  (values (picture-png value) (picture-note value))))
-                                  ;; a Gendl whose sexp-agent has no looks yet
-                                  ;; runs the forms and stops there
-                                  :allow-other-keys t)))
-      (bt:with-lock-held (*lock*)
-        (let ((doc (or (gethash name *documents*) doc)))
-          (the-object doc (set-slot! :prompt-log
-                                     (subseq (cons (cons prompt (getf answer :assistant))
-                                                   (the-object doc prompt-log))
-                                             0 (min (1+ (length (the-object doc prompt-log)))
-                                                    *prompt-history-turns*))))
-          (list :reply (getf answer :reply)
-                :forms (getf answer :forms)
-                :results (mapcar (lambda (r)
-                                   (list :form (getf r :form) :ok (getf r :ok)
-                                         :value (and (getf r :ok) (printed (getf r :value)))
-                                         :error (getf r :error)))
-                                 (getf answer :results))
-                :ok (getf answer :ok)
-                :usage (getf answer :usage)
-                :width (the-object doc doc-width)
-                :height (the-object doc doc-height)))))
-      (bt:with-lock-held (*lock*)
-        (end-prompt-journal! doc journal
-                             (and changed (eq doc (or (gethash name *documents*) doc))))))))
+         (handler-bind ((serious-condition (lambda (e) (setf failure (princ-to-string e)))))
+           (setf answer
+                 (sexp-agent:ask *agent* prompt
+                                 :state-text (format nil "~a~%The picture with this message is ~a"
+                                                     state (picture-note picture))
+                                 :image-png (picture-png picture)
+                                 :session-id (and session (format nil "stratum-~a" session))
+                                 :history history
+                                 ;; a form that remade the document (crop, a
+                                 ;; resize) registered the new one under the
+                                 ;; name: each round runs on the one there now
+                                 :runner (lambda (code)
+                                           (multiple-value-bind (results passed)
+                                               (run-forms code (or (gethash name *documents*) doc))
+                                             (incf ran (length results))
+                                             (when (some #'changing-result? results) (setf changed t))
+                                             (funcall *prompt-progress* (format nil "~d form~:p run" ran))
+                                             (values results passed)))
+                                 :looks *prompt-looks*
+                                 :picture-of (lambda (value)
+                                               (when (picture-p value)
+                                                 (push value looks)
+                                                 (values (picture-png value) (picture-note value))))
+                                 ;; a Gendl whose sexp-agent has no looks yet
+                                 ;; runs the forms and stops there
+                                 :allow-other-keys t))
+           (bt:with-lock-held (*lock*)
+             (let ((doc (or (gethash name *documents*) doc)))
+               (the-object doc (set-slot! :prompt-log
+                                          (subseq (cons (cons prompt (getf answer :assistant))
+                                                        (the-object doc prompt-log))
+                                                  0 (min (1+ (length (the-object doc prompt-log)))
+                                                         *prompt-history-turns*))))
+               (setf outcome
+                     (list :reply (getf answer :reply)
+                           :forms (getf answer :forms)
+                           :results (mapcar (lambda (r)
+                                              (list :form (getf r :form) :ok (getf r :ok)
+                                                    :value (and (getf r :ok) (printed (getf r :value)))
+                                                    :error (getf r :error)))
+                                            (getf answer :results))
+                           :ok (getf answer :ok)
+                           :usage (getf answer :usage)
+                           :width (the-object doc doc-width)
+                           :height (the-object doc doc-height)))))
+           outcome)
+      (let ((after nil))
+        (bt:with-lock-held (*lock*)
+          (end-prompt-journal! doc journal
+                               (and changed (eq doc (or (gethash name *documents*) doc))))
+          (setf after (after-picture (or (gethash name *documents*) doc))))
+        (log-turn! (list :who who :session session :document name
+                         :prompt prompt :state state
+                         :model (sexp-agent:agent-model *agent*)
+                         :effort (sexp-agent:agent-effort *agent*)
+                         :seconds (round (elapsed-ms began) 1000)
+                         :rounds (getf answer :rounds)
+                         :failure failure
+                         :outcome outcome)
+                   picture (reverse looks) after)))))
 
 (defun prompt-json (result)
   (json-string
@@ -394,7 +505,7 @@ Image > Crop has no undo.  A plist for the page: :reply :forms :results
              *prompt-jobs*)
     (dolist (id gone) (remhash id *prompt-jobs*))))
 
-(defun start-prompt-job! (documents doc prompt session)
+(defun start-prompt-job! (documents doc prompt session &optional who)
   "The prompt started on its own thread; the job's id."
   (let ((id (format nil "~36r~36r" (get-universal-time) (random (expt 36 6) (make-random-state t)))))
     (bt:with-lock-held (*prompt-jobs-lock*)
@@ -412,7 +523,7 @@ Image > Crop has no undo.  A plist for the page: :reply :forms :results
                                           (setf (gethash id *prompt-jobs*)
                                                 (list :status :working :started (getf job :started)
                                                       :note note))))))))
-                            (list :status :done :result (prompt-json (prompt-document doc prompt :session session))))
+                            (list :status :done :result (prompt-json (prompt-document doc prompt :session session :who who))))
                         (serious-condition (e)
                           (list :status :failed :error (princ-to-string e))))))
          (bt:with-lock-held (*prompt-jobs-lock*)
@@ -432,6 +543,10 @@ Image > Crop has no undo.  A plist for the page: :reply :forms :results
                (json-string result)))
       (:failed (json-string (json-object "status" "failed" "error" (getf job :error))))
       (t (json-string (json-object "status" "unknown"))))))
+
+(defun invitee (req)
+  "The name on REQ's invite, for the prompt log; nil with the gate open."
+  (second (find-invite (invite-gate:request-token *gate* req))))
 
 (defun handle-prompt (req ent)
   "POST /stratum/api/prompt?doc=&s= {prompt}: the prompt started on the
@@ -453,7 +568,8 @@ wrong, as the other doors answer."
                 (bt:with-lock-held (*lock*)
                   (setf documents (request-session-table req))
                   (let ((*documents* documents)) (setf doc (request-doc req))))
-                (setf result (json-string (json-object "job" (start-prompt-job! documents doc prompt session)))))))
+                (setf result (json-string (json-object "job" (start-prompt-job! documents doc prompt session
+                                                                                   (invitee req))))))))
       (serious-condition (e) (setf failure (princ-to-string e))))
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)

@@ -175,28 +175,50 @@
   // One array texture brought to the stamps WANT.  Content the old
   // texture holds at another index is copied across on the GPU, into a
   // new texture; content it holds in place stays; the rest is fetched.
-  function syncArray(oldTex, have, want, internal, path, format, w, h) {
+  // CHANGED, from a prompt, says which new stamps are old content with
+  // one rectangle changed: only the rectangle is fetched for those.
+  function syncArray(oldTex, have, want, internal, path, format, w, h, changed) {
     function holds(j) { return want[j] != null && want[j] === have[j]; }
     function found(j) { return want[j] == null ? -1 : have.indexOf(want[j]); }
+    function change(j) {
+      return (changed || []).filter(function (c) {
+        return c.stamp === want[j] && have.indexOf(c.from) >= 0;
+      })[0];
+    }
+    function inPlaceAt(j) {
+      var c = change(j);
+      return holds(j) || (found(j) < 0 && (!c || have.indexOf(c.from) === j));
+    }
     var sameCount = !!oldTex && have.length === want.length, j;
     var inPlace = sameCount;
-    for (j = 0; j < want.length && inPlace; j++) inPlace = holds(j) || found(j) < 0;
+    for (j = 0; j < want.length && inPlace; j++) inPlace = inPlaceAt(j);
     var tex = inPlace ? oldTex : arrayTexture(internal, w, h, want.length);
     var chain = Promise.resolve(), touched = !inPlace;
+    function copied(i, j) {
+      var fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo);
+      gl.framebufferTextureLayer(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, oldTex, 0, i);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+      gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, 0, 0, w, h);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.deleteFramebuffer(fbo);
+      S.stats.pixelCopies = (S.stats.pixelCopies || 0) + 1;
+    }
     want.forEach(function (stamp, j) {
       if (inPlace && holds(j)) return;
       touched = true;
-      var i = inPlace ? -1 : found(j);
+      var i = inPlace ? -1 : found(j), c = change(j);
       if (i >= 0) {
+        chain = chain.then(function () { copied(i, j); });
+      } else if (c) {
         chain = chain.then(function () {
-          var fbo = gl.createFramebuffer();
-          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo);
-          gl.framebufferTextureLayer(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, oldTex, 0, i);
+          if (!inPlace) copied(have.indexOf(c.from), j);
+          return fetchPixels(api(path + '?i=' + j + '&x=' + c.x + '&y=' + c.y + '&w=' + c.w + '&h=' + c.h));
+        }).then(function (bytes) {
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
           gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-          gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, 0, 0, w, h);
-          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-          gl.deleteFramebuffer(fbo);
-          S.stats.pixelCopies = (S.stats.pixelCopies || 0) + 1;
+          gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, c.x, c.y, j, c.w, c.h, 1, format, gl.UNSIGNED_BYTE, bytes);
+          S.stats.rectFetches = (S.stats.rectFetches || 0) + 1;
         });
       } else {
         chain = chain.then(function () {
@@ -221,10 +243,10 @@
 
   // The textures brought up to date with the document as the server now
   // describes it; everything, when the page holds nothing of this size.
-  function syncPixels() {
+  function syncPixels(changed) {
     var w = doc.width, h = doc.height, want = wantedStamps(doc);
     if (!texLayers || !texMasks || held.w !== w || held.h !== h) return uploadPixels();
-    return syncArray(texLayers, held.rasters, want.rasters, gl.SRGB8_ALPHA8, 'raster', gl.RGBA, w, h)
+    return syncArray(texLayers, held.rasters, want.rasters, gl.SRGB8_ALPHA8, 'raster', gl.RGBA, w, h, changed)
       .then(function (tex) {
         texLayers = tex;
         held.rasters = want.rasters;
@@ -4672,7 +4694,7 @@
   // The page brought up to date with the server after changes made
   // outside its own calls: the structure, the selection, and whatever
   // pixels the page does not already hold.
-  S.refreshAll = function () {
+  S.refreshAll = function (changed) {
     return fetchJSON(api('doc')).then(function (d) {
       doc = d;
       buildProgram(doc.shader);
@@ -4682,7 +4704,7 @@
       S.undoDepth = doc.undoDepth;
       S.redoDepth = doc.redoDepth;
       buildPanel();
-      return syncPixels();
+      return syncPixels(changed);
     }).then(function () {
       return loadSelection(doc.selection);
     }).then(function () { status(); requestDraw(); });
@@ -4735,7 +4757,7 @@
         if (!S.noReload) location.reload();
         return res;
       }
-      return S.refreshAll().then(function () { return res; });
+      return S.refreshAll(res.changed).then(function () { return res; });
     }, function (e) {
       showPromptTurn(text, { error: plainError(e) });
       status('prompt failed');

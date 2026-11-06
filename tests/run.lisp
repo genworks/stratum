@@ -1283,6 +1283,94 @@ to alter the pictures."
                    for o = (* 4 x)
                    always (= (aref n o) (aref n (+ o 1)) (aref n (+ o 2))))))))
 
+(defun old-noise (pixels w h amount monochrome seed)
+  "Add Noise as it was: arbitrary integers, one pixel at a time."
+  (flet ((hash (x y c)
+           (let* ((m #xffffffff)
+                  (v (logand (+ (* x 374761393) (* y 668265263) (* c 1274126177) (* seed 2246822519)) m)))
+             (setf v (logand (* (logxor v (ash v -13)) 1274126177) m))
+             (setf v (logxor v (ash v -16)))
+             (/ (float (logand v #xffffff) 1d0) 16777216d0))))
+    (let ((out (copy-seq pixels)) (scale (* 255d0 (float amount 1d0))))
+      (dotimes (y h out)
+        (dotimes (x w)
+          (let ((o (* 4 (+ x (* y w)))))
+            (dotimes (c 3)
+              (let ((v (+ (aref pixels (+ o c)) (* scale (- (* 2d0 (hash x y (if monochrome 0 c))) 1d0)))))
+                (setf (aref out (+ o c)) (unit->byte (/ v 255d0)))))))))))
+
+(defun test-selection-rects ()
+  "A filter or an adjustment inside a selection works on its rectangle
+and the kernel's reach: the same bytes as the whole layer filtered and
+blended by the selection, one rectangle on the undo list, and that
+rectangle answered."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (w (the-object doc doc-width))
+         (h (the-object doc doc-height))
+         (layer (first (the-object doc raster-layers)))
+         (index (the-object layer index))
+         (pixels (the-object layer (ensure-own-pixels!))))
+    (check "Add Noise draws the numbers it always drew"
+           (and (equalp (add-noise-rgba pixels w h 0.2 nil 5) (old-noise pixels w h 0.2 nil 5))
+                (equalp (add-noise-rgba pixels w h 0.1 t -3) (old-noise pixels w h 0.1 t -3))))
+    (dolist (place '((100 50 60 40) (0 0 40 30)))
+      (destructuring-bind (x y rw rh) place
+        (stratum-api:select-rect x y rw rh)
+        (stratum-api:feather 2)
+        (let ((selection (the-object doc selection)))
+          (dolist (run (list (list "Gaussian Blur"
+                                   (lambda () (filter-layer! layer :gaussian-blur :settings '(:radius 4)))
+                                   (lambda (p) (gaussian-blur-rgba p w h 4d0)))
+                             (list "Unsharp Mask"
+                                   (lambda () (filter-layer! layer :unsharp-mask
+                                                             :settings '(:radius 3 :amount 150 :threshold 4)))
+                                   (lambda (p) (unsharp-mask-rgba p w h 3d0 1.5d0 4)))
+                             (list "Add Noise"
+                                   (lambda () (filter-layer! layer :add-noise :settings '(:amount 20 :seed 7)))
+                                   (lambda (p) (add-noise-rgba p w h 0.2d0 nil 7)))
+                             (list "Levels"
+                                   (lambda () (adjust-layer! layer :levels :settings '(:gamma 1.4)))
+                                   (lambda (p)
+                                     (let ((copy (copy-seq p))
+                                           (table (byte-table (levels-lut 0d0 1d0 1.4d0 0d0 1d0 256))))
+                                       (apply-tables! copy table table table))))
+                             (list "Hue/Saturation"
+                                   (lambda () (adjust-layer! layer :hue-saturation :settings '(:hue 30)))
+                                   (lambda (p)
+                                     (apply-hue-saturation! (copy-seq p) (/ 30d0 360) 0d0 0d0)))))
+            (destructuring-bind (name act whole) run
+              (let* ((before (copy-seq pixels))
+                     (want (blend-by-selection! (copy-seq before) (funcall whole before) w h selection))
+                     (rect (funcall act))
+                     (entry (first (the-object doc undo-entries))))
+                (check (format nil "~a in a selection at ~a, ~a: the bytes of the whole layer's" name x y)
+                       (equalp pixels want))
+                (check (format nil "~a answers the selection's rectangle, and that is all undo holds" name)
+                       (and (equal rect (getf selection :rect))
+                            (= (entry-bytes entry) (* 4 (third rect) (fourth rect))))
+                       (list rect (entry-bytes entry)))
+                (stratum-api:undo)
+                (check (format nil "~a undoes" name) (equalp pixels before)))))))
+      (stratum-api:select-none))
+    ;; a prompt's changes, for the page
+    (let* ((stamp (the-object layer pixel-stamp))
+           (answer (prompt-with doc (format nil "(select-rect 100 50 60 40) (levels ~d :gamma 1.3) (add-layer :raster :name \"New\") (select-none)" index)))
+           (changed (getf answer :changed)))
+      (check "a prompt says which rectangle of which content it changed"
+             (and (= (length changed) 1)
+                  (eql (getf (first changed) :from) stamp)
+                  (eql (getf (first changed) :stamp)
+                       (the-object (first (the-object doc raster-layers)) pixel-stamp))
+                  (equal (list (getf (first changed) :x) (getf (first changed) :y)
+                               (getf (first changed) :w) (getf (first changed) :h))
+                         '(100 50 60 40)))
+             changed)
+      (check "and the page hears it"
+             (= 1 (length (gethash "changed" (yason:parse (prompt-json answer))))))
+      (stratum-api:undo))))
+
 (defun test-gradient ()
   (flet ((gray (pixels x &optional (y 0) (w 10)) (aref pixels (* 4 (+ x (* y w)))))
          (alpha (pixels x &optional (y 0) (w 10)) (aref pixels (+ 3 (* 4 (+ x (* y w)))))))
@@ -2841,7 +2929,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-selection-rects
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -357,17 +357,47 @@ selection mode . items)."
 ;;; made on, so they stay good.  An item is (array channels x y w h
 ;;; bytes), newest first.
 
-(defstruct (prompt-journal (:constructor make-prompt-journal (specs selection mode undo)))
-  specs selection mode undo (items nil))
+(defstruct (prompt-journal (:constructor make-prompt-journal (specs selection mode undo stamps)))
+  specs selection mode undo stamps (items nil))
 
 (defun begin-prompt-journal! (doc)
   "A journal for a prompt on DOC, now running on it; nil when one is
 running already, whose journal this prompt's changes then join."
   (unless (the-object doc prompt-journal)
     (let ((journal (make-prompt-journal (the-object doc specs-now) (the-object doc selection)
-                                        (the-object doc color-mode) (the-object doc undo-entries))))
+                                        (the-object doc color-mode) (the-object doc undo-entries)
+                                        (mapcar (lambda (layer)
+                                                  (list (the-object layer pixel-stamp)
+                                                        (the-object layer own-pixels)
+                                                        (the-object layer source)))
+                                                (the-object doc raster-layers)))))
       (the-object doc (set-slot! :prompt-journal journal))
       journal)))
+
+(defun prompt-changes (doc journal)
+  "What the running prompt did to the pixels of layers it found on DOC,
+as a plist for each: :from the stamp the layer had, :stamp the one it
+has, :x :y :w :h the rectangle holding every change.  A page that holds
+:from need fetch only the rectangle: a layer of a photograph is tens of
+megabytes, and the journal has every in-place change."
+  (when journal
+    (loop for layer in (the-object doc raster-layers)
+          for own = (the-object layer own-pixels)
+          for items = (and own (remove own (prompt-journal-items journal) :key #'first :test-not #'eq))
+          for was = (and items
+                         (find-if (lambda (entry)
+                                    (destructuring-bind (stamp pixels source) entry
+                                      (declare (ignore stamp))
+                                      (or (eq pixels own)
+                                          (and (null pixels) (eq source (the-object layer source))))))
+                                  (prompt-journal-stamps journal)))
+          when (and was (not (eql (first was) (the-object layer pixel-stamp))))
+            collect (let ((x0 (reduce #'min items :key #'third))
+                          (y0 (reduce #'min items :key #'fourth))
+                          (x1 (reduce #'max items :key (lambda (item) (+ (third item) (fifth item)))))
+                          (y1 (reduce #'max items :key (lambda (item) (+ (fourth item) (sixth item))))))
+                      (list :from (first was) :stamp (the-object layer pixel-stamp)
+                            :x x0 :y y0 :w (- x1 x0) :h (- y1 y0))))))
 
 (defun end-prompt-journal! (doc journal changed?)
   "The prompt is over: with CHANGED? its journal goes on the undo list
@@ -462,25 +492,28 @@ empties the redo list; an undo being redone (KEEP-REDO) does not."
                    (aref pixels (+ o 2)) (unit->byte b))))
   pixels)
 
-(defun blend-by-selection! (pixels filtered width height selection)
-  "PIXELS replaced by FILTERED where SELECTION covers, blended by its
-coverage in premultiplied linear light; everywhere without one."
-  (if (null selection)
-      (replace pixels filtered)
-      (let ((mask (getf selection :mask))
-            (decode *srgb-decode*))
-        (declare (type (simple-array (unsigned-byte 8) (*)) pixels filtered mask)
-                 (type (simple-array double-float (256)) decode))
-        (dotimes (i (* width height) pixels)
-          (let ((s (/ (float (aref mask i) 1d0) 255d0)))
+(defun blend-rect-by-selection! (pixels filtered width rect selection)
+  "PIXELS, WIDTH wide, taking FILTERED, the size of RECT, inside RECT,
+blended by SELECTION's coverage in premultiplied linear light."
+  (destructuring-bind (rx ry rw rh) rect
+    (let ((mask (getf selection :mask))
+          (decode *srgb-decode*))
+      (declare (type (simple-array (unsigned-byte 8) (*)) pixels filtered mask)
+               (type (simple-array double-float (256)) decode)
+               (type fixnum width rx ry rw rh))
+      (dotimes (row rh pixels)
+        (dotimes (col rw)
+          (let* ((i (+ rx col (* (+ ry row) width)))
+                 (s (/ (float (aref mask i) 1d0) 255d0)))
             (when (> s 0d0)
               (let* ((o (* 4 i))
+                     (f (* 4 (+ col (* row rw))))
                      (a0 (/ (float (aref pixels (+ o 3)) 1d0) 255d0))
-                     (a1 (/ (float (aref filtered (+ o 3)) 1d0) 255d0))
+                     (a1 (/ (float (aref filtered (+ f 3)) 1d0) 255d0))
                      (a (+ (* a0 (- 1d0 s)) (* a1 s))))
                 (flet ((channel (k)
                          (/ (+ (* a0 (- 1d0 s) (aref decode (aref pixels (+ o k))))
-                               (* a1 s (aref decode (aref filtered (+ o k)))))
+                               (* a1 s (aref decode (aref filtered (+ f k)))))
                             a)))
                   (if (> a 0d0)
                       (setf (aref pixels o) (unit->byte (linear->srgb (channel 0)))
@@ -488,15 +521,23 @@ coverage in premultiplied linear light; everywhere without one."
                             (aref pixels (+ o 2)) (unit->byte (linear->srgb (channel 2)))
                             (aref pixels (+ o 3)) (unit->byte a))
                       (setf (aref pixels o) 0 (aref pixels (+ o 1)) 0
-                            (aref pixels (+ o 2)) 0 (aref pixels (+ o 3)) 0))))))))))
+                            (aref pixels (+ o 2)) 0 (aref pixels (+ o 3)) 0)))))))))))
+
+(defun blend-by-selection! (pixels filtered width height selection)
+  "PIXELS replaced by FILTERED where SELECTION covers, blended by its
+coverage; everywhere without one."
+  (if (null selection)
+      (replace pixels filtered)
+      (blend-rect-by-selection! pixels filtered width (list 0 0 width height) selection)))
 
 (defun adjust-layer! (layer kind &key settings curves)
   "Bake an adjustment into raster LAYER's pixels, inside the selection
-when there is one, and return the rectangle it changed, the whole layer.
+when there is one, and return the rectangle it changed: the selection's,
+or the whole layer with none.
 KIND is :levels (SETTINGS a plist of :in-black :in-white :gamma
 :out-black :out-white), :curves (CURVES a plist of :master :red :green
 :blue point lists) or :hue-saturation (SETTINGS :hue in degrees,
-:saturation, :lightness).  The layer's pixels before go on the undo
+:saturation, :lightness).  The rectangle's pixels before go on the undo
 list."
   (unless (eql (the-object layer kind) :raster)
     (error "~a is not a raster layer." (the-object layer layer-name)))
@@ -505,9 +546,11 @@ list."
          (selection (the-object doc selection))
          (w (the-object layer doc-width))
          (h (the-object layer doc-height))
-         (target (if selection (copy-seq pixels) pixels)))
+         (rect (if selection (getf selection :rect) (list 0 0 w h)))
+         (before (apply #'rgba-rect pixels w h rect))
+         (target (if selection (copy-seq before) pixels)))
     (flet ((setting (key default) (float (getf settings key default) 1d0)))
-      (push-undo! doc (list (the-object layer index) :layer 0 0 w h (copy-seq pixels)))
+      (push-undo! doc (list* (the-object layer index) :layer (append rect (list before))))
       (ecase kind
         (:levels
          (let ((table (byte-table (levels-lut (setting :in-black 0) (setting :in-white 1)
@@ -524,9 +567,9 @@ list."
         (:hue-saturation
          (apply-hue-saturation! target (/ (setting :hue 0) 360) (setting :saturation 0)
                                 (setting :lightness 0))))
-      (when selection (blend-by-selection! pixels target w h selection))
+      (when selection (blend-rect-by-selection! pixels target w rect selection))
       (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
-      (list 0 0 w h))))
+      rect)))
 
 (defun apply-brush-stroke (layer stroke &key (target :layer))
   "Paint STROKE into LAYER -- its pixels (TARGET :layer, a raster layer)

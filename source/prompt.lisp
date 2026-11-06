@@ -400,7 +400,7 @@ the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document, and what its forms did one undo, however
 it ended (brush.lisp), unless they remade the document, which like
 Image > Crop has no undo.  WHO is the invitee, for the prompt log.  A
-plist for the page: :reply :forms :results :ok :declined :stopped :usage :width
+plist for the page: :reply :forms :results :ok :declined :stopped :changed :usage :width
 :height."
   (let ((name (the-object doc doc-name))
         (began (get-internal-real-time))
@@ -459,6 +459,7 @@ plist for the page: :reply :forms :results :ok :declined :stopped :usage :width
                            :ok (getf answer :ok)
                            :declined (getf answer :declined)
                            :stopped (and (getf answer :stopped) t)
+                           :changed (prompt-changes doc journal)
                            :usage (getf answer :usage)
                            :width (the-object doc doc-width)
                            :height (the-object doc doc-height)))))
@@ -492,6 +493,12 @@ plist for the page: :reply :forms :results :ok :declined :stopped :usage :width
                 "ok" (json-bool (getf result :ok))
                 "declined" (json-bool (getf result :declined))
                 "stopped" (json-bool (getf result :stopped))
+                "changed" (coerce (mapcar (lambda (c)
+                                            (json-object "from" (getf c :from) "stamp" (getf c :stamp)
+                                                         "x" (getf c :x) "y" (getf c :y)
+                                                         "w" (getf c :w) "h" (getf c :h)))
+                                          (getf result :changed))
+                                  'vector)
                 "usage" (let ((usage (getf result :usage)))
                           (json-object "input" (getf usage :input 0) "output" (getf usage :output 0)))
                 "width" (getf result :width)

@@ -373,53 +373,104 @@ a pixel that no channel moves is left as it is by the arithmetic."
           (funcall sharpen channel))))
     out))
 
-(defun noise-hash (x y c seed)
-  "A number in [0, 1) from pixel X, Y, channel C and SEED, the integer
-hash the filter shader computes in 32-bit unsigned arithmetic."
+(declaim (inline noise-bits))
+
+(defun noise-bits (x y c seed-term)
+  "The hash of pixel X, Y and channel C, 24 bits, in 32-bit unsigned
+arithmetic as the filter shader computes it.  SEED-TERM is the seed's
+share, worked out once."
+  (declare (type (unsigned-byte 32) x y c seed-term))
   (let* ((m #xffffffff)
-         (h (logand (+ (* x 374761393) (* y 668265263) (* c 1274126177) (* seed 2246822519)) m)))
+         (h (logand (+ (logand (* x 374761393) m) (logand (* y 668265263) m)
+                       (logand (* c 1274126177) m) seed-term)
+                    m)))
+    (declare (type (unsigned-byte 32) h))
     (setf h (logand (* (logxor h (ash h -13)) 1274126177) m))
     (setf h (logxor h (ash h -16)))
-    (/ (float (logand h #xffffff) 1d0) 16777216d0)))
+    (logand h #xffffff)))
 
-(defun add-noise-rgba (pixels w h amount monochrome seed)
+(defun noise-seed-term (seed)
+  (logand (* seed 2246822519) #xffffffff))
+
+(defun noise-hash (x y c seed)
+  "A number in [0, 1) from pixel X, Y, channel C and SEED."
+  (/ (float (noise-bits x y c (noise-seed-term seed)) 1d0) 16777216d0))
+
+(defun add-noise-rgba (pixels w h amount monochrome seed &optional (x0 0) (y0 0))
   "PIXELS with uniform noise of AMOUNT (1 = a full 255 levels either
 way) added to each encoded color channel, one draw per pixel when
-MONOCHROME, else one per channel; alpha untouched."
+MONOCHROME, else one per channel; alpha untouched.  PIXELS is the part
+of a picture at X0, Y0: a pixel's noise goes by its place in the picture."
   (let ((out (copy-seq pixels))
-        (scale (* 255d0 (float amount 1d0))))
-    (declare (type (simple-array (unsigned-byte 8) (*)) out))
-    (dotimes (y h out)
-      (dotimes (x w)
-        (let ((o (* 4 (+ x (* y w)))))
-          (dotimes (c 3)
-            (let* ((r (noise-hash x y (if monochrome 0 c) seed))
-                   (v (+ (aref pixels (+ o c)) (* scale (- (* 2d0 r) 1d0)))))
-              (setf (aref out (+ o c)) (unit->byte (/ v 255d0))))))))))
+        (scale (* 255d0 (float amount 1d0)))
+        (seed-term (noise-seed-term seed))
+        (monochrome (and monochrome t)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) pixels out)
+             (type double-float scale)
+             (type (unsigned-byte 32) seed-term)
+             (type fixnum w x0 y0))
+    (parallel-ranges
+     h
+     (lambda (start end)
+       (declare (type fixnum start end))
+       (loop for y of-type fixnum from start below end
+             do (dotimes (x w)
+                  (let ((o (* 4 (+ x (* y w)))))
+                    (declare (type fixnum o))
+                    (dotimes (c 3)
+                      (let* ((r (/ (float (noise-bits (+ x0 x) (+ y0 y) (if monochrome 0 c) seed-term) 1d0)
+                                   16777216d0))
+                             (v (+ (aref pixels (+ o c)) (* scale (- (* 2d0 r) 1d0)))))
+                        (declare (type double-float r v))
+                        (setf (aref out (+ o c)) (unit->byte (/ v 255d0))))))))))
+    out))
+
+(defun reached-rect (rect reach w h)
+  "RECT grown by REACH on each side, inside W x H."
+  (destructuring-bind (x y rw rh) rect
+    (let ((x0 (max 0 (- x reach)))
+          (y0 (max 0 (- y reach)))
+          (x1 (min w (+ x rw reach)))
+          (y1 (min h (+ y rh reach))))
+      (list x0 y0 (- x1 x0) (- y1 y0)))))
 
 (defun filter-layer! (layer kind &key settings)
   "Bake the filter KIND into raster LAYER inside the selection, with
 SETTINGS a plist: :gaussian-blur (:radius), :unsharp-mask (:radius
 :amount in percent :threshold in levels), :add-noise (:amount in
-percent, :monochrome, :seed).  The whole layer on the undo list;
-returns it as the rectangle."
+percent, :monochrome, :seed).  With a selection only its rectangle and
+the kernel's reach around it are worked on, the same bytes for the
+memory and the time of the selection; the rectangle goes on the undo
+list and is what it returns: the whole layer with no selection."
   (unless (eql (the-object layer kind) :raster)
     (error "~a is not a raster layer." (the-object layer layer-name)))
   (let* ((doc (the-object layer parent))
          (w (the-object doc doc-width))
          (h (the-object doc doc-height))
-         (pixels (the-object layer (ensure-own-pixels!))))
+         (pixels (the-object layer (ensure-own-pixels!)))
+         (selection (the-object doc selection))
+         (rect (if selection (getf selection :rect) (list 0 0 w h))))
     (flet ((setting (key default) (let ((v (getf settings key))) (if v v default))))
-      (let ((filtered
-              (ecase kind
-                (:gaussian-blur (gaussian-blur-rgba pixels w h (max 0.1d0 (float (setting :radius 1) 1d0))))
-                (:unsharp-mask (unsharp-mask-rgba pixels w h (setting :radius 2)
-                                                  (/ (float (setting :amount 100) 1d0) 100d0)
-                                                  (setting :threshold 0)))
-                (:add-noise (add-noise-rgba pixels w h (/ (float (setting :amount 10) 1d0) 100d0)
-                                            (let ((m (setting :monochrome nil))) (and m (not (eql m 0))))
-                                            (round (setting :seed 1)))))))
-        (push-undo! doc (list (the-object layer index) :layer 0 0 w h (copy-seq pixels)))
-        (blend-by-selection! pixels filtered w h (the-object doc selection))
-        (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
-        (list 0 0 w h)))))
+      (let* ((sigma (max 0.1d0 (float (setting :radius (if (eql kind :unsharp-mask) 2 1)) 1d0)))
+             (reach (if (eql kind :add-noise) 0 (nth-value 1 (gaussian-kernel sigma))))
+             (work (reached-rect rect reach w h)))
+        (destructuring-bind (x y rw rh) rect
+          (destructuring-bind (wx wy ww wh) work
+            (let* ((source (if (and (= ww w) (= wh h)) pixels (apply #'rgba-rect pixels w h work)))
+                   (filtered
+                     (ecase kind
+                       (:gaussian-blur (gaussian-blur-rgba source ww wh sigma))
+                       (:unsharp-mask (unsharp-mask-rgba source ww wh sigma
+                                                         (/ (float (setting :amount 100) 1d0) 100d0)
+                                                         (setting :threshold 0)))
+                       (:add-noise (add-noise-rgba source ww wh (/ (float (setting :amount 10) 1d0) 100d0)
+                                                   (let ((m (setting :monochrome nil))) (and m (not (eql m 0))))
+                                                   (round (setting :seed 1)) wx wy)))))
+              (push-undo! doc (list (the-object layer index) :layer x y rw rh
+                                    (rgba-rect pixels w h x y rw rh)))
+              (if selection
+                  (blend-rect-by-selection! pixels (rgba-rect filtered ww wh (- x wx) (- y wy) rw rh)
+                                            w rect selection)
+                  (replace pixels filtered))
+              (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
+              rect)))))))

@@ -2060,17 +2060,25 @@ picture, the reference and the rules."
          (equal (sexp-agent:base64-encode (coerce '(77 97 110) '(simple-array (unsigned-byte 8) (*)))) "TWFu")))
 
 (defun stub-model-reply (text)
-  "A Messages response whose one text block is TEXT."
+  "A Messages response whose one text block is TEXT, or for (:refusal
+why) what a refusal is: HTTP 200, stop_reason refusal, no text."
   (flet ((obj (&rest kv)
            (let ((o (make-hash-table :test 'equal)))
              (loop for (k v) on kv by #'cddr do (setf (gethash k o) v))
              o)))
     (yason:with-output-to-string* ()
-      (yason:encode (obj "id" "msg_stub" "type" "message" "role" "assistant"
-                         "content" (list (obj "type" "thinking" "thinking" "")
-                                         (obj "type" "text" "text" text))
-                         "stop_reason" "end_turn"
-                         "usage" (obj "input_tokens" 100 "output_tokens" 10))))))
+      (yason:encode
+       (if (consp text)
+           (obj "id" "msg_stub" "type" "message" "role" "assistant"
+                "content" '()
+                "stop_reason" "refusal"
+                "stop_details" (obj "type" "refusal" "category" nil "explanation" (second text))
+                "usage" (obj "input_tokens" 100 "output_tokens" 0))
+           (obj "id" "msg_stub" "type" "message" "role" "assistant"
+                "content" (list (obj "type" "thinking" "thinking" "")
+                                (obj "type" "text" "text" text))
+                "stop_reason" "end_turn"
+                "usage" (obj "input_tokens" 100 "output_tokens" 10)))))))
 
 (defun call-with-stub-model (replies fn)
   "FN called with an agent whose model is a stand-in on a server of its
@@ -2387,6 +2395,58 @@ log that cannot be written costs nobody their prompt."
         (setf *prompt-log-directory* nil)
         (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))))))
 
+(defun test-declined ()
+  "The model declining reads as that, not as a blank turn: on the first
+round and after forms have run, in the page's answer, and without
+leaving an empty turn to break the next request."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*)))
+    (flet ((ask (&rest replies)
+             (let (seen answer)
+               (call-with-stub-model
+                replies
+                (lambda (agent requests)
+                  (let ((*agent* agent))
+                    (setf answer (prompt-document doc "do something")
+                          seen (funcall requests)))))
+               (values answer seen))))
+      (let ((answer (ask '(:refusal "It falls outside what may be done."))))
+        (check "a refusal says so, with the reason, and marks the answer"
+               (and (search "The model declined this request." (getf answer :reply))
+                    (search "falls outside" (getf answer :reply))
+                    (getf answer :declined) (not (getf answer :ok)) (null (getf answer :results)))
+               answer)
+        (check "and the page hears it"
+               (eq (gethash "declined" (yason:parse (prompt-json answer))) t)))
+      (let ((answer (ask '(:refusal nil))))
+        (check "a refusal with no reason given reads the same"
+               (equal (getf answer :reply) "The model declined this request.") answer))
+      (multiple-value-bind (answer seen) (ask (format nil "Done.~%```lisp~%(selection)~%```"))
+        (declare (ignore answer))
+        (check "the turn after a refusal goes out with no empty turn in its history"
+               (notany (lambda (message)
+                         (and (equal (gethash "role" message) "assistant")
+                              (equal (gethash "content" message) "")))
+                       (gethash "messages" (first seen)))
+               seen))
+      (let ((answer (ask (format nil "Selecting.~%```lisp~%(select-rect 10 10 20 20)~%(look 0 0 100 100)~%```")
+                         '(:refusal nil))))
+        (check "a refusal part way: what ran stands, the words join the reply"
+               (and (equal (stratum-api:selection) '(10 10 20 20))
+                    (search "Selecting." (getf answer :reply))
+                    (search "The model declined" (getf answer :reply))
+                    (getf answer :declined))
+               answer)
+        (stratum-api:undo)
+        (check "and it is one undo like any other" (null (stratum-api:selection))))
+      (let ((answer (ask "")))
+        (check "a model that says nothing is not a blank turn either"
+               (search "gave no answer" (getf answer :reply)) answer))
+      (let ((answer (ask (format nil "Fine.~%```lisp~%(selection)~%```"))))
+        (check "an ordinary answer is not declined"
+               (and (getf answer :ok) (not (getf answer :declined))) answer)))))
+
 (defun prompt-with (doc forms)
   "A prompt on DOC whose model answers FORMS, text, and then nothing."
   (call-with-stub-model
@@ -2498,7 +2558,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

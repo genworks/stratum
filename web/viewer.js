@@ -4692,7 +4692,7 @@
     if (!promptLog) return;
     var turn = el('div', { 'class': 'st-prompt-turn' });
     turn.appendChild(el('div', { 'class': 'st-prompt-you', text: text }));
-    if (res.reply) turn.appendChild(el('div', { 'class': 'st-prompt-reply', text: res.reply }));
+    if (res.reply) turn.appendChild(el('div', { 'class': 'st-prompt-reply' + (res.declined ? ' st-declined' : ''), text: res.reply }));
     if (res.results && res.results.length) {
       var pre = el('div', { 'class': 'st-prompt-forms' });
       res.results.forEach(function (r) {

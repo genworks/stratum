@@ -1030,6 +1030,7 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-prompt-turn { border-top: 1px solid #2c2f35; padding: 4px 0; }
 .st-prompt-you { color: #8a9099; }
 .st-prompt-reply { white-space: pre-line; }
+.st-prompt-reply.st-declined { color: #e0b070; }
 .st-prompt-forms { font: 11px/1.4 ui-monospace, Menlo, monospace; color: #c9cdd3;
   white-space: pre-wrap; margin: 3px 0 0; }
 .st-prompt-forms .st-failed { color: #e07a7a; }

@@ -289,7 +289,8 @@ per form, stopping at the first failure.  The prompt door, `POST
 starts the model's work and answers `{job}`; `GET
 /stratum/api/prompt?job=ID` answers `{status: "working"}` until the
 forms have run (with `note`, how far the work is), then `{status:
-"done", reply, forms, results, ok, width, height}`, or `{status:
-"failed", error}`.  The model may look and answer again up to
+"done", reply, forms, results, ok, width, height, declined}`, or `{status:
+"failed", error}`.  `declined` is true when the model declined the
+request; `reply` then says so, and forms that ran before it stand.  The model may look and answer again up to
 `stratum::*prompt-looks*` times in one prompt.  `GET
 /stratum/api/reference` serves this document.

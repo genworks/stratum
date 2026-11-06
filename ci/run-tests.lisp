@@ -50,12 +50,12 @@
 ;;; Two of Gendl's gwl files, the invite gate and sexp-agent: from the
 ;;; image when it carries them as Stratum needs them (the last name of
 ;;; an entry is a function the image's copy must have: an image built
-;;; before sexp-agent could send pictures back to the model has the
-;;; package and not that), else the files INVITE_GATE_FILE and
+;;; before sexp-agent could say the model declined has the package and
+;;; not that), else the files INVITE_GATE_FILE and
 ;;; SEXP_AGENT_FILE name (.gitlab-ci.yml fetches them from the Gendl
 ;;; repository).
 (dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
-                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "PICTURES-SHOWN")))
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "DECLINED-WORDS")))
   (destructuring-bind (package variable name proof) need
     (handler-case
         (unless (and (find-package package)

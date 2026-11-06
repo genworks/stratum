@@ -41,7 +41,7 @@
 (defun agent-looks? ()
   "Whether this image's sexp-agent sends a picture back to the model
 and lets it answer again: Gendl's of 2026-11-05 and after."
-  (let ((symbol (find-symbol "PICTURES-SHOWN" :sexp-agent)))
+  (let ((symbol (find-symbol "PICTURES-SHOWN" :sexp-agent))) ; since the first of :looks
     (and symbol (fboundp symbol) t)))
 
 (defun prompt-operators ()
@@ -389,7 +389,8 @@ the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document, and what its forms did one undo, however
 it ended (brush.lisp), unless they remade the document, which like
 Image > Crop has no undo.  WHO is the invitee, for the prompt log.  A
-plist for the page: :reply :forms :results :ok :usage :width :height."
+plist for the page: :reply :forms :results :ok :declined :usage :width
+:height."
   (let ((name (the-object doc doc-name))
         (began (get-internal-real-time))
         (ran 0)
@@ -445,6 +446,7 @@ plist for the page: :reply :forms :results :ok :usage :width :height."
                                                     :error (getf r :error)))
                                             (getf answer :results))
                            :ok (getf answer :ok)
+                           :declined (getf answer :declined)
                            :usage (getf answer :usage)
                            :width (the-object doc doc-width)
                            :height (the-object doc doc-height)))))
@@ -476,6 +478,7 @@ plist for the page: :reply :forms :results :ok :usage :width :height."
                                           (getf result :results))
                                   'vector)
                 "ok" (json-bool (getf result :ok))
+                "declined" (json-bool (getf result :declined))
                 "usage" (let ((usage (getf result :usage)))
                           (json-object "input" (getf usage :input 0) "output" (getf usage :output 0)))
                 "width" (getf result :width)

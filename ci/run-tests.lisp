@@ -43,7 +43,7 @@
 
 ;;; The Gendl images carry these without ASDF knowing; loading them
 ;;; again from the dist over the live packages would only make noise.
-(dolist (name '(:trivial-gray-streams :flexi-streams))
+(dolist (name '(:trivial-gray-streams :flexi-streams :cffi))
   (when (find-package name)
     (asdf:register-preloaded-system name)))
 

@@ -1371,6 +1371,74 @@ rectangle answered."
              (= 1 (length (gethash "changed" (yason:parse (prompt-json answer))))))
       (stratum-api:undo))))
 
+(defun with-exif (jpeg orientation &key big-endian)
+  "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."
+  (flet ((u16 (v) (if big-endian (list (ash v -8) (logand v 255)) (list (logand v 255) (ash v -8))))
+         (u32 (v) (let ((bytes (loop for s in '(0 8 16 24) collect (logand (ash v (- s)) 255))))
+                    (if big-endian (reverse bytes) bytes))))
+    (let ((tiff (append (if big-endian '(77 77) '(73 73)) (u16 42) (u32 8)
+                        (u16 1)
+                        (u16 #x112) (u16 3) (u32 1) (u16 orientation) (u16 0)
+                        (u32 0))))
+      (concatenate '(vector (unsigned-byte 8))
+                   (subseq jpeg 0 2)
+                   (list #xff #xe1 0 (+ 8 (length tiff)) 69 120 105 102 0 0)
+                   tiff
+                   (subseq jpeg 2)))))
+
+(defun test-jpeg ()
+  "A JPEG read here: its orientation, its turn, the hash the page checks
+it by, and the bytes Chromium decoded from the fixture when the server
+has a decoder."
+  (let* ((path (merge-pathnames "fixture.jpg" *tests-dir*))
+         (jpeg (coerce (alexandria:read-file-into-byte-vector path) '(simple-array (unsigned-byte 8) (*)))))
+    (check "a JPEG is told by its first bytes"
+           (and (jpeg-octets-p jpeg) (not (jpeg-octets-p (subseq jpeg 1)))))
+    (check "no EXIF is orientation 1, and so is rubbish"
+           (and (= (jpeg-orientation jpeg) 1)
+                (= (jpeg-orientation (subseq jpeg 0 4)) 1)
+                (= (jpeg-orientation (subseq (with-exif jpeg 6) 0 26)) 1)
+                (= (jpeg-orientation (with-exif jpeg 9)) 1)))
+    (check "the orientation is read in either byte order"
+           (loop for o from 1 to 8
+                 always (and (= (jpeg-orientation (with-exif jpeg o)) o)
+                             (= (jpeg-orientation (with-exif jpeg o :big-endian t)) o))))
+    (let* ((w 3) (h 2) (source (make-rgba w h)))
+      (dotimes (i (* w h)) (setf (aref source (* 4 i)) (1+ i)))
+      (flet ((at (x y) (aref source (* 4 (+ x (* y w))))))
+        (loop for (o shown) in `((1 ,(lambda (x y) (at x y)))
+                                 (2 ,(lambda (x y) (at (- w 1 x) y)))
+                                 (3 ,(lambda (x y) (at (- w 1 x) (- h 1 y))))
+                                 (4 ,(lambda (x y) (at x (- h 1 y))))
+                                 (5 ,(lambda (x y) (at y x)))
+                                 (6 ,(lambda (x y) (at y (- h 1 x))))
+                                 (7 ,(lambda (x y) (at (- w 1 y) (- h 1 x))))
+                                 (8 ,(lambda (x y) (at (- w 1 y) x))))
+              do (multiple-value-bind (pixels nw nh) (oriented-rgba source w h o)
+                   (check (format nil "orientation ~d turns the picture as EXIF says" o)
+                          (and (= nw (if (> o 4) h w)) (= nh (if (> o 4) w h))
+                               (loop for y below nh
+                                     always (loop for x below nw
+                                                  always (= (aref pixels (* 4 (+ x (* y nw))))
+                                                            (funcall shown x y))))))))))
+    (check "the hash is the page's"
+           (= (pixels-hash (coerce #(1 2 3 4 5 6 7 8) '(simple-array (unsigned-byte 8) (*)))) 2746375339))
+    (when (turbojpeg?)
+      (multiple-value-bind (pixels w h) (decode-jpeg jpeg)
+        (check "a JPEG decodes to the bytes Chromium decodes"
+               (and (= w 61) (= h 47) (= (pixels-hash pixels) 689382815))
+               (list w h (pixels-hash pixels))))
+      (check "a size may be refused before any pixels are made"
+             (search "too big"
+                     (handler-case (decode-jpeg jpeg (lambda (w h) (declare (ignore w h)) (error "too big")))
+                       (error (e) (princ-to-string e)))))
+      (dolist (bad (list (subseq jpeg 0 40)
+                         (concatenate '(simple-array (unsigned-byte 8) (*)) (subseq jpeg 0 3) (make-array 200 :element-type '(unsigned-byte 8) :initial-element 7))))
+        (check "a file that is no JPEG is an error in words"
+               (search "could not be read"
+                       (handler-case (progn (decode-jpeg bad) "")
+                         (error (e) (princ-to-string e)))))))))
+
 (defun test-gradient ()
   (flet ((gray (pixels x &optional (y 0) (w 10)) (aref pixels (* 4 (+ x (* y w)))))
          (alpha (pixels x &optional (y 0) (w 10)) (aref pixels (+ 3 (* 4 (+ x (* y w)))))))
@@ -2929,7 +2997,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-selection-rects
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -2336,7 +2336,7 @@
         gl.deleteFramebuffer(fbo);
         gl.deleteTexture(tex);
         bmp.close();
-        return { width: w, height: h, bytes: bytes };
+        return { width: w, height: h, bytes: bytes, file: /jpe?g$/i.test(file.type || '') ? file : null };
       });
   };
 
@@ -2380,7 +2380,43 @@
     });
   }
 
+  // The hash the server checks a JPEG's decode against: pixels-hash in
+  // jpeg.lisp, four bytes at a time.
+  S.hashPixels = function (bytes) {
+    var words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.length >> 2), hash = 2166136261;
+    for (var i = 0; i < words.length; i++) hash = Math.imul(hash ^ words[i], 16777619) >>> 0;
+    return hash;
+  };
+
+  // A JPEG goes up as the file, when the server can decode it to the
+  // very bytes decoded here: a fifth of the packed pixels.  The hash
+  // finds out a browser whose decoder differs; anything that goes wrong
+  // and the packed pixels go instead.
+  function postJpeg(path, img) {
+    return timed('pack', Promise.resolve().then(function () { return S.hashPixels(img.bytes); })).then(function (hash) {
+      return img.file.arrayBuffer().then(function (buf) {
+        status('sending ' + megabytes(buf.byteLength) + '...');
+        if (openTimes) openTimes.sent = buf.byteLength;
+        return timed('send', postBytes(path + '&w=' + img.width + '&h=' + img.height + '&hash=' + hash, new Uint8Array(buf)));
+      });
+    }).then(function (res) {
+      S.stats.jpegUploads = (S.stats.jpegUploads || 0) + 1;
+      return res;
+    });
+  }
+
   function postImage(path, img) {
+    if (img.file && doc && doc.jpegUpload) {
+      return postJpeg(path, img).catch(function (e) {
+        S.stats.jpegFallbacks = (S.stats.jpegFallbacks || 0) + 1;
+        console.info('the JPEG went as packed pixels: ' + e.message);
+        return postPacked(path, img);
+      });
+    }
+    return postPacked(path, img);
+  }
+
+  function postPacked(path, img) {
     status('packing ' + img.width + ' x ' + img.height + '...');
     return timed('pack', S.packPixels(img)).then(function (packed) {
       status('sending ' + megabytes(packed.body.length) + '...');
@@ -3686,6 +3722,25 @@
                 d.width === w && d.height === h && d.layers.length === 1 && d.layers[0].name === 'Background',
                 { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
           return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
+        });
+      }).then(function () {
+        // A JPEG sent as the file: the server's decode is the page's, by
+        // the hash, or the packed pixels go; the document holds the page's
+        // bytes either way.
+        return new Promise(function (r) { c2.toBlob(r, 'image/jpeg', 0.9); }).then(function (blob) {
+          return S.decodeImage(blob);
+        }).then(function (d) {
+          var sent = S.stats.jpegUploads || 0, fell = S.stats.jpegFallbacks || 0;
+          return S.openImage(d, 'jpegtest').then(function (res) {
+            return fetchPixels(apiFor(res.doc, 'raster?i=0')).then(function (b) {
+              check('a JPEG opens to the bytes this page decoded',
+                    same(b, d.bytes), { width: res.width, height: res.height });
+              check('and goes as the file when the server can decode it',
+                    (S.stats.jpegUploads || 0) === sent + (doc.jpegUpload ? 1 : 0) && (S.stats.jpegFallbacks || 0) === fell,
+                    { jpegUpload: doc.jpegUpload, uploads: S.stats.jpegUploads, fallbacks: S.stats.jpegFallbacks });
+              return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
+            });
+          });
         });
       }).then(function () {
         // The same PNG file sent whole: the server's own reader decodes

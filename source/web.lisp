@@ -223,6 +223,7 @@ history source taken if it has none (the state at the first request)."
    "historyVersion" (the-object doc history-version)
    "selection" (selection-json doc)
    "maxUploadBytes" *max-upload-bytes*
+   "jpegUpload" (json-bool (turbojpeg?))
    "backgroundLinear" (mapcar (lambda (c) (float c 1d0)) (the-object doc background-linear))
    "layers" (mapcar #'layer-json (the-object doc layer-list))))
 
@@ -790,30 +791,49 @@ what working on it takes."
     (when (and (short?) (progn (full-gc) (short?)))
       (error "The server has no room for an image this size just now. Try a smaller one, or try again later."))))
 
+(defun request-jpeg (req octets)
+  "(values pixels w h): OCTETS, a JPEG file, decoded and turned as its
+EXIF says.  With ?hash= from the page, as the page decoded it or an
+error, on which the page sends its own pixels."
+  (multiple-value-bind (pixels w h)
+      (multiple-value-bind (pixels w h)
+          (decode-jpeg octets (lambda (w h)
+                                (unless (and (< 0 w) (< 0 h) (<= (* 4 w h) *max-upload-bytes*))
+                                  (error "An image of ~a x ~a is not one this server takes." w h))
+                                (ensure-room (* 4 w h))))
+        (oriented-rgba pixels w h (jpeg-orientation octets)))
+    (let ((hash (net.aserve:request-query-value "hash" req)))
+      (when (and hash (/= (parse-integer hash) (pixels-hash pixels)))
+        (error "The server's decode of this JPEG is not the page's.")))
+    (values pixels w h)))
+
 (defun request-image (req)
-  "(values pixels w h): the image in the body -- a PNG file, decoded
-here (read-png); or with W x H from the query, rows of differences
-deflated (?enc=sub3 or sub4, see above) or raw RGBA8."
+  "(values pixels w h): the image in the body -- a PNG or JPEG file,
+decoded here (read-png, request-jpeg); or with W x H from the query,
+rows of differences deflated (?enc=sub3 or sub4, see above) or raw
+RGBA8."
   (let ((octets (request-octets req)))
-    (if (png-octets-p octets)
-        (read-png octets)
-        (let ((w (parse-integer (or (net.aserve:request-query-value "w" req) "0")))
-              (h (parse-integer (or (net.aserve:request-query-value "h" req) "0")))
-              (enc (net.aserve:request-query-value "enc" req)))
-          (unless (and (< 0 w) (< 0 h) (<= (* 4 w h) *max-upload-bytes*))
-            (error "An image of ~a x ~a is not one this server takes." w h))
-          (cond ((member enc '("sub3" "sub4") :test #'equal)
-                 (let ((channels (if (equal enc "sub3") 3 4)))
-                   (ensure-room (* 4 w h))
-                   (values (unfilter-rows (inflate-exactly octets (* channels w h)) w h channels) w h)))
-                (t
-                 (unless (= (length octets) (* 4 w h))
-                   (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
-                 (values octets w h)))))))
+    (cond
+      ((png-octets-p octets) (read-png octets))
+      ((jpeg-octets-p octets) (request-jpeg req octets))
+      (t
+       (let ((w (parse-integer (or (net.aserve:request-query-value "w" req) "0")))
+             (h (parse-integer (or (net.aserve:request-query-value "h" req) "0")))
+             (enc (net.aserve:request-query-value "enc" req)))
+         (unless (and (< 0 w) (< 0 h) (<= (* 4 w h) *max-upload-bytes*))
+           (error "An image of ~a x ~a is not one this server takes." w h))
+         (cond ((member enc '("sub3" "sub4") :test #'equal)
+                (let ((channels (if (equal enc "sub3") 3 4)))
+                  (ensure-room (* 4 w h))
+                  (values (unfilter-rows (inflate-exactly octets (* channels w h)) w h channels) w h)))
+               (t
+                (unless (= (length octets) (* 4 w h))
+                  (error "An image of ~a x ~a needs ~a bytes; ~a came." w h (* 4 w h) (length octets)))
+                (values octets w h))))))))
 
 (defun handle-open (req)
-  "A new document from the image in the body (a PNG file, or raw RGBA8
-with ?w=&h=; ?name=), one Background layer; answers {doc, width,
+  "A new document from the image in the body (a PNG or JPEG file, or raw
+RGBA8 with ?w=&h=; ?name=), one Background layer; answers {doc, width,
 height, readMs, workMs}: how long the body took to arrive here and the
 document to make, for the page's account of a slow open."
   (let ((began (get-internal-real-time)))
@@ -825,7 +845,7 @@ document to make, for the page's account of a slow open."
                                   "workMs" (elapsed-ms began)))))))
 
 (defun handle-place (req)
-  "The image in the body (a PNG file, or raw RGBA8 with ?w=&h=) as a new
+  "The image in the body (a PNG or JPEG file, or raw RGBA8 with ?w=&h=) as a new
 layer of the document (?name=&above=), centered and cropped or padded
 to the document's size; answers as handle-layers does."
   (let ((doc (request-doc req)))

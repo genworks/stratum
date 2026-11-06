@@ -131,8 +131,9 @@ masks on their own scale) or placed on the new canvas around an
 anchor, and the page reloads. A cropped document renders as exactly
 that rectangle of the original, edits and all.
 
-Filters bake into one raster layer inside the selection, with the
-whole layer on the undo list, and preview through a replacement
+Filters bake into one raster layer inside the selection, working on
+its rectangle and the kernel's reach around it, with that rectangle on
+the undo list, and preview through a replacement
 texture: the viewer computes the filtered layer itself and the main
 shader's fifth live stage swaps it in for the layer's pixels where the
 selection covers. Gaussian Blur (`source/filter.lisp`) runs the
@@ -442,6 +443,14 @@ bits rounded to 8 and smaller depths scaled up, with no gamma or
 color conversion, so a file reads the same on both halves. The `open`
 and `place` endpoints take a PNG file whole, and `open-png-file` opens
 one from Lisp.
+
+With the TurboJPEG library (`libturbojpeg.so.0`, or wherever
+`TURBOJPEG_LIBRARY` says) the server reads JPEG files too
+(`source/jpeg.lisp`), turned as their EXIF says, and the page sends a
+JPEG as the file, about a fifth of the packed pixels.  The document must
+hold the bytes the page decoded, so the page sends a hash of them; a
+browser whose decoder differs fails the check and sends the packed
+pixels as before, and so does every browser without the library.
 
 Save writes the document itself as a `.stratum` file, and Open reads
 one back (`source/file.lisp`). The file is a line `STRATUM1`, a line

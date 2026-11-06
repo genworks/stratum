@@ -27,7 +27,7 @@
 
 ;; Built into the Gendl images without ASDF knowing: say so, or salza2
 ;; and stratum go looking for them.
-(dolist (name '(:trivial-gray-streams :flexi-streams))
+(dolist (name '(:trivial-gray-streams :flexi-streams :cffi))
   (when (and (find-package name) (not (asdf:find-system name nil)))
     (asdf:register-preloaded-system name)))
 

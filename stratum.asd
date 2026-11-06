@@ -6,7 +6,7 @@
  "The Gendl™ stratum Subsystem" :author "Genworks International"
  :license "Affero Gnu Public License (http://www.gnu.org/licenses/)"
  :serial t :version "20261106" :depends-on
- (:zpng :flexi-streams :chipz) :around-compile
+ (:zpng :flexi-streams :chipz :cffi) :around-compile
  "gendl-asdf:around-compile" :components
  ((:file "source/package") (:file "source/color")
   (:file "source/dual") (:file "source/curves")
@@ -18,7 +18,8 @@
   (:file "source/resize") (:file "source/file")
   (:file "source/merge") (:file "source/mode")
   (:file "source/history") (:file "source/samples")
-  (:file "source/png") (:file "source/zip") (:file "source/ora")
-  (:file "source/ora-document") (:file "source/invite")
-  (:file "source/web") (:file "source/api") (:file "source/generate")
-  (:file "source/prompt") (:file "source/stubs")))
+  (:file "source/png") (:file "source/jpeg") (:file "source/zip")
+  (:file "source/ora") (:file "source/ora-document")
+  (:file "source/invite") (:file "source/web") (:file "source/api")
+  (:file "source/generate") (:file "source/prompt")
+  (:file "source/stubs")))

@@ -1,1 +1,1 @@
-(:zpng :flexi-streams :chipz)
+(:zpng :flexi-streams :chipz :cffi)

@@ -1630,6 +1630,21 @@ out of memory failing alone."
          (worst (loop for i below (* w h)
                       maximize (abs (- (aref exact i) (aref reduced i))))))
     (check "the reduced feather stays within two levels of the exact one" (<= worst 2) worst))
+  (let ((ran (make-array 8 :initial-element nil)))
+    (check "a render's slices hand a failure back, once they have all stopped"
+           (handler-case
+               (progn (run-kernel (lambda (start end)
+                                    (setf (aref ran (floor start 65536)) t)
+                                    (when (zerop start) (error "The kernel failed."))
+                                    end)
+                                  (* 8 65536))
+                      nil)
+             (error (e) (and (search "kernel failed" (princ-to-string e)) (every #'identity ran))))
+           ran))
+  (let ((*render-threads* 1))
+    (check "one slice fails in the calling thread as it always did"
+           (handler-case (progn (parallel-ranges 10 (lambda (s e) (declare (ignore s e)) (error "Alone."))) nil)
+             (error (e) (search "Alone." (princ-to-string e))))))
   ;; the blur's fast loops against the plain one, at every shape where
   ;; a row or a column is shorter than the kernel, the four-wide loop
   ;; has a remainder, or a block of columns ends part way
@@ -1892,6 +1907,35 @@ no invite gets the gate's page with the body unread."
                  (let ((answer (post (path "sub3" (1- h)) (packed 3))))
                    (check "data longer than its stated size is refused"
                           (and (eql (first answer) 500) (search "runs past" (second answer))) answer))))
+             ;; a worker thread that fails, behind a real door: the words
+             ;; come back, and neither the lock nor a worker stays behind
+             (publish-door server nil "/slices" "application/json"
+                           (lambda (req) (declare (ignore req))
+                             (parallel-ranges 64 (lambda (start end)
+                                                   (declare (ignore end))
+                                                   (when (zerop start) (error "A slice failed."))))
+                             "{}"))
+             (publish-door server nil "/slices-out" "application/json"
+                           (lambda (req) (declare (ignore req))
+                             (parallel-ranges 64 (lambda (start end)
+                                                   (declare (ignore start end))
+                                                   (error (make-condition 'storage-condition))))
+                             "{}"))
+             (let ((answer (post "/slices" (make-array 0 :element-type '(unsigned-byte 8)))))
+               (check "a slice that fails is a 500 with its words"
+                      (and (eql (first answer) 500) (search "A slice failed." (second answer))) answer))
+             (check "a slice that runs out of memory is a 500 too"
+                    (eql (first (post "/slices-out" (make-array 0 :element-type '(unsigned-byte 8)))) 500))
+             (check "the lock is free after them"
+                    (let ((got (bt:acquire-lock *lock* nil)))
+                      (when got (bt:release-lock *lock*))
+                      got))
+             (check "no worker is left behind"
+                    (notany (lambda (thread) (member (bt:thread-name thread) '("stratum filter" "stratum render")
+                                                     :test #'equal))
+                            (bt:all-threads)))
+             (check "and the next request is answered"
+                    (eql (first (post "/small" (make-array 0 :element-type '(unsigned-byte 8)))) 200))
              ;; pixels on the way down: packed for a page that asks
              (publish-door server nil "/px" "application/octet-stream"
                            (lambda (req) (declare (ignore req)) bytes) :pack 4)

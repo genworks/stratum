@@ -42,15 +42,10 @@
   "Call FN with START and END over [0, COUNT) in up to *render-threads*
 slices, each in its own thread, and wait."
   (let* ((slices (max 1 (min *render-threads* count)))
-         (step (ceiling count slices))
-         (ranges (loop for start from 0 below count by step
-                       collect (list start (min count (+ start step))))))
-    (if (rest ranges)
-        (mapc #'bt:join-thread
-              (mapcar (lambda (range)
-                        (bt:make-thread (lambda () (apply fn range)) :name "stratum filter"))
-                      ranges))
-        (apply fn (first ranges)))
+         (step (ceiling count slices)))
+    (run-slices (loop for start from 0 below count by step
+                      collect (list start (min count (+ start step))))
+                fn "stratum filter")
     (values)))
 
 (defun decode-premul (pixels w h)

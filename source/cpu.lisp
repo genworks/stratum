@@ -228,20 +228,33 @@ does).  Pixels are independent, so disjoint ranges may run at once
   "Integer. How many threads a CPU render splits its pixels across; 1
 renders in the calling thread.")
 
+(defun run-slices (ranges fn name)
+  "FN called on each (start end) of RANGES, each in a thread of its own
+called NAME, and wait for them all.  A worker that fails hands its
+condition back here, to be signaled once they have all stopped: left
+to itself it would sit in the debugger, and the door waiting on it would
+hold the lock for good.  Heap exhausted is the likely one, and no ERROR."
+  (if (rest ranges)
+      (let ((failure nil))
+        (mapc #'bt:join-thread
+              (mapcar (lambda (range)
+                        (bt:make-thread (lambda ()
+                                          (handler-case (apply fn range)
+                                            (serious-condition (e) (setf failure e))))
+                                        :name name))
+                      ranges))
+        (when failure (error failure)))
+      (apply fn (first ranges))))
+
 (defun run-kernel (kernel pixel-count &rest args)
   "Call KERNEL with ARGS and a START and END, over [0, PIXEL-COUNT) in up
 to *render-threads* contiguous slices, each in its own thread, and wait
 for them all.  The kernel reads only its inputs and writes only its own
 slice of the output, so the slices need no locking."
   (let* ((slices (max 1 (min *render-threads* (ceiling pixel-count 65536))))
-         (step (ceiling pixel-count slices))
-         (ranges (loop for start from 0 below pixel-count by step
-                       collect (list start (min pixel-count (+ start step))))))
-    (if (rest ranges)
-        (mapc #'bt:join-thread
-              (mapcar (lambda (range)
-                        (bt:make-thread (lambda () (apply kernel (append args range)))
-                                        :name "stratum render"))
-                      ranges))
-        (apply kernel (append args (first ranges))))
+         (step (ceiling pixel-count slices)))
+    (run-slices (loop for start from 0 below pixel-count by step
+                      collect (list start (min pixel-count (+ start step))))
+                (lambda (start end) (apply kernel (append args (list start end))))
+                "stratum render")
     (values)))

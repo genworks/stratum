@@ -328,6 +328,19 @@ make), and the load of the page that followed.  The page's two scripts
 are addressed with a version, so a cache between the server and the
 browser cannot pair an old script with a new server.
 
+### Generating pixels
+
+`(stratum:configure-generator! :url "http://generator:7860" :steps 28
+:cfg-scale 7 :strength 0.9 :size 1024)` points Stratum at an image
+generator speaking the WebUI API (`/sdapi/v1/img2img` and `txt2img`), as
+stable-diffusion.cpp's `sd-server` does.  There is none by default.
+`(generate-fill prompt)` sends a crop around the selection, scaled to
+`:size`, with the selection as its mask; the answer lands as a new
+raster layer whose alpha is the selection's coverage, so nothing
+outside the selection can change, and the layer takes masks, blends
+and undo like any other.  `(generate-layer prompt)` makes a picture of
+the document's shape.  Both run outside the server's lock.
+
 ### Keeping a record of prompts
 
 `(stratum:configure-prompt-log! :directory "/path/" :turns 300)` keeps a

@@ -103,6 +103,31 @@ eyes, blur a sign):
    result, and put right what is wrong.  Keep your last look for this:
    the caption says how many are left.
 
+## Making new pixels
+
+Everything else here changes what is in the picture.  When a request
+needs something that is not there and cannot be painted, a realistic
+object, a filled-in background, a thing removed with what was behind
+it, these two ask an image generator.  The message with each request
+says whether this server has one.  Each takes a minute or so, and the
+pictures are small, a megapixel or so scaled to fit.  Use them only for
+that; a recolor, a tone change or a simple shape is better done with
+the operations above, which are exact and immediate.
+
+- `(generate-fill prompt &key name seed)` — the selection repainted,
+  to match what surrounds it, as a new raster layer visible only inside
+  the selection, so nothing else can change.  Select the area first and
+  generously: what you outline is what gets replaced.  To remove
+  something, select it and describe what should be there instead.
+- `(generate-layer prompt &key name seed)` — a whole new picture of the
+  document's shape as a new raster layer on top.
+
+`prompt` is a description of the result in plain visual words, not an
+instruction: "weathered stone wall in soft afternoon light", not "make
+this a wall".  `name` names the layer; `seed` repeats a result, and -1,
+the default, varies it.  `look` at the result; a poor one is taken off
+with `(delete-layer name)` before trying again with other words.
+
 ## Layers
 
 Layer kinds are `:raster` (pixels), and the adjustment layers

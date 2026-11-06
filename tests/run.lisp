@@ -2447,6 +2447,132 @@ leaving an empty turn to break the next request."
         (check "an ordinary answer is not declined"
                (and (getf answer :ok) (not (getf answer :declined))) answer)))))
 
+(defun call-with-stub-generator (fn &key (status 200) (color '(0 255 0 255)))
+  "FN called with a generator on a server of its own, which answers any
+request with a picture of COLOR at the size asked (or a bare STATUS), and
+with a function answering what it has seen: (path body lock-free?) each,
+oldest first.  An image generator as the WebUI API has one."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (seen '()))
+    (flet ((door (path)
+             (net.aserve:publish
+              :path path :server server :content-type "application/json"
+              :function (lambda (req ent)
+                          (let* ((body (yason:parse (gwl:request-body-text req)))
+                                 (w (gethash "width" body))
+                                 (h (gethash "height" body))
+                                 (rgba (make-rgba w h))
+                                 (free (let ((got (bt:acquire-lock *lock* nil)))
+                                         (when got (bt:release-lock *lock*))
+                                         (and got t))))
+                            (push (list path body free) seen)
+                            (dotimes (i (* w h))
+                              (replace rgba color :start1 (* 4 i)))
+                            (net.aserve:with-http-response
+                                (req ent :content-type "application/json"
+                                         :response (if (eql status 200)
+                                                       net.aserve:*response-ok*
+                                                       net.aserve:*response-internal-server-error*))
+                              (net.aserve:with-http-body (req ent)
+                                (let ((reply (make-hash-table :test 'equal)))
+                                  (setf (gethash "images" reply)
+                                        (list (sexp-agent:base64-encode (png-octets rgba w h))))
+                                  (yason:encode reply (net.aserve:request-reply-stream req))))))))))
+      (unwind-protect
+           (progn (door "/sdapi/v1/img2img")
+                  (door "/sdapi/v1/txt2img")
+                  (funcall fn
+                           (make-generator (format nil "http://127.0.0.1:~d" port) 4 1 0.9d0 256 "" 20 nil)
+                           (lambda () (reverse seen))))
+        (net.aserve:shutdown :server server)))))
+
+(defun test-generate ()
+  "New pixels from a generator, against a stand-in: a crop and a mask go
+out; what comes back lands inside the selection alone, on a layer of its
+own, and undoes with the prompt; the lock stays free meanwhile."
+  (check "sizes for a generator are multiples of 64, the longer side as asked"
+         (multiple-value-bind (w h) (fitted-size 3000 1000 1024)
+           (and (= w 1024) (= h 320) (zerop (mod h 64)))))
+  (check "a selection's crop has a margin, inside the picture"
+         (and (equal (grown-rect '(100 100 100 100) 1000 1000) '(65 65 170 170))
+              (equal (grown-rect '(0 0 100 100) 110 1000) '(0 0 110 135))))
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (w (the-object doc doc-width))
+         (box '(100 50 60 40)))
+    (flet ((picture () (copy-seq (the-object doc (render-cpu)))))
+      (let ((*generator* nil))
+        (check "no generator: the form says so"
+               (search "no image generator"
+                       (getf (first (stratum:run-forms "(generate-layer \"a cat\")")) :error))))
+      (call-with-stub-generator
+       (lambda (generator seen)
+         (let ((*generator* generator)
+               (before (picture))
+               (layers (length (stratum-api:layers))))
+           (check "generate-fill without a selection is told why"
+                  (search "Nothing is selected"
+                          (getf (first (stratum:run-forms "(generate-fill \"grass\")")) :error)))
+           (stratum-api:select-rect 100 50 60 40)
+           (let ((result (first (stratum:run-forms "(generate-fill \"grass\" :name \"Grass\")"))))
+             (check "generate-fill: a layer of that name on top"
+                    (and (getf result :ok) (equal (getf (getf result :value) :name) "Grass")
+                         (= (length (stratum-api:layers)) (1+ layers)))
+                    result))
+           (multiple-value-bind (inside outside) (pixels-changed before (picture) w box)
+             (check "the picture changes inside the selection and nowhere else"
+                    (and (plusp inside) (zerop outside)) (list inside outside)))
+           (destructuring-bind (path body free) (first (funcall seen))
+             (let ((image (gethash "init_images" body)))
+               (check "a crop and a mask, at the generator's size, with the prompt"
+                      (and (equal path "/sdapi/v1/img2img")
+                           (equal (gethash "prompt" body) "grass")
+                           (= (gethash "steps" body) 4)
+                           (= (length image) 1)
+                           (<= (max (gethash "width" body) (gethash "height" body)) 256)
+                           (search "data:image/png;base64," (gethash "mask" body)))
+                      (list path (gethash "width" body) (gethash "height" body))))
+             (check "the lock is free while the generator works" free))
+           (stratum-api:select-none)
+           (stratum-api:delete-layer "Grass")
+           (check "taking the layer off gives the picture back" (equalp before (picture)))
+           (stratum:run-forms "(generate-layer \"a meadow\" :name \"Meadow\")")
+           (destructuring-bind (path body free) (car (last (funcall seen)))
+             (declare (ignore free))
+             (check "generate-layer: a picture of the document's shape, no mask"
+                    (and (equal path "/sdapi/v1/txt2img") (null (gethash "mask" body))
+                         (let ((p (getf (stratum-api:layer-info "Meadow") :index))) p))
+                    path))
+           (stratum-api:delete-layer "Meadow")
+           ;; from a prompt: the layer goes with the prompt's one undo
+           (let ((answer (prompt-with doc "(select-rect 100 50 60 40) (generate-fill \"grass\" :name \"Grass\") (select-none)")))
+             (check "a prompt that generates runs, and says it had a generator"
+                    (getf answer :ok) answer))
+           (let ((after (picture)))
+             (check "the prompt changed the picture" (not (equalp before after)))
+             (stratum-api:undo)
+             (check "one undo takes the generated layer off"
+                    (and (equalp before (picture)) (= (length (stratum-api:layers)) layers)))))))
+      (call-with-stub-generator
+       (lambda (generator seen)
+         (declare (ignore seen))
+         (let ((*generator* generator))
+           (stratum-api:select-rect 100 50 60 40)
+           (let ((result (first (stratum:run-forms "(generate-fill \"grass\")"))))
+             (check "a generator that fails is a failed form in words, and nothing changes"
+                    (and (not (getf result :ok)) (search "answered 500" (getf result :error)))
+                    result))
+           (stratum-api:select-none)))
+       :status 500)
+      (let ((*generator* (make-generator (format nil "http://127.0.0.1:~d" (free-port)) 4 1 0.9d0 256 "" 5 nil)))
+        (stratum-api:select-rect 100 50 60 40)
+        (check "a generator that is down says so"
+               (search "could not be reached"
+                       (getf (first (stratum:run-forms "(generate-fill \"grass\")")) :error)))
+        (stratum-api:select-none)))))
+
 (defun prompt-with (doc forms)
   "A prompt on DOC whose model answers FORMS, text, and then nothing."
   (call-with-stub-model
@@ -2558,7 +2684,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-generate
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

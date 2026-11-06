@@ -74,9 +74,20 @@ high) and the SESSION-HEADER a gate reads.  The agent as it stands."
   (when header? (setf (sexp-agent:agent-session-header *agent*) session-header))
   *agent*)
 
+(defun run-form (form)
+  "One form through the sandbox: its result, whatever became of it."
+  (handler-case (first (sexp-agent:run-forms *agent* (list form)))
+    ;; an image whose compiled sexp-agent catches errors alone
+    (serious-condition (e)
+      (list :form form :ok nil
+            :error (if (typep e 'storage-condition)
+                       "There is not enough memory for this operation."
+                       (princ-to-string e))))))
+
 (defun run-forms (forms &optional (document stratum-api:*document*))
   "FORMS, a string or a list, run through the agent's sandbox on
-DOCUMENT (the current one) under the lock: what sexp-agent:run-forms
+DOCUMENT (the current one), each under the lock but for the slow ones
+that take it themselves (*long-operators*): what sexp-agent:run-forms
 answers.  The same door the prompt box's forms go through."
   (let ((forms (if (stringp forms)
                    (handler-case (sexp-agent:read-forms *agent* forms)
@@ -87,25 +98,21 @@ answers.  The same door the prompt box's forms go through."
                                  nil))))
                    forms))
         (results '()))
-    (bt:with-lock-held (*lock*)
-      (let ((stratum-api:*document* document))
-        ;; one at a time: heap exhausted is no ERROR, so a sandbox that
-        ;; catches errors alone would lose every result with it, and leave
-        ;; the page not knowing what the forms before it had done
-        (dolist (form forms)
-          (collect-if-full!)
-          (let ((result (handler-case (first (sexp-agent:run-forms *agent* (list form)))
-                          ;; an image whose compiled sexp-agent catches errors alone
-                          (serious-condition (e)
-                            (list :form form :ok nil
-                                  :error (if (typep e 'storage-condition)
-                                             "There is not enough memory for this operation."
-                                             (princ-to-string e)))))))
-            (push result results)
-            (unless (getf result :ok)
-              ;; what the failed form left behind goes before the next request
-              (full-gc)
-              (return))))))
+    (let ((stratum-api:*document* document))
+      ;; one at a time: heap exhausted is no ERROR, so a sandbox that
+      ;; catches errors alone would lose every result with it, and leave
+      ;; the page not knowing what the forms before it had done
+      (dolist (form forms)
+        (let ((result (if (and (consp form) (member (car form) *long-operators*))
+                          (run-form form)
+                          (bt:with-lock-held (*lock*)
+                            (collect-if-full!)
+                            (run-form form)))))
+          (push result results)
+          (unless (getf result :ok)
+            ;; what the failed form left behind goes before the next request
+            (full-gc)
+            (return)))))
     (let ((results (nreverse results)))
       (values results (every (lambda (r) (getf r :ok)) results)))))
 
@@ -407,8 +414,8 @@ plist for the page: :reply :forms :results :ok :declined :usage :width
          (handler-bind ((serious-condition (lambda (e) (setf failure (princ-to-string e)))))
            (setf answer
                  (sexp-agent:ask *agent* prompt
-                                 :state-text (format nil "~a~%The picture with this message is ~a"
-                                                     state (picture-note picture))
+                                 :state-text (format nil "~a~%The picture with this message is ~a~%This server ~:[has no image generator: generate-fill and generate-layer will fail~;has an image generator~]."
+                                                     state (picture-note picture) *generator*)
                                  :image-png (picture-png picture)
                                  :session-id (and session (format nil "stratum-~a" session))
                                  :history history

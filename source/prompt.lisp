@@ -574,6 +574,7 @@ wrong, as the other doors answer."
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)
         (net.aserve:with-http-response (req ent :content-type "application/json")
+          (no-store! req)
           (net.aserve:with-http-body (req ent)
             (write-string result (net.aserve:request-reply-stream req)))))))
 

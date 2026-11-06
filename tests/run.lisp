@@ -1936,6 +1936,10 @@ no invite gets the gate's page with the body unread."
                             (bt:all-threads)))
              (check "and the next request is answered"
                     (eql (first (post "/small" (make-array 0 :element-type '(unsigned-byte 8)))) 200))
+             (check "a door tells every cache to keep nothing"
+                    (search (format nil "~(cache-control: no-store~)")
+                            (string-downcase (second (post "/small" (make-array 0 :element-type '(unsigned-byte 8))))))
+                    (second (post "/small" (make-array 0 :element-type '(unsigned-byte 8)))))
              ;; pixels on the way down: packed for a page that asks
              (publish-door server nil "/px" "application/octet-stream"
                            (lambda (req) (declare (ignore req)) bytes) :pack 4)

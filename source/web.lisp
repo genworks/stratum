@@ -1125,6 +1125,14 @@ image whose compiled invite-gate reads it."
              (when refusal (reply-text req ent *response-payload-too-large* refusal))
              (not refusal)))))
 
+(defun no-store! (req)
+  "Tell every cache in the way to keep nothing of this reply.  What the
+doors answer is a visitor's picture and changes with each edit, and a
+proxy that keeps an address ending in .png serves it again from then
+on: the document as it was, and past the invite gate, to whoever has
+the address."
+  (setf (net.aserve:reply-header-slot-value req :cache-control) "no-store"))
+
 (defun reply (req ent content-type thunk &key pack)
   "Run THUNK under the lock, then send its string or octets; a failure
 goes back as a 500 carrying the condition's text.  With PACK, a step,
@@ -1145,6 +1153,7 @@ layer."
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)
         (net.aserve:with-http-response (req ent :content-type content-type)
+          (no-store! req)
           (net.aserve:with-http-body (req ent)
             (let ((s (net.aserve:request-reply-stream req)))
               (if (stringp result)

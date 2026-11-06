@@ -2470,6 +2470,8 @@
   };
 
   // File > Save: the document as a .stratum file, downloaded.
+  S.exportAddress = function () { return api('export.png') + '&t=' + Date.now(); };
+
   S.saveDocument = function () {
     var a = el('a', { href: api('save'), download: doc.name + '.stratum' });
     document.body.appendChild(a);
@@ -2558,7 +2560,7 @@
   };
 
   S.saveAs = function () {
-    var a = el('a', { href: api('export.png'), download: doc.name + '.png' });
+    var a = el('a', { href: S.exportAddress(), download: doc.name + '.png' });
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2620,7 +2622,7 @@
         { label: 'Save', key: 'Ctrl+S', run: function () { S.saveDocument(); } },
         { label: 'Save As PNG...', key: 'Ctrl+Shift+S', run: S.saveAs },
         { label: 'Save As OpenRaster...', run: S.saveOra },
-        { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(api('export.png')); } }] },
+        { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(S.exportAddress()); } }] },
         '-',
         { label: 'Close', run: S.closeDocument }] },
       { title: 'Edit', items: [
@@ -4561,6 +4563,13 @@
       promptLog.removeChild(turn);
       S.clipboard = clipboard;
       S.select = select;
+    }).then(function () {
+      // The exported picture is never a cached one: each export has an
+      // address of its own, and the server tells caches to keep nothing.
+      return fetch(S.exportAddress()).then(function (r) {
+        check('an export says caches may keep nothing', r.ok && r.headers.get('cache-control') === 'no-store',
+              { status: r.status, cache: r.headers.get('cache-control') });
+      });
     }).then(function () {
       // Pixels come down packed (fetchPixels): the server's bytes
       // exactly, a layer and a mask, in fewer of them.

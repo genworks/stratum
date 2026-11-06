@@ -2447,44 +2447,63 @@ leaving an empty turn to break the next request."
         (check "an ordinary answer is not declined"
                (and (getf answer :ok) (not (getf answer :declined))) answer)))))
 
-(defun call-with-stub-generator (fn &key (status 200) (color '(0 255 0 255)))
-  "FN called with a generator on a server of its own, which answers any
-request with a picture of COLOR at the size asked (or a bare STATUS), and
-with a function answering what it has seen: (path body lock-free?) each,
-oldest first.  An image generator as the WebUI API has one."
+(defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)))
+  "FN called with a generator on a server of its own, a stand-in for
+sd-server's job API: a job is accepted with STATUS and is then JOB-STATE
+at its second asking, with a picture of COLOR at the size asked.  And
+with a function answering what it has seen: (body lock-free?) each,
+oldest first."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
-         (seen '()))
-    (flet ((door (path)
-             (net.aserve:publish
-              :path path :server server :content-type "application/json"
-              :function (lambda (req ent)
-                          (let* ((body (yason:parse (gwl:request-body-text req)))
-                                 (w (gethash "width" body))
-                                 (h (gethash "height" body))
-                                 (rgba (make-rgba w h))
-                                 (free (let ((got (bt:acquire-lock *lock* nil)))
-                                         (when got (bt:release-lock *lock*))
-                                         (and got t))))
-                            (push (list path body free) seen)
-                            (dotimes (i (* w h))
-                              (replace rgba color :start1 (* 4 i)))
-                            (net.aserve:with-http-response
-                                (req ent :content-type "application/json"
-                                         :response (if (eql status 200)
-                                                       net.aserve:*response-ok*
-                                                       net.aserve:*response-internal-server-error*))
-                              (net.aserve:with-http-body (req ent)
-                                (let ((reply (make-hash-table :test 'equal)))
-                                  (setf (gethash "images" reply)
-                                        (list (sexp-agent:base64-encode (png-octets rgba w h))))
-                                  (yason:encode reply (net.aserve:request-reply-stream req))))))))))
+         (seen '())
+         (asked 0)
+         (size nil))
+    (flet ((json (req ent code value)
+             (net.aserve:with-http-response (req ent :content-type "application/json" :response code)
+               (net.aserve:with-http-body (req ent)
+                 (write-string (yason:with-output-to-string* () (yason:encode value))
+                               (net.aserve:request-reply-stream req)))))
+           (object (&rest kv)
+             (let ((o (make-hash-table :test 'equal)))
+               (loop for (k v) on kv by #'cddr do (setf (gethash k o) v))
+               o)))
+      (net.aserve:publish
+       :path "/sdcpp/v1/img_gen" :server server :content-type "application/json"
+       :function (lambda (req ent)
+                   (let ((body (yason:parse (gwl:request-body-text req)))
+                         (free (let ((got (bt:acquire-lock *lock* nil)))
+                                 (when got (bt:release-lock *lock*))
+                                 (and got t))))
+                     (push (list body free) seen)
+                     (setf asked 0
+                           size (list (gethash "width" body) (gethash "height" body)))
+                     (json req ent
+                           (if (eql status 202)
+                               (net.aserve::make-resp 202 "Accepted")
+                               net.aserve:*response-internal-server-error*)
+                           (object "id" "j1" "kind" "img_gen" "status" "queued"
+                                   "poll_url" "/sdcpp/v1/jobs/j1")))))
+      (net.aserve:publish
+       :path "/sdcpp/v1/jobs/j1" :server server :content-type "application/json"
+       :function (lambda (req ent)
+                   (incf asked)
+                   (json req ent net.aserve:*response-ok*
+                         (cond ((< asked 2) (object "status" "generating"))
+                               ((equal job-state "completed")
+                                (destructuring-bind (w h) size
+                                  (let ((rgba (make-rgba w h)))
+                                    (dotimes (i (* w h)) (replace rgba color :start1 (* 4 i)))
+                                    (object "status" "completed"
+                                            "result" (object "output_format" "png"
+                                                             "images" (list (object "index" 0 "b64_json"
+                                                                                    (sexp-agent:base64-encode (png-octets rgba w h)))))))))
+                               (t (object "status" job-state
+                                          "error" (object "code" "generation_failed" "message" "out of memory")))))))
       (unwind-protect
-           (progn (door "/sdapi/v1/img2img")
-                  (door "/sdapi/v1/txt2img")
-                  (funcall fn
-                           (make-generator (format nil "http://127.0.0.1:~d" port) 4 1 0.9d0 256 "" 20 nil)
-                           (lambda () (reverse seen))))
+           (let ((*generator-poll-seconds* 0.05))
+             (funcall fn
+                      (make-generator (format nil "http://127.0.0.1:~d" port) 4 1 0.9d0 256 "" 20 nil)
+                      (lambda () (reverse seen))))
         (net.aserve:shutdown :server server)))))
 
 (defun test-generate ()
@@ -2524,27 +2543,40 @@ own, and undoes with the prompt; the lock stays free meanwhile."
            (multiple-value-bind (inside outside) (pixels-changed before (picture) w box)
              (check "the picture changes inside the selection and nowhere else"
                     (and (plusp inside) (zerop outside)) (list inside outside)))
-           (destructuring-bind (path body free) (first (funcall seen))
-             (let ((image (gethash "init_images" body)))
+           (let* ((pixels (the-object (the-object doc (layer (1- (length (stratum-api:layers))))) pixels))
+                  (alpha (lambda (x y) (aref pixels (+ 3 (* 4 (+ x (* y w))))))))
+             (check "the layer fades in from the selection's edge, and is whole in its middle"
+                    (and (= (funcall alpha 130 70) 255)
+                         (< (funcall alpha 100 70) 40)
+                         (< (funcall alpha 100 70) (funcall alpha 105 70) (funcall alpha 130 70))
+                         (zerop (funcall alpha 99 70)))
+                    (list (funcall alpha 99 70) (funcall alpha 100 70) (funcall alpha 105 70) (funcall alpha 130 70))))
+           (destructuring-bind (body free) (first (funcall seen))
+             (flet ((png-of (key)
+                      (let ((url (gethash key body)))
+                        (cl-base64:base64-string-to-usb8-array (subseq url (1+ (position #\, url)))))))
                (check "a crop and a mask, at the generator's size, with the prompt"
-                      (and (equal path "/sdapi/v1/img2img")
-                           (equal (gethash "prompt" body) "grass")
-                           (= (gethash "steps" body) 4)
-                           (= (length image) 1)
-                           (<= (max (gethash "width" body) (gethash "height" body)) 256)
-                           (search "data:image/png;base64," (gethash "mask" body)))
-                      (list path (gethash "width" body) (gethash "height" body))))
+                      (and (equal (gethash "prompt" body) "grass")
+                           (= (gethash "sample_steps" (gethash "sample_params" body)) 4)
+                           (png-octets-p (png-of "init_image"))
+                           (<= (max (gethash "width" body) (gethash "height" body)) 256))
+                      (list (gethash "width" body) (gethash "height" body)))
+               ;; byte 25 of a PNG is its color type: 0 is one gray channel
+               (check "the mask is a PNG of one channel, as the job API asks"
+                      (let ((mask (png-of "mask_image")))
+                        (and (png-octets-p mask) (zerop (aref mask 25))))
+                      (aref (png-of "mask_image") 25)))
              (check "the lock is free while the generator works" free))
            (stratum-api:select-none)
            (stratum-api:delete-layer "Grass")
            (check "taking the layer off gives the picture back" (equalp before (picture)))
            (stratum:run-forms "(generate-layer \"a meadow\" :name \"Meadow\")")
-           (destructuring-bind (path body free) (car (last (funcall seen)))
+           (destructuring-bind (body free) (car (last (funcall seen)))
              (declare (ignore free))
              (check "generate-layer: a picture of the document's shape, no mask"
-                    (and (equal path "/sdapi/v1/txt2img") (null (gethash "mask" body))
-                         (let ((p (getf (stratum-api:layer-info "Meadow") :index))) p))
-                    path))
+                    (and (null (gethash "mask_image" body)) (null (gethash "init_image" body))
+                         (getf (stratum-api:layer-info "Meadow") :index))
+                    (gethash "prompt" body)))
            (stratum-api:delete-layer "Meadow")
            ;; from a prompt: the layer goes with the prompt's one undo
            (let ((answer (prompt-with doc "(select-rect 100 50 60 40) (generate-fill \"grass\" :name \"Grass\") (select-none)")))
@@ -2566,6 +2598,17 @@ own, and undoes with the prompt; the lock stays free meanwhile."
                     result))
            (stratum-api:select-none)))
        :status 500)
+      (call-with-stub-generator
+       (lambda (generator seen)
+         (declare (ignore seen))
+         (let ((*generator* generator))
+           (stratum-api:select-rect 100 50 60 40)
+           (let ((result (first (stratum:run-forms "(generate-fill \"grass\")"))))
+             (check "a job that fails says why"
+                    (and (not (getf result :ok)) (search "out of memory" (getf result :error)))
+                    result))
+           (stratum-api:select-none)))
+       :job-state "failed")
       (let ((*generator* (make-generator (format nil "http://127.0.0.1:~d" (free-port)) 4 1 0.9d0 256 "" 5 nil)))
         (stratum-api:select-rect 100 50 60 40)
         (check "a generator that is down says so"

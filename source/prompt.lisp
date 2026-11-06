@@ -337,12 +337,16 @@ them.  The directory."
       (setf *prompt-log-directory* path)))
   *prompt-log-directory*)
 
+(defvar *turn-count* 0
+  "Prompts logged since the server started: two in one second keep
+their order.")
+
 (defun turn-directory ()
   "A new directory for one prompt, named so that the names sort by time."
   (multiple-value-bind (second minute hour day month year)
       (decode-universal-time (get-universal-time) 0)
-    (merge-pathnames (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~36r/"
-                             year month day hour minute second
+    (merge-pathnames (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~6,'0d-~36r/"
+                             year month day hour minute second (incf *turn-count*)
                              (random (expt 36 4) (make-random-state t)))
                      *prompt-log-directory*)))
 

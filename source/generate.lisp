@@ -11,18 +11,20 @@
 ;;
 ;; New pixels from an image generator: (generate-fill prompt) repaints
 ;; the selection and (generate-layer prompt) makes a picture of the
-;; document's size.  The generator is a separate service speaking the
-;; WebUI API (POST /sdapi/v1/img2img and txt2img, JSON, base64 PNGs),
-;; which stable-diffusion.cpp's sd-server and others serve; (configure-
-;; generator! :url ...) says where.  There is none by default.
+;; document's size.  The generator is a separate service,
+;; stable-diffusion.cpp's sd-server, spoken to through its native job
+;; API (POST /sdcpp/v1/img_gen, then GET the job until it is done), not
+;; its WebUI one, whose img2img was reported to ignore the mask;
+;; (configure-generator! :url ...) says where.  There is none by default.
 ;;
 ;; A generator works at a megapixel or so and a photograph has many, so
 ;; generate-fill sends a crop: the selection and some of what surrounds
 ;; it, scaled to the generator's size, with the selection as its mask.
 ;; What comes back is scaled to the crop and lands as a new raster layer
-;; whose alpha is the selection's coverage.  So a generator that strays
-;; outside its mask changes nothing there, nothing below the layer is
-;; touched, and the layer takes masks, blends and undo like any other.
+;; whose alpha is the selection's coverage, faded in from its edge.  So a
+;; generator that strays outside its mask changes nothing there, nothing
+;; below the layer is touched, and the layer takes masks, blends and
+;; undo like any other.
 ;;
 ;; A generation takes many seconds, so these operations run outside the
 ;; server's lock (run-forms, *long-operators*) and take it themselves to
@@ -67,57 +69,104 @@ matches what it paints to what it can see."
       (list x0 y0 (- x1 x0) (- y1 y0)))))
 
 (defun gray-png (gray w h invert?)
-  "GRAY, W x H bytes, as a PNG, inverted with INVERT?."
-  (let ((rgba (make-rgba w h)))
-    (dotimes (i (* w h))
-      (let ((v (if invert? (- 255 (aref gray i)) (aref gray i)))
-            (o (* 4 i)))
-        (setf (aref rgba o) v (aref rgba (+ o 1)) v (aref rgba (+ o 2)) v (aref rgba (+ o 3)) 255)))
-    (png-octets rgba w h)))
+  "GRAY, W x H bytes, as a one-channel PNG, inverted with INVERT?."
+  (let* ((png (make-instance 'zpng:png :color-type :grayscale :width w :height h))
+         (data (zpng:data-array png)))
+    (dotimes (y h)
+      (dotimes (x w)
+        (let ((v (aref gray (+ x (* y w)))))
+          (setf (aref data y x 0) (if invert? (- 255 v) v)))))
+    (flexi-streams:with-output-to-sequence (out :element-type '(unsigned-byte 8))
+      (zpng:write-png-stream png out))))
 
 (defun data-url (png)
   (format nil "data:image/png;base64,~a" (sexp-agent:base64-encode png)))
 
 (defun generator-body (generator prompt seed w h &optional image mask)
-  "The request for a picture of W x H, as JSON text; with IMAGE and MASK,
+  "The job for a picture of W x H, as JSON text; with IMAGE and MASK,
 PNG octets, a repainting of them."
-  (let ((body (make-hash-table :test 'equal)))
-    (flet ((put (key value) (setf (gethash key body) value)))
-      (put "prompt" prompt)
-      (put "negative_prompt" (generator-negative generator))
-      (put "width" w)
-      (put "height" h)
-      (put "steps" (generator-steps generator))
-      (put "cfg_scale" (generator-cfg-scale generator))
-      (put "seed" seed)
-      (put "batch_size" 1)
+  (flet ((object (&rest keys-and-values)
+           (let ((table (make-hash-table :test 'equal)))
+             (loop for (key value) on keys-and-values by #'cddr
+                   do (setf (gethash key table) value))
+             table)))
+    (let ((body (object "prompt" prompt
+                        "negative_prompt" (generator-negative generator)
+                        "width" w
+                        "height" h
+                        "seed" seed
+                        "output_format" "png"
+                        "sample_params" (object "sample_steps" (generator-steps generator)
+                                                "guidance" (object "txt_cfg" (float (generator-cfg-scale generator) 1d0))))))
       (when image
-        (put "init_images" (list (data-url image)))
-        (put "mask" (data-url mask))
-        (put "inpainting_mask_invert" 0)
-        (put "denoising_strength" (float (generator-strength generator) 1d0))))
-    (yason:with-output-to-string* () (yason:encode body))))
+        (setf (gethash "init_image" body) (data-url image)
+              (gethash "mask_image" body) (data-url mask)
+              (gethash "strength" body) (float (generator-strength generator) 1d0)))
+      (yason:with-output-to-string* () (yason:encode body)))))
 
-(defun ask-generator (generator path body)
-  "BODY posted to the generator at PATH: the picture it answers, (values
-pixels w h).  Errors say what a person can act on."
+(defparameter *generator-poll-seconds* 1
+  "How often a job is asked after.")
+
+(defun generator-get (generator path)
+  "PATH of the generator, parsed: (values reply status)."
+  (multiple-value-bind (text status)
+      (glisp:http-request (format nil "~a~a" (generator-url generator) path)
+                          :connect-timeout 10 :read-timeout 30)
+    (values (ignore-errors (yason:parse text)) status)))
+
+(defun job-picture (job)
+  "The picture of a finished JOB: (values pixels w h)."
+  (let* ((result (gethash "result" job))
+         (images (and (hash-table-p result) (gethash "images" result)))
+         (image (and images (gethash "b64_json" (first images)))))
+    (unless (stringp image)
+      (error "The image generator finished with no image."))
+    (read-png (cl-base64:base64-string-to-usb8-array image))))
+
+(defun ask-generator (generator body)
+  "BODY submitted to the generator as a job, and the job waited for:
+the picture, (values pixels w h).  Errors say what a person can act on."
   (multiple-value-bind (status text)
-      (handler-case (sexp-agent:post-json (format nil "~a~a" (generator-url generator) path) body
-                                          :seconds (generator-seconds generator))
+      (handler-case (sexp-agent:post-json (format nil "~a/sdcpp/v1/img_gen" (generator-url generator)) body
+                                          :seconds 60)
         (error (e)
           (error "The image generator could not be reached: ~a" e)))
-    (unless (eql status 200)
+    (unless (member status '(200 202))
       (error "The image generator answered ~a: ~a" status (subseq text 0 (min 200 (length text)))))
     (let* ((reply (handler-case (yason:parse text)
                     (error () (error "The image generator's answer was not JSON."))))
-           (image (and (hash-table-p reply) (first (gethash "images" reply)))))
-      (unless (stringp image)
-        (error "The image generator answered with no image."))
-      (read-png (cl-base64:base64-string-to-usb8-array
-                 (subseq image (let ((comma (position #\, image))) (if comma (1+ comma) 0))))))))
+           (poll (and (hash-table-p reply) (gethash "poll_url" reply)))
+           (deadline (+ (get-universal-time) (generator-seconds generator))))
+      (unless (stringp poll)
+        (error "The image generator gave no job to follow."))
+      (loop
+        (let* ((job (generator-get generator poll))
+               (state (and (hash-table-p job) (gethash "status" job))))
+          (cond ((equal state "completed") (return (job-picture job)))
+                ((member state '("failed" "cancelled") :test #'equal)
+                 (let ((why (gethash "error" job)))
+                   (error "The image generator ~a: ~a" state
+                          (or (and (hash-table-p why) (gethash "message" why)) "no reason given"))))
+                ((> (get-universal-time) deadline)
+                 (error "The image generator took more than ~a seconds." (generator-seconds generator)))
+                (t (sleep *generator-poll-seconds*))))))))
 
 (defun require-generator ()
   (or *generator* (error "This server has no image generator.")))
+
+(defun faded-coverage (coverage w h)
+  "COVERAGE, W x H bytes, fading to nothing at its edge over about a
+fiftieth of its longer side.  A generator's idea of the surroundings is
+never quite the picture's, so a hard edge shows as a pasted square; and
+each byte is at most what it was, so nothing outside the selection can
+change."
+  (let* ((sigma (max 3d0 (/ (max w h) 50d0)))
+         (blurred (feather-mask-exact coverage w h sigma))
+         (out (make-gray w h)))
+    (dotimes (i (* w h) out)
+      ;; the blur is half way at a straight edge, and whole well inside
+      (setf (aref out i)
+            (floor (* (aref coverage i) (max 0 (- (* 2 (aref blurred i)) 255))) 255)))))
 
 (defun generated-layer! (doc pixels w h rect coverage name)
   "PIXELS, W x H, scaled to RECT of DOC and laid there as a new raster
@@ -165,9 +214,14 @@ so.  The layer's layer-info."
                                                    sw sh)
                                        (gray-png (resample-gray coverage rw rh sw sh) sw sh
                                                  (generator-invert-mask generator))))))))
-    (multiple-value-bind (pixels w h) (ask-generator generator "/sdapi/v1/img2img" body)
+    (multiple-value-bind (pixels w h) (ask-generator generator body)
       (bt:with-lock-held (*lock*)
-        (stratum-api:layer-info (generated-layer! doc pixels w h rect coverage name))))))
+        (stratum-api:layer-info
+         (generated-layer! doc pixels w h rect
+                           (destructuring-bind (x y rw rh) rect
+                             (declare (ignore x y))
+                             (faded-coverage coverage rw rh))
+                           name))))))
 
 (defun stratum-api:generate-layer (prompt &key (name "Generated") (seed -1))
   "A picture of PROMPT from the image generator, the document's shape,
@@ -179,7 +233,7 @@ layer-info."
          (dh (the-object doc doc-height)))
     (multiple-value-bind (sw sh) (fitted-size dw dh (generator-size generator))
       (multiple-value-bind (pixels w h)
-          (ask-generator generator "/sdapi/v1/txt2img" (generator-body generator prompt seed sw sh))
+          (ask-generator generator (generator-body generator prompt seed sw sh))
         (bt:with-lock-held (*lock*)
           (stratum-api:layer-info (generated-layer! doc pixels w h (list 0 0 dw dh) nil name)))))))
 

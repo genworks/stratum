@@ -117,7 +117,9 @@ the operations above, which are exact and immediate.
 - `(generate-fill prompt &key name seed)` — the selection repainted,
   to match what surrounds it, as a new raster layer visible only inside
   the selection, so nothing else can change.  Select the area first and
-  generously: what you outline is what gets replaced.  To remove
+  generously, well beyond the thing you want: the result fades out
+  toward the selection's edge, and anything reaching the edge is cut
+  off there.  To remove
   something, select it and describe what should be there instead.
 - `(generate-layer prompt &key name seed)` — a whole new picture of the
   document's shape as a new raster layer on top.

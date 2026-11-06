@@ -337,8 +337,12 @@ generator: stable-diffusion.cpp's `sd-server`, through its job API
 `(generate-fill prompt)` sends a crop around the selection, scaled to
 `:size`, with the selection as its mask; the answer lands as a new
 raster layer whose alpha is the selection's coverage, faded in from
-its edge so no seam shows.  Nothing outside the selection can change,
-and the layer takes masks, blends and undo like any other.  `(generate-layer prompt)` makes a picture of
+its edge so no seam shows, and, by default, only where the generator
+changed the picture (`:keep :changed`; `:keep :all` keeps every pixel):
+a generator repaints the whole of its mask, and its copy of the
+surroundings is never quite the picture's.  Nothing outside the
+selection can change, and the layer takes masks, blends and undo like
+any other.  `(generate-layer prompt)` makes a picture of
 the document's shape.  Both run outside the server's lock.
 
 ### Keeping a record of prompts

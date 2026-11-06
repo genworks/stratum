@@ -2519,17 +2519,19 @@ leaving an empty turn to break the next request."
         (check "an ordinary answer is not declined"
                (and (getf answer :ok) (not (getf answer :declined))) answer)))))
 
-(defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)))
+(defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)) paint)
   "FN called with a generator on a server of its own, a stand-in for
 sd-server's job API: a job is accepted with STATUS and is then JOB-STATE
-at its second asking, with a picture of COLOR at the size asked.  And
-with a function answering what it has seen: (body lock-free?) each,
-oldest first."
+at its second asking, with a picture of COLOR at the size asked -- or
+of PAINT, a function of (w h init), INIT the picture it was sent or nil,
+answering RGBA.  And with a function answering what it has seen: (body
+lock-free?) each, oldest first."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
          (seen '())
          (asked 0)
-         (size nil))
+         (size nil)
+         (init nil))
     (flet ((json (req ent code value)
              (net.aserve:with-http-response (req ent :content-type "application/json" :response code)
                (net.aserve:with-http-body (req ent)
@@ -2548,7 +2550,10 @@ oldest first."
                                  (and got t))))
                      (push (list body free) seen)
                      (setf asked 0
-                           size (list (gethash "width" body) (gethash "height" body)))
+                           size (list (gethash "width" body) (gethash "height" body))
+                           init (let ((url (gethash "init_image" body)))
+                                  (and url (read-png (cl-base64:base64-string-to-usb8-array
+                                                      (subseq url (1+ (position #\, url))))))))
                      (json req ent
                            (if (eql status 202)
                                (net.aserve::make-resp 202 "Accepted")
@@ -2563,8 +2568,11 @@ oldest first."
                          (cond ((< asked 2) (object "status" "generating"))
                                ((equal job-state "completed")
                                 (destructuring-bind (w h) size
-                                  (let ((rgba (make-rgba w h)))
-                                    (dotimes (i (* w h)) (replace rgba color :start1 (* 4 i)))
+                                  (let ((rgba (if paint
+                                                  (funcall paint w h init)
+                                                  (make-rgba w h))))
+                                    (unless paint
+                                      (dotimes (i (* w h)) (replace rgba color :start1 (* 4 i))))
                                     (object "status" "completed"
                                             "result" (object "output_format" "png"
                                                              "images" (list (object "index" 0 "b64_json"
@@ -2607,7 +2615,7 @@ own, and undoes with the prompt; the lock stays free meanwhile."
                   (search "Nothing is selected"
                           (getf (first (stratum:run-forms "(generate-fill \"grass\")")) :error)))
            (stratum-api:select-rect 100 50 60 40)
-           (let ((result (first (stratum:run-forms "(generate-fill \"grass\" :name \"Grass\")"))))
+           (let ((result (first (stratum:run-forms "(generate-fill \"grass\" :name \"Grass\" :keep :all)"))))
              (check "generate-fill: a layer of that name on top"
                     (and (getf result :ok) (equal (getf (getf result :value) :name) "Grass")
                          (= (length (stratum-api:layers)) (1+ layers)))
@@ -2659,6 +2667,40 @@ own, and undoes with the prompt; the lock stays free meanwhile."
              (stratum-api:undo)
              (check "one undo takes the generated layer off"
                     (and (equalp before (picture)) (= (length (stratum-api:layers)) layers)))))))
+      ;; a generator that hands back the left half painted and the
+      ;; right half as it was sent: only the left half is kept
+      (call-with-stub-generator
+       (lambda (generator seen)
+         (declare (ignore seen))
+         (let ((*generator* generator)
+               (before (picture)))
+           (flet ((alpha (x y)
+                    (let ((pixels (the-object (the-object doc (layer (1- (length (stratum-api:layers))))) pixels)))
+                      (aref pixels (+ 3 (* 4 (+ x (* y w))))))))
+             (stratum-api:select-rect 100 50 60 40)
+             (check ":keep takes :changed or :all"
+                    (search ":changed or :all"
+                            (getf (first (stratum:run-forms "(generate-fill \"grass\" :keep :some)")) :error)))
+             (stratum-api:generate-fill "grass" :name "Half")
+             (check "what the generator painted is kept, what it gave back as sent is left clear"
+                    (and (= (alpha 115 70) 255) (zerop (alpha 150 70)) (zerop (alpha 158 70)))
+                    (list (alpha 115 70) (alpha 150 70) (alpha 158 70)))
+             (multiple-value-bind (inside outside) (pixels-changed before (picture) w '(100 50 60 40))
+               (check "and the picture changed inside the selection alone"
+                      (and (plusp inside) (zerop outside)) (list inside outside)))
+             (stratum-api:delete-layer "Half")
+             (stratum-api:generate-fill "grass" :name "All" :keep :all)
+             (check ":keep :all keeps the whole selection"
+                    (and (= (alpha 115 70) 255) (= (alpha 150 70) 255))
+                    (list (alpha 115 70) (alpha 150 70)))
+             (stratum-api:delete-layer "All")
+             (stratum-api:select-none)
+             (check "nothing of it is left" (equalp before (picture))))))
+       :paint (lambda (w h init)
+                (let ((rgba (copy-seq init)))
+                  (dotimes (y h rgba)
+                    (dotimes (x (floor w 2))
+                      (replace rgba '(0 255 0 255) :start1 (* 4 (+ x (* y w)))))))))
       (call-with-stub-generator
        (lambda (generator seen)
          (declare (ignore seen))

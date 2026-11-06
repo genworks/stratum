@@ -114,13 +114,19 @@ pictures are small, a megapixel or so scaled to fit.  Use them only for
 that; a recolor, a tone change or a simple shape is better done with
 the operations above, which are exact and immediate.
 
-- `(generate-fill prompt &key name seed)` — the selection repainted,
-  to match what surrounds it, as a new raster layer visible only inside
-  the selection, so nothing else can change.  Select the area first and
-  generously, well beyond the thing you want: the result fades out
-  toward the selection's edge, and anything reaching the edge is cut
-  off there.  To remove
-  something, select it and describe what should be there instead.
+- `(generate-fill prompt &key name seed keep)` — the selection
+  repainted, to match what surrounds it, as a new raster layer visible
+  only inside the selection, so nothing else can change.  Select the
+  area first and generously, well beyond the thing you want: the result
+  fades out toward the selection's edge, and anything reaching the edge
+  is cut off there.  By default the layer keeps only what the generator
+  changed (`:keep :changed`): where it painted back much the same as
+  before, the layer is clear, so a new thing comes without a repainted
+  copy of its surroundings and the picture shows through.  `:keep :all`
+  keeps every pixel of the selection: for a fill that must replace
+  everything it covers, such as a new background or a changed texture,
+  where the new may resemble the old.  To remove something, select it
+  and describe what should be there instead.
 - `(generate-layer prompt &key name seed)` — a whole new picture of the
   document's shape as a new raster layer on top.
 

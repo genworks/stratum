@@ -26,6 +26,13 @@
 ;; below the layer is touched, and the layer takes masks, blends and
 ;; undo like any other.
 ;;
+;; A generator repaints the whole of its mask, the surroundings of a new
+;; thing included, and its copy of a sky is never quite the sky: so by
+;; default the layer keeps only what the generator changed (changed-matte,
+;; :keep :changed), and a new thing comes without a repainted copy of
+;; what was around it.  :keep :all keeps every pixel, for a fill that
+;; means to replace everything it covers.
+;;
 ;; A generation takes many seconds, so these operations run outside the
 ;; server's lock (run-forms, *long-operators*) and take it themselves to
 ;; read the document and to add the layer.
@@ -168,6 +175,44 @@ change."
       (setf (aref out i)
             (floor (* (aref coverage i) (max 0 (- (* 2 (aref blurred i)) 255))) 255)))))
 
+(defparameter *changed-low* 24
+  "A difference between what a generator was sent and what it painted,
+in levels of the most different channel, under which a pixel is taken
+as unchanged: a generator's copy of what it was shown differs by a few
+levels everywhere.")
+
+(defparameter *changed-high* 80
+  "The difference above which a pixel is kept whole; between the two it
+is kept in proportion.")
+
+(defun changed-matte (sent generated w h)
+  "SENT and GENERATED, RGBA W x H: a byte for each pixel, 255 where the
+generator painted something else, 0 where much the same, in between in
+proportion.  The difference is smoothed first, so that a likeness which
+is merely noisy does not speckle and the edge of what is kept is soft."
+  (let ((difference (make-gray w h)))
+    (dotimes (i (* w h))
+      (let ((j (* 4 i)))
+        (setf (aref difference i)
+              (max (abs (- (aref generated j) (aref sent j)))
+                   (abs (- (aref generated (+ j 1)) (aref sent (+ j 1))))
+                   (abs (- (aref generated (+ j 2)) (aref sent (+ j 2))))))))
+    (let ((smoothed (feather-mask-exact difference w h (max 2d0 (/ (max w h) 200d0))))
+          (span (max 1 (- *changed-high* *changed-low*))))
+      (dotimes (i (* w h) smoothed)
+        (setf (aref smoothed i)
+              (max 0 (min 255 (floor (* 255 (- (aref smoothed i) *changed-low*)) span))))))))
+
+(defun keep-changed! (coverage rw rh sent sw sh generated w h)
+  "COVERAGE, RW x RH bytes, kept only where the generator changed the
+picture: SENT, SW x SH, is what it was shown and GENERATED, W x H, what
+it painted; the matte is made at the generator's size and scaled to the
+crop.  COVERAGE itself, changed."
+  (let* ((generated (if (and (= w sw) (= h sh)) generated (resample-rgba generated w h sw sh)))
+         (matte (resample-gray (changed-matte sent generated sw sh) sw sh rw rh)))
+    (dotimes (i (* rw rh) coverage)
+      (setf (aref coverage i) (floor (* (aref coverage i) (aref matte i)) 255)))))
+
 (defun generated-layer! (doc pixels w h rect coverage name)
   "PIXELS, W x H, scaled to RECT of DOC and laid there as a new raster
 layer on top, each pixel's alpha its own times COVERAGE, the selection
@@ -190,13 +235,17 @@ over RECT, or its own alone with none.  The layer's index."
                       (aref scaled (+ from 3)))))))
       (the-object doc (add-layer! (list :kind :raster :name name :pixels (doc-pixels doc layer)))))))
 
-(defun stratum-api:generate-fill (prompt &key (name "Generated") (seed -1))
+(defun stratum-api:generate-fill (prompt &key (name "Generated") (seed -1) (keep :changed))
   "PROMPT painted into the selection by the image generator, as a new
-raster layer NAME visible only inside the selection.  Slow: a minute or
-so.  The layer's layer-info."
+raster layer NAME visible only inside the selection, and with KEEP
+:changed, the default, only where the generator changed the picture;
+:all keeps every pixel of the selection.  Slow: a minute or so.  The
+layer's layer-info."
+  (unless (member keep '(:changed :all))
+    (error "generate-fill's :keep is :changed or :all, not ~s." keep))
   (let ((generator (require-generator))
         (doc (stratum-api::doc))
-        rect coverage body)
+        rect coverage body sent sw sh)
     (bt:with-lock-held (*lock*)
       (let ((selection (the-object doc selection))
             (dw (the-object doc doc-width))
@@ -205,23 +254,24 @@ so.  The layer's layer-info."
           (error "Nothing is selected: generate-fill repaints the selection."))
         (setf rect (grown-rect (getf selection :rect) dw dh))
         (destructuring-bind (x y rw rh) rect
-          (multiple-value-bind (sw sh) (fitted-size rw rh (generator-size generator))
-            (setf coverage (rgba-rect (getf selection :mask) dw dh x y rw rh 1)
-                  body (generator-body generator prompt seed sw sh
-                                       (png-octets (resample-rgba (rgba-rect (the-object doc (render-cpu))
-                                                                             dw dh x y rw rh)
-                                                                  rw rh sw sh)
-                                                   sw sh)
-                                       (gray-png (resample-gray coverage rw rh sw sh) sw sh
-                                                 (generator-invert-mask generator))))))))
+          (multiple-value-setq (sw sh) (fitted-size rw rh (generator-size generator)))
+          (setf coverage (rgba-rect (getf selection :mask) dw dh x y rw rh 1)
+                sent (resample-rgba (rgba-rect (the-object doc (render-cpu)) dw dh x y rw rh)
+                                    rw rh sw sh)
+                body (generator-body generator prompt seed sw sh
+                                     (png-octets sent sw sh)
+                                     (gray-png (resample-gray coverage rw rh sw sh) sw sh
+                                               (generator-invert-mask generator)))))))
     (multiple-value-bind (pixels w h) (ask-generator generator body)
-      (bt:with-lock-held (*lock*)
-        (stratum-api:layer-info
-         (generated-layer! doc pixels w h rect
-                           (destructuring-bind (x y rw rh) rect
-                             (declare (ignore x y))
-                             (faded-coverage coverage rw rh))
-                           name))))))
+      (destructuring-bind (x y rw rh) rect
+        (declare (ignore x y))
+        ;; the alpha is worked out before the lock is taken: nothing
+        ;; here reads the document
+        (let ((coverage (faded-coverage coverage rw rh)))
+          (when (eq keep :changed)
+            (keep-changed! coverage rw rh sent sw sh pixels w h))
+          (bt:with-lock-held (*lock*)
+            (stratum-api:layer-info (generated-layer! doc pixels w h rect coverage name))))))))
 
 (defun stratum-api:generate-layer (prompt &key (name "Generated") (seed -1))
   "A picture of PROMPT from the image generator, the document's shape,

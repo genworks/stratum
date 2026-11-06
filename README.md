@@ -516,7 +516,7 @@ change, and the plan, the programs and the layer panel follow.
 | `POST /stratum/api/resize?doc=N` | `{op: "crop"}` (to the selection), `{op: "crop-rect", x, y, w, h}`, `{op: "image-size", width, height}`, `{op: "canvas-size", width, height, anchor: [ax, ay]}`, `{op: "rotate", turn: "cw", "ccw", "180", "flip-h" or "flip-v"}` or `{op: "rotate-arbitrary", degrees}` (clockwise); the document is remade; answers `{width, height}` |
 | `POST /stratum/api/filter?doc=N` | `{layer, kind: "gaussian-blur", "unsharp-mask" or "add-noise", settings: {radius, amount, threshold, monochrome, seed}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/gradient?doc=N` | `{layer, x0, y0, x1, y1, start: [r, g, b, a], end: [r, g, b, a], shape: "linear", "reflected", "radial", "diamond" or "angle", opacity}` laid over the layer inside the selection; answers the whole layer as a rectangle |
-| `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer; answers the whole layer as a rectangle |
+| `POST /stratum/api/adjust?doc=N` | `{layer, kind: "levels", "curves" or "hue-saturation", settings: {name: value}, curves: {channel: points}}` baked into the layer inside the selection; answers the whole layer as a rectangle |
 | `POST /stratum/api/layers?doc=N` | `{op: "add", kind, above}`, `{op: "delete", layer}`, `{op: "move", layer, delta}`, `{op: "duplicate", layer}`, `{op: "mask", layer, value: "reveal", "hide" or "delete"}`, `{op: "merge", layer}` or `{op: "flatten"}`; answers the new plan version and the layer to work on |
 
 ## Tests

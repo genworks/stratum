@@ -3757,6 +3757,43 @@
         S.setActiveLayer(active, false);
       });
     }).then(function () {
+      // The same under a selection: previewed and baked inside it alone.
+      var active = S.activeLayer, W = doc.width, H = doc.height;
+      var box = { x: Math.floor(W / 4), y: Math.floor(H / 4), w: Math.floor(W / 3), h: Math.floor(H / 3) };
+      function outside(a, b) {
+        var n = 0;
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+          if (x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h) continue;
+          var o = ((H - 1 - y) * W + x) * 4;
+          if (a[o] !== b[o] || a[o + 1] !== b[o + 1] || a[o + 2] !== b[o + 2]) n++;
+        }
+        return n;
+      }
+      S.setActiveLayer(0, false);
+      var before = S.renderExact();
+      return S.select({ op: 'rect', x: box.x, y: box.y, w: box.w, h: box.h }).then(function () {
+        var dialog = S.openAdjust('levels');
+        if (!dialog) return null;
+        dialog.set({ gamma: 1.6, 'in-black': 0.05 });
+        var previewed = S.renderExact();
+        check('an adjustment under a selection previews inside it alone',
+              renderDiff(before, previewed).maxDiff > 0 && outside(before, previewed) === 0,
+              { outside: outside(before, previewed) });
+        return dialog.ok().then(function () {
+          var after = S.renderExact(), d = renderDiff(previewed, after);
+          check('and bakes what the preview showed, nothing outside the selection',
+                d.maxDiff <= 2 && outside(before, after) === 0, { diff: d, outside: outside(before, after) });
+          return S.parity();
+        }).then(function (p) {
+          check('parity after an adjustment under a selection', p.maxDiff <= 1, p);
+          return S.undo();
+        });
+      }).then(function () {
+        return S.select({ op: 'none' });
+      }).then(function () {
+        S.setActiveLayer(active, false);
+      });
+    }).then(function () {
       // Filter > Blur > Gaussian Blur on the Discs layer, whose edges
       // show a blur: previewed through the blur passes and the
       // replacement stage, baked by the server with the same kernel;

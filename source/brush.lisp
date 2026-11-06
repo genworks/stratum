@@ -457,19 +457,50 @@ empties the redo list; an undo being redone (KEEP-REDO) does not."
                    (aref pixels (+ o 2)) (unit->byte b))))
   pixels)
 
+(defun blend-by-selection! (pixels filtered width height selection)
+  "PIXELS replaced by FILTERED where SELECTION covers, blended by its
+coverage in premultiplied linear light; everywhere without one."
+  (if (null selection)
+      (replace pixels filtered)
+      (let ((mask (getf selection :mask))
+            (decode *srgb-decode*))
+        (declare (type (simple-array (unsigned-byte 8) (*)) pixels filtered mask)
+                 (type (simple-array double-float (256)) decode))
+        (dotimes (i (* width height) pixels)
+          (let ((s (/ (float (aref mask i) 1d0) 255d0)))
+            (when (> s 0d0)
+              (let* ((o (* 4 i))
+                     (a0 (/ (float (aref pixels (+ o 3)) 1d0) 255d0))
+                     (a1 (/ (float (aref filtered (+ o 3)) 1d0) 255d0))
+                     (a (+ (* a0 (- 1d0 s)) (* a1 s))))
+                (flet ((channel (k)
+                         (/ (+ (* a0 (- 1d0 s) (aref decode (aref pixels (+ o k))))
+                               (* a1 s (aref decode (aref filtered (+ o k)))))
+                            a)))
+                  (if (> a 0d0)
+                      (setf (aref pixels o) (unit->byte (linear->srgb (channel 0)))
+                            (aref pixels (+ o 1)) (unit->byte (linear->srgb (channel 1)))
+                            (aref pixels (+ o 2)) (unit->byte (linear->srgb (channel 2)))
+                            (aref pixels (+ o 3)) (unit->byte a))
+                      (setf (aref pixels o) 0 (aref pixels (+ o 1)) 0
+                            (aref pixels (+ o 2)) 0 (aref pixels (+ o 3)) 0))))))))))
+
 (defun adjust-layer! (layer kind &key settings curves)
-  "Bake an adjustment into raster LAYER's pixels and return the
-rectangle it changed, the whole layer.  KIND is :levels (SETTINGS a
-plist of :in-black :in-white :gamma :out-black :out-white), :curves
-(CURVES a plist of :master :red :green :blue point lists) or
-:hue-saturation (SETTINGS :hue in degrees, :saturation, :lightness).
-The layer's pixels before go on the undo list."
+  "Bake an adjustment into raster LAYER's pixels, inside the selection
+when there is one, and return the rectangle it changed, the whole layer.
+KIND is :levels (SETTINGS a plist of :in-black :in-white :gamma
+:out-black :out-white), :curves (CURVES a plist of :master :red :green
+:blue point lists) or :hue-saturation (SETTINGS :hue in degrees,
+:saturation, :lightness).  The layer's pixels before go on the undo
+list."
   (unless (eql (the-object layer kind) :raster)
     (error "~a is not a raster layer." (the-object layer layer-name)))
   (let* ((pixels (the-object layer (ensure-own-pixels!)))
          (doc (the-object layer parent))
+         (selection (the-object doc selection))
          (w (the-object layer doc-width))
-         (h (the-object layer doc-height)))
+         (h (the-object layer doc-height))
+         (target (if selection (copy-seq pixels) pixels)))
     (flet ((setting (key default) (float (getf settings key default) 1d0)))
       (push-undo! doc (list (the-object layer index) :layer 0 0 w h (copy-seq pixels)))
       (ecase kind
@@ -478,16 +509,17 @@ The layer's pixels before go on the undo list."
                                               (setting :gamma 1)
                                               (setting :out-black 0) (setting :out-white 1)
                                               256))))
-           (apply-tables! pixels table table table)))
+           (apply-tables! target table table table)))
         (:curves
          (let ((master (getf curves :master *identity-curve*)))
-           (apply-tables! pixels
+           (apply-tables! target
                           (byte-table (channel-lut master (getf curves :red *identity-curve*)))
                           (byte-table (channel-lut master (getf curves :green *identity-curve*)))
                           (byte-table (channel-lut master (getf curves :blue *identity-curve*))))))
         (:hue-saturation
-         (apply-hue-saturation! pixels (/ (setting :hue 0) 360) (setting :saturation 0)
+         (apply-hue-saturation! target (/ (setting :hue 0) 360) (setting :saturation 0)
                                 (setting :lightness 0))))
+      (when selection (blend-by-selection! pixels target w h selection))
       (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
       (list 0 0 w h))))
 

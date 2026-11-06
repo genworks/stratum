@@ -92,7 +92,9 @@ eyes, blur a sign):
 4. `(feather 1)` to `(feather 3)` for a thing with a hard edge, so the
    change does not end in a jagged line; more only for soft things
    (fur, smoke, a glow).
-5. Make the change.  To recolor, fill the selection on a new raster
+5. Make the change.  To lighten or darken it, or shift its color a
+   little, `levels`, `curves` or `hue-saturation` on the raster layer
+   it is in; they stay inside the selection.  To recolor, fill the selection on a new raster
    layer and set that layer's `:blend` to `:color`: the layer gives
    hue and saturation, what is under it gives light and dark, so
    shading and texture stay.  `:multiply` darkens as it tints,
@@ -106,9 +108,16 @@ eyes, blur a sign):
 Layer kinds are `:raster` (pixels), and the adjustment layers
 `:curves`, `:levels` and `:hue-saturation`, which change what is
 under them without touching any pixels.  Prefer an adjustment layer
-for a tonal or color change that may be revisited; bake with the
-operations under Adjustments when the pixels themselves should
-change.
+for a change to the whole picture that may be revisited; bake with the
+operations under Adjustments when the pixels themselves should change.
+
+An adjustment layer changes everything under it, and `set-layer`'s
+`:opacity` the whole of its layer, whatever is selected: the selection
+binds neither.  To change only part of the picture, select the part
+and use an operation under Adjustments, or add the adjustment layer
+and give it `(set-mask layer :selection)`.  Lowering the opacity of the
+only layer fades the whole picture and is never the way to lighten
+something.
 
 - `(add-layer kind &key above name)` — a new layer above layer
   `above`, or on top.  Returns its `layer-info`.
@@ -127,7 +136,8 @@ change.
   a curves layer's `:master :red :green :blue`, each a list of points
   `((x y) ...)` on 0-1 from `(0 0)` to `(1 1)`.
 - `(set-mask layer value)` — `:reveal` (a white mask), `:hide` (a black
-  one) or `:delete`.
+  one), `:selection` (the selection, so what the layer does stays
+  inside it) or `:delete`.
 
 ```lisp
 (add-layer :hue-saturation :name "Less yellow")
@@ -139,8 +149,10 @@ change.
 
 ## The selection
 
-Every pixel operation acts inside the selection; with no selection
-it acts on the whole layer.  `mode` is `:new` (the default), `:add`,
+Every operation under Pixels and Adjustments acts inside the
+selection; with no selection it acts on the whole layer.  A selection
+operation that would leave nothing selected fails and the selection
+stays, since nothing selected means everything.  `mode` is `:new` (the default), `:add`,
 `:subtract` or `:intersect` (what the old selection and this one both
 cover).
 

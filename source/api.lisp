@@ -264,14 +264,21 @@ layer's :hue :saturation :lightness, a curves layer's :master :red
     (layer-info (index layer))))
 
 (defun set-mask (layer value)
-  "LAYER's mask: :reveal (a white mask), :hide (a black one) or :delete.
+  "LAYER's mask: :reveal (a white mask), :hide (a black one), :selection
+(the selection, so what the layer does stays inside it) or :delete.
 The undo list is emptied.  The layer-info after."
   (let ((layer (layer-of layer)))
-    (gdl:the-object layer (set-mask! (case value
-                                       (:reveal '(:flat :value 255))
-                                       (:hide '(:flat :value 0))
-                                       (:delete nil)
-                                       (t (error "A mask operation is :reveal, :hide or :delete, not ~s." value)))))
+    (if (eql value :selection)
+        (let ((selection (gdl:the-object (doc) selection)))
+          (unless selection (error "Nothing is selected to make a mask from."))
+          (gdl:the-object layer (set-mask! '(:flat :value 0)))
+          (gdl:the-object layer (set-slot! :own-mask (copy-seq (getf selection :mask))))
+          (gdl:the-object layer (set-slot! :mask-version (1+ (gdl:the-object layer mask-version)))))
+        (gdl:the-object layer (set-mask! (case value
+                                           (:reveal '(:flat :value 255))
+                                           (:hide '(:flat :value 0))
+                                           (:delete nil)
+                                           (t (error "A mask operation is :reveal, :hide, :selection or :delete, not ~s." value))))))
     (gdl:the-object (doc) (set-slot! :undo-entries nil))
     (layer-info (index layer))))
 
@@ -287,26 +294,37 @@ The undo list is emptied.  The layer-info after."
 
 (defun selection-result () (list :selection (selection)))
 
+(defun selecting (operation)
+  "OPERATION, a function changing the selection, and the selection's
+bounds.  One that leaves nothing selected is refused and the selection
+stays: nothing selected means everything to the operations after it,
+so a subtraction that took too much would turn a fill on one thing into
+a fill of the whole layer."
+  (let ((before (gdl:the-object (doc) selection)))
+    (funcall operation)
+    (unless (gdl:the-object (doc) selection)
+      (gdl:the-object (doc) (set-slot! :selection before))
+      (error "That would leave nothing selected, which every later operation takes for the whole picture.  The selection stays as it was."))
+    (selection-result)))
+
 (defun select-rect (x y w h &key (mode :new))
   "The W x H rectangle at X, Y selected; MODE :new, :add, :subtract or
 :intersect (what both the old selection and this one cover).  The
 selection's bounds."
-  (stratum::select-rect! (doc) (round x) (round y) (round w) (round h) (mode-key mode))
-  (selection-result))
+  (selecting (lambda () (stratum::select-rect! (doc) (round x) (round y) (round w) (round h) (mode-key mode)))))
 
 (defun select-polygon (points &key (mode :new))
   "The polygon through POINTS, ((x y) ...), selected."
-  (stratum::select-polygon! (doc) points (mode-key mode))
-  (selection-result))
+  (selecting (lambda () (stratum::select-polygon! (doc) points (mode-key mode)))))
 
 (defun select-wand (x y &key (tolerance 32) (contiguous t) (mode :new) layer)
   "The Magic Wand at X, Y: the colors within TOLERANCE of that pixel's,
 contiguous or not, on LAYER (the composite when nil)."
-  (stratum::select-wand! (doc) (round x) (round y)
-                         :tolerance tolerance :contiguous (and contiguous t)
-                         :mode (mode-key mode)
-                         :layer (and layer (layer-of layer)))
-  (selection-result))
+  (selecting (lambda ()
+               (stratum::select-wand! (doc) (round x) (round y)
+                                      :tolerance tolerance :contiguous (and contiguous t)
+                                      :mode (mode-key mode)
+                                      :layer (and layer (layer-of layer))))))
 
 (defun feather (radius)
   "The selection's edge softened over RADIUS pixels."
@@ -325,8 +343,7 @@ contiguous or not, on LAYER (the composite when nil)."
 
 (defun invert-selection ()
   "The selection inverted."
-  (stratum::select-inverse! (doc))
-  (selection-result))
+  (selecting (lambda () (stratum::select-inverse! (doc)))))
 
 ;;; Pixels.
 

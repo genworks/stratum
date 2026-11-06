@@ -233,7 +233,8 @@ void main() {
        ;; adjustment preview (u_adjust_layer, idle at -1): Image >
        ;; Adjustments shown on one layer's pixels, a table (kind 1, three
        ;; rows of u_luts from u_adjust_row) or hue/saturation (kind 2),
-       ;; on the encoded scale, as adjust-layer! will bake it.
+       ;; on the encoded scale, inside the selection, as adjust-layer! will
+       ;; bake it.
        ;; Before both, the floating layer (u_float_layer, idle at -1): a
        ;; Move drag or a Free Transform shown live, the pixel being what
        ;; the cut leaves (alpha times one minus the selection) with the
@@ -282,7 +283,7 @@ void main() {
     adj = srgb_encode(s.rgb);
     if (u_adjust_kind == 1) adj = vec3(lut(u_adjust_row, adj.r), lut(u_adjust_row + 1, adj.g), lut(u_adjust_row + 2, adj.b));
     else adj = hue_saturation(adj, u_adjust_params);
-    s.rgb = srgb_decode(adj);
+    s.rgb = mix(s.rgb, srgb_decode(adj), u_selection_on == 1 ? selected(p) : 1.0);
   }
   a = s.a * u_opacity[~d]~a;
   cb = ao > 0.0 ? co / ao : vec3(0.0);

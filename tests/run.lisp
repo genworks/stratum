@@ -2225,6 +2225,91 @@ stand-in for the model."
                        (= (length (getf answer :results)) 2))
                   (list (length requests) (getf answer :results)))))))))
 
+(defun pixels-changed (a b w box)
+  "How many pixels of A and B (RGBA8, W wide) differ (values inside
+BOX, (x y w h), and outside it)."
+  (destructuring-bind (bx by bw bh) box
+    (let ((inside 0) (outside 0))
+      (dotimes (i (floor (length a) 4) (values inside outside))
+        (let ((x (mod i w)) (y (floor i w)) (o (* 4 i)))
+          (unless (and (= (aref a o) (aref b o)) (= (aref a (+ o 1)) (aref b (+ o 1)))
+                       (= (aref a (+ o 2)) (aref b (+ o 2))))
+            (if (and (<= bx x) (< x (+ bx bw)) (<= by y) (< y (+ by bh)))
+                (incf inside)
+                (incf outside))))))))
+
+(defun test-spills ()
+  "An edit asked for one part of the picture stays there: the bakes
+keep to the selection, a selection cannot silently become everything,
+and an adjustment layer can be confined.  'Lighten her face' lightened
+the whole picture and 'paint the thumb green' turned all of it green."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (w (the-object doc doc-width))
+         (box '(100 50 60 40)))
+    (flet ((layer-bytes () (copy-seq (the-object (the-object doc (layer 0)) pixels)))
+           (picture () (copy-seq (the-object doc (render-cpu)))))
+      (dolist (form '("(levels 0 :gamma 2)" "(hue-saturation 0 :hue 120 :saturation 0.5)"
+                      "(curves 0 :green ((0 0) (0.5 0.8) (1 1)))"))
+        (let ((before (layer-bytes)))
+          (stratum:run-forms (format nil "(select-rect 100 50 60 40) ~a (select-none)" form))
+          (multiple-value-bind (inside outside) (pixels-changed before (layer-bytes) w box)
+            (check (format nil "~a under a selection changes it and nothing else" form)
+                   (and (plusp inside) (zerop outside)) (list inside outside)))
+          (stratum-api:undo)
+          (check "and undo gives the layer back" (equalp before (layer-bytes)))))
+      ;; a soft selection: the bake fades out across its edge
+      (let ((before (layer-bytes)))
+        (stratum:run-forms "(select-rect 100 50 60 40) (feather 8) (levels 0 :gamma 2) (select-none)")
+        (let* ((after (layer-bytes))
+               (o (* 4 (+ 130 (* 70 w))))
+               (e (* 4 (+ 100 (* 70 w)))))
+          (check "a feathered selection takes the bake by degrees"
+                 (< 0 (abs (- (aref after e) (aref before e))) (abs (- (aref after o) (aref before o))))
+                 (list (aref before e) (aref after e) (aref before o) (aref after o)))
+          (stratum-api:undo)))
+      (let ((before (layer-bytes)))
+        (stratum-api:levels 0 :gamma 2)
+        (check "with nothing selected it still takes the whole layer"
+               (multiple-value-bind (inside outside) (pixels-changed before (layer-bytes) w box)
+                 (and (plusp inside) (plusp outside))))
+        (stratum-api:undo))
+      ;; a selection cannot become everything by mistake
+      (stratum-api:select-rect 10 10 20 20)
+      (let ((results (stratum:run-forms "(select-rect 200 150 20 20 :mode :intersect) (fill-selection 0 (0 255 0))")))
+        (check "an intersection with nothing in it is refused, and the fill after it does not run"
+               (and (= (length results) 1) (not (getf (first results) :ok))
+                    (search "leave nothing selected" (getf (first results) :error))
+                    (equal (stratum-api:selection) '(10 10 20 20)))
+               results))
+      (dolist (form '("(select-rect 0 0 320 200 :mode :subtract)" "(select-polygon ((0 0) (320 0) (320 200) (0 200)) :mode :subtract)"))
+        (stratum-api:select-rect 10 10 20 20)
+        (check (format nil "~a is refused" form)
+               (and (not (getf (first (stratum:run-forms form)) :ok))
+                    (equal (stratum-api:selection) '(10 10 20 20)))))
+      (stratum-api:select-all)
+      (check "inverting everything is refused"
+             (and (not (getf (first (stratum:run-forms "(invert-selection)")) :ok))
+                  (stratum-api:selection)))
+      (stratum-api:select-none)
+      (check "select-none still clears" (null (stratum-api:selection)))
+      ;; an adjustment layer confined to the selection
+      (let ((before (picture)))
+        (stratum:run-forms "(select-rect 100 50 60 40) (add-layer :levels :name \"Lighter\") (set-layer \"Lighter\" :gamma 2) (set-mask \"Lighter\" :selection) (select-none)")
+        (multiple-value-bind (inside outside) (pixels-changed before (picture) w box)
+          (check "an adjustment layer with the selection as its mask changes that part alone"
+                 (and (plusp inside) (zerop outside)) (list inside outside)))
+        (check "and has a mask to say so" (getf (stratum-api:layer-info "Lighter") :mask))
+        (stratum-api:add-layer :raster :name "Above")
+        (multiple-value-bind (inside outside) (pixels-changed before (picture) w box)
+          (check "the mask lasts through a change to the stack" (and (plusp inside) (zerop outside))
+                 (list inside outside)))
+        (stratum-api:delete-layer "Above")
+        (stratum-api:delete-layer "Lighter"))
+      (check "a mask from nothing selected is refused"
+             (not (getf (first (stratum:run-forms "(set-mask 0 :selection)")) :ok))))))
+
 (defun prompt-with (doc forms)
   "A prompt on DOC whose model answers FORMS, text, and then nothing."
   (call-with-stub-model
@@ -2336,7 +2421,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

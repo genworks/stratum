@@ -397,34 +397,6 @@ MONOCHROME, else one per channel; alpha untouched."
                    (v (+ (aref pixels (+ o c)) (* scale (- (* 2d0 r) 1d0)))))
               (setf (aref out (+ o c)) (unit->byte (/ v 255d0))))))))))
 
-(defun blend-by-selection! (pixels filtered width height selection)
-  "PIXELS replaced by FILTERED where SELECTION covers, blended by its
-coverage in premultiplied linear light; everywhere without one."
-  (if (null selection)
-      (replace pixels filtered)
-      (let ((mask (getf selection :mask))
-            (decode *srgb-decode*))
-        (declare (type (simple-array (unsigned-byte 8) (*)) pixels filtered mask)
-                 (type (simple-array double-float (256)) decode))
-        (dotimes (i (* width height) pixels)
-          (let ((s (/ (float (aref mask i) 1d0) 255d0)))
-            (when (> s 0d0)
-              (let* ((o (* 4 i))
-                     (a0 (/ (float (aref pixels (+ o 3)) 1d0) 255d0))
-                     (a1 (/ (float (aref filtered (+ o 3)) 1d0) 255d0))
-                     (a (+ (* a0 (- 1d0 s)) (* a1 s))))
-                (flet ((channel (k)
-                         (/ (+ (* a0 (- 1d0 s) (aref decode (aref pixels (+ o k))))
-                               (* a1 s (aref decode (aref filtered (+ o k)))))
-                            a)))
-                  (if (> a 0d0)
-                      (setf (aref pixels o) (unit->byte (linear->srgb (channel 0)))
-                            (aref pixels (+ o 1)) (unit->byte (linear->srgb (channel 1)))
-                            (aref pixels (+ o 2)) (unit->byte (linear->srgb (channel 2)))
-                            (aref pixels (+ o 3)) (unit->byte a))
-                      (setf (aref pixels o) 0 (aref pixels (+ o 1)) 0
-                            (aref pixels (+ o 2)) 0 (aref pixels (+ o 3)) 0))))))))))
-
 (defun filter-layer! (layer kind &key settings)
   "Bake the filter KIND into raster LAYER inside the selection, with
 SETTINGS a plist: :gaussian-blur (:radius), :unsharp-mask (:radius

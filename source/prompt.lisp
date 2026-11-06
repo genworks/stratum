@@ -400,7 +400,7 @@ the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document, and what its forms did one undo, however
 it ended (brush.lisp), unless they remade the document, which like
 Image > Crop has no undo.  WHO is the invitee, for the prompt log.  A
-plist for the page: :reply :forms :results :ok :declined :usage :width
+plist for the page: :reply :forms :results :ok :declined :stopped :usage :width
 :height."
   (let ((name (the-object doc doc-name))
         (began (get-internal-real-time))
@@ -458,6 +458,7 @@ plist for the page: :reply :forms :results :ok :declined :usage :width
                                             (getf answer :results))
                            :ok (getf answer :ok)
                            :declined (getf answer :declined)
+                           :stopped (and (getf answer :stopped) t)
                            :usage (getf answer :usage)
                            :width (the-object doc doc-width)
                            :height (the-object doc doc-height)))))
@@ -473,7 +474,7 @@ plist for the page: :reply :forms :results :ok :declined :usage :width
                          :effort (sexp-agent:agent-effort *agent*)
                          :seconds (round (elapsed-ms began) 1000)
                          :rounds (getf answer :rounds)
-                         :failure failure
+                         :failure (or failure (getf answer :stopped))
                          :outcome outcome)
                    picture (reverse looks) after)))))
 
@@ -490,6 +491,7 @@ plist for the page: :reply :forms :results :ok :declined :usage :width
                                   'vector)
                 "ok" (json-bool (getf result :ok))
                 "declined" (json-bool (getf result :declined))
+                "stopped" (json-bool (getf result :stopped))
                 "usage" (let ((usage (getf result :usage)))
                           (json-object "input" (getf usage :input 0) "output" (getf usage :output 0)))
                 "width" (getf result :width)

@@ -39,13 +39,14 @@
 ;; agent).  From the image when it has them as Stratum needs them --
 ;; the last name of each entry is a function the image's copy must
 ;; have, when there is one: sexp-agent learned to send pictures back to
-;; the model, and to say when it declines, after the first images
+;; the model, to say when it declines and to keep a request within its
+;; limit, after the first images
 ;; carried it -- else the one file
 ;; from a Gendl checkout beside this one, or wherever INVITE_GATE_FILE
 ;; and SEXP_AGENT_FILE point.  An image with an older copy and no file
 ;; to be found keeps its copy.
 (dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
-                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "DECLINED-WORDS")))
+                (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "TRIMMED-PICTURES")))
   (destructuring-bind (package variable name proof) need
     (unless (and (find-package package)
                  (or (null proof)

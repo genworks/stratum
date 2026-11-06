@@ -2087,7 +2087,7 @@ why) what a refusal is: HTTP 200, stop_reason refusal, no text."
 (defun call-with-stub-model (replies fn)
   "FN called with an agent whose model is a stand-in on a server of its
 own, answering REPLIES, texts, in turn (an empty block when they run
-out), and with a function answering the requests it has had, parsed,
+out; (:bad-request message) answers 400), and with a function answering the requests it has had, parsed,
 oldest first."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
@@ -2102,10 +2102,17 @@ oldest first."
             :path "/messages" :server server :content-type "application/json"
             :function (lambda (req ent)
                         (push (yason:parse (gwl:request-body-text req)) requests)
-                        (net.aserve:with-http-response (req ent :content-type "application/json")
-                          (net.aserve:with-http-body (req ent)
-                            (write-string (stub-model-reply (or (pop replies) (format nil "```lisp~%```")))
-                                          (net.aserve:request-reply-stream req))))))
+                        (let* ((reply (or (pop replies) (format nil "```lisp~%```")))
+                               (bad? (and (consp reply) (eq (first reply) :bad-request))))
+                          (net.aserve:with-http-response (req ent :content-type "application/json"
+                                                                  :response (if bad?
+                                                                                net.aserve:*response-bad-request*
+                                                                                net.aserve:*response-ok*))
+                            (net.aserve:with-http-body (req ent)
+                              (write-string (if bad?
+                                                (format nil "{\"error\":{\"message\":~s}}" (second reply))
+                                                (stub-model-reply reply))
+                                            (net.aserve:request-reply-stream req)))))))
            (funcall fn agent (lambda () (reverse requests))))
       (net.aserve:shutdown :server server))))
 
@@ -2398,6 +2405,67 @@ log that cannot be written costs nobody their prompt."
                       (getf (prompt-with doc "(select-none)") :ok))))
         (setf *prompt-log-directory* nil)
         (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))))))
+
+(defun test-long-prompt ()
+  "A prompt whose pictures outgrow a request drops the oldest, and one
+whose later call fails keeps what it did and says so."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (look (format nil "Looking.~%```lisp~%(look 0 0 100 100)~%```")))
+    (flet ((ask (&rest replies)
+             (let (seen answer)
+               (call-with-stub-model
+                replies
+                (lambda (agent requests)
+                  (let ((*agent* agent))
+                    (setf answer (prompt-document doc "do something")
+                          seen (funcall requests)))))
+               (values answer seen)))
+           (images (request)
+             (loop for message in (gethash "messages" request)
+                   for content = (gethash "content" message)
+                   when (consp content)
+                     sum (count "image" content :key (lambda (b) (gethash "type" b)) :test #'equal)))
+           (words (request)
+             (format nil "~{~a~}"
+                     (loop for message in (gethash "messages" request)
+                           for content = (gethash "content" message)
+                           if (stringp content) collect content
+                           else append (loop for b in content
+                                             when (equal (gethash "type" b) "text")
+                                               collect (gethash "text" b))))))
+      (multiple-value-bind (answer seen) (ask look look)
+        (check "with room, every picture goes on every round"
+               (and (getf answer :ok) (equal (mapcar #'images seen) '(1 2 3))) seen))
+      (multiple-value-bind (answer seen)
+          (let ((sexp-agent:*max-picture-characters* 1)) (ask look look))
+        (check "past the limit only the newest goes, and the prompt goes on"
+               (and (getf answer :ok) (equal (mapcar #'images seen) '(1 1 1))
+                    (= 1 (length (last-user-content (car (last seen))))))
+               seen)
+        (check "and the model is told what was left out"
+               (search "left out" (words (car (last seen))))))
+      (multiple-value-bind (answer seen)
+          (ask (format nil "Selecting.~%```lisp~%(select-rect 10 10 20 20)~%(look 0 0 100 100)~%```")
+               '(:bad-request "the request body is too big"))
+        (declare (ignore seen))
+        (check "a later call failing: what ran stands, and the reply says what stopped it"
+               (and (equal (stratum-api:selection) '(10 10 20 20))
+                    (search "Selecting." (getf answer :reply))
+                    (search "too big" (getf answer :reply))
+                    (getf answer :stopped) (not (getf answer :ok))
+                    (= 2 (length (getf answer :results))))
+               answer)
+        (check "and the page hears it"
+               (eq (gethash "stopped" (yason:parse (prompt-json answer))) t)))
+      (multiple-value-bind (answer seen) (ask (format nil "Fine.~%```lisp~%(selection)~%```"))
+        (declare (ignore answer))
+        (check "the next prompt remembers the stopped one"
+               (and (search "Selecting." (words (first seen)))
+                    (search "too big" (words (first seen)))))
+        (stratum-api:undo)
+        (check "and the stopped prompt is one undo like any other" (null (stratum-api:selection)))))))
 
 (defun test-declined ()
   "The model declining reads as that, not as a blank turn: on the first
@@ -2731,7 +2799,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-generate
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

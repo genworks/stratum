@@ -409,7 +409,7 @@ selected) moved DX, DY."
 (defun copy (layer)
   "The selection on raster LAYER copied to the clipboard; its size."
   (stratum::copy-selection! (raster-layer-of layer))
-  (list :clipboard (list :width (getf stratum::*clipboard* :w) :height (getf stratum::*clipboard* :h))))
+  (list :clipboard (list :width (getf (stratum::clipboard) :w) :height (getf (stratum::clipboard) :h))))
 
 (defun cut (layer)
   "The selection on raster LAYER copied to the clipboard and cleared."
@@ -419,7 +419,7 @@ selected) moved DX, DY."
 (defun paste (&optional above)
   "The clipboard as a new raster layer above layer ABOVE, or on top;
 its layer-info."
-  (unless stratum::*clipboard* (error "The clipboard is empty."))
+  (unless (stratum::clipboard) (error "The clipboard is empty."))
   (layer-info (stratum::paste-clipboard! (doc) (and above (index (layer-of above))))))
 
 ;;; Adjustments and filters, baked into a raster layer's pixels.

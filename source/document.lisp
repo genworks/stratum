@@ -42,6 +42,31 @@
 ;;; spec still holds the very array (and source) the stamp was given
 ;;; for, so a spec copied and given other pixels can never keep it.
 
+;;; Sessions.  Two browsers open the same sample as two documents, and
+;;; each tester's work is its own: a session holds a documents table, the
+;;; clipboard, and when it was last touched.  *session* is the one a
+;;; request runs on (bound in web.lisp and in a prompt job); the shared
+;;; session is for Lisp callers and requests with no id.
+
+(defstruct (session (:conc-name sess-) (:constructor %make-session))
+  (table (make-hash-table :test 'equal))
+  (touched (get-universal-time))
+  clipboard)
+
+(defvar *shared-session* (%make-session)
+  "The session of Lisp callers and requests with no id.")
+
+(defvar *session* *shared-session*
+  "The session the current request runs on.")
+
+(defun clipboard ()
+  "What Copy or Cut last put on the current session's clipboard, an
+editor's clipboard that every document of the session shares."
+  (sess-clipboard *session*))
+
+(defun (setf clipboard) (value)
+  (setf (sess-clipboard *session*) value))
+
 (defvar *content-stamp* (* 1000 (get-universal-time))
   "The last content stamp given out.")
 

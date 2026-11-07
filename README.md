@@ -118,7 +118,7 @@ offset, from the textures already on the GPU, with the ants moving
 along; on release the server does the same arithmetic once
 (`move-pixels!`), the selection moves with the pixels, and the layer
 comes back whole. Copy and Cut keep the selection's pixels on the
-server's clipboard, shared by every document; Paste makes a new layer
+session's clipboard, shared by its documents; Paste makes a new layer
 of them above the active one, where they came from, or centered when
 they do not fit.
 
@@ -223,11 +223,12 @@ twin is `composite-mask-stroke!`, and undo covers mask strokes too.
 
 Documents belong to sessions. The page keeps a session id in the
 browser's own storage and sends it on every call, and the server
-keeps a table of documents per session, so two browsers opening
-"demo" get two documents and one's edits never show in the other. A
-call without a session id reaches the shared pool, which Lisp callers
-and the earlier API use as before. A session idle for four hours is
-forgotten with its documents. The Window menu lists the session's open
+keeps a table of documents and a clipboard per session, so two
+browsers opening "demo" get two documents and one's edits never show
+in the other, and what one copies the other cannot paste. A call
+without a session id reaches the shared pool, which Lisp callers and
+the earlier API use as before. A session idle for four hours is
+forgotten with its documents and its clipboard. The Window menu lists the session's open
 documents, the current one checked.
 
 Image ▸ Image Rotation turns or flips the whole document: 180°, 90°
@@ -601,7 +602,9 @@ It checks:
   copied, and bumps the version; in Grayscale it paints gray; a
   cropped document starts its history at the cropped state;
 - sessions: each session has its own documents and no session is the
-  shared pool; an idle session is swept and comes back empty;
+  shared pool; each has its own clipboard, and a prompt job pastes from
+  its own session's and no other; an idle session is swept and comes
+  back empty;
 - Image ▸ Mode: a color turns to its luminance gray with its alpha
   kept; Grayscale turns every raster layer gray in one undo entry and
   rebuilds nothing; in Grayscale a red stroke, a red fill and a
@@ -786,8 +789,8 @@ The self-test checks:
   pixel under it equal to the history composite's, parity, and undo
   twice gives the layer back;
 - sessions: the page has a session id, a document made here is listed
-  for this session and not for another nor for the shared pool, and
-  Close drops it;
+  for this session and not for another nor for the shared pool, Close
+  drops it, and what this session copied another session cannot paste;
 - Image ▸ Mode ▸ Grayscale on the document: every pixel of a layer and
   the swatches turn gray, the Mode menu checks Grayscale, parity holds,
   and one undo brings the color and the mode back exactly;

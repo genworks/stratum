@@ -569,9 +569,9 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
              *prompt-jobs*)
     (dolist (id gone) (remhash id *prompt-jobs*))))
 
-(defun start-prompt-job! (documents doc prompt session &optional who forms)
-  "The prompt started on its own thread, FORMS in place of a model's
-when given; the job's id."
+(defun start-prompt-job! (home doc prompt session &optional who forms)
+  "The prompt started on its own thread in session HOME, whose id is
+SESSION, FORMS in place of a model's when given; the job's id."
   (let ((id (format nil "~36r~36r" (get-universal-time) (random (expt 36 6) (make-random-state t)))))
     (bt:with-lock-held (*prompt-jobs-lock*)
       (sweep-prompt-jobs!)
@@ -579,7 +579,8 @@ when given; the job's id."
     (bt:make-thread
      (lambda ()
        (let ((outcome (handler-case
-                          (let ((*documents* documents)
+                          (let ((*session* home)
+                                (*documents* (sess-table home))
                                 (*prompt-progress*
                                   (lambda (note)
                                     (bt:with-lock-held (*prompt-jobs-lock*)
@@ -629,14 +630,14 @@ wrong, as the other doors answer."
                      (prompt (and (hash-table-p body) (gethash "prompt" body)))
                      (settings (and (hash-table-p body) (gethash "generate" body)))
                      (session (net.aserve:request-query-value "s" req))
-                     (documents nil)
+                     (home nil)
                      (doc nil))
                 (unless (and (stringp prompt) (plusp (length (string-trim '(#\Space #\Newline #\Tab) prompt))))
                   (error "The prompt is empty."))
                 (bt:with-lock-held (*lock*)
-                  (setf documents (request-session-table req))
-                  (let ((*documents* documents)) (setf doc (request-doc req))))
-                (setf result (json-string (json-object "job" (start-prompt-job! documents doc prompt session
+                  (setf home (request-session req))
+                  (let ((*session* home) (*documents* (sess-table home))) (setf doc (request-doc req))))
+                (setf result (json-string (json-object "job" (start-prompt-job! home doc prompt session
                                                                                    (invitee req)
                                                                                    (and (hash-table-p settings)
                                                                                         (generation-forms settings prompt)))))))))

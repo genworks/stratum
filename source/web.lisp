@@ -27,9 +27,9 @@
                    :defaults base)))
 
 (defvar *sessions* (make-hash-table :test 'equal)
-  "Session id -> (documents-table . last-touched universal time).  A
-browser keeps its id in its own storage and sends it as ?s= on every
-call, so two browsers opening \"demo\" get two documents.")
+  "Session id -> its session (document.lisp).  A browser keeps its id in
+its own storage and sends it as ?s= on every call, so two browsers
+opening \"demo\" get two documents and two clipboards.")
 
 (defparameter *session-idle-seconds* (* 4 3600)
   "A session untouched this long is forgotten, documents and all.")
@@ -40,7 +40,9 @@ call, so two browsers opening \"demo\" get two documents.")
 (defun sweep-sessions! ()
   "Forget every session idle longer than *session-idle-seconds*."
   (let ((now (get-universal-time)) (gone '()))
-    (maphash (lambda (id cell) (when (> (- now (cdr cell)) *session-idle-seconds*) (push id gone))) *sessions*)
+    (maphash (lambda (id session)
+               (when (> (- now (sess-touched session)) *session-idle-seconds*) (push id gone)))
+             *sessions*)
     (dolist (id gone) (remhash id *sessions*))
     gone))
 
@@ -117,16 +119,16 @@ Returns what it did, or nil."
                               (the-object doc (set-slot! :redo-entries nil)))
                             table)))
             (drop-history *documents*)
-            (maphash (lambda (id cell) (declare (ignore id)) (drop-history (car cell))) *sessions*)
+            (maphash (lambda (id session) (declare (ignore id)) (drop-history (sess-table session))) *sessions*)
             (push :undo-dropped done)
             (full-gc)
             (loop while (and (> (heap-used-fraction) *heap-high-water*)
                              (> (hash-table-count *sessions*) 0))
                   do (let ((oldest nil) (when-touched nil))
-                       (maphash (lambda (id cell)
+                       (maphash (lambda (id session)
                                   (unless (equal id keep-id)
-                                    (when (or (null when-touched) (< (cdr cell) when-touched))
-                                      (setf oldest id when-touched (cdr cell)))))
+                                    (when (or (null when-touched) (< (sess-touched session) when-touched))
+                                      (setf oldest id when-touched (sess-touched session)))))
                                 *sessions*)
                        (unless oldest (return))
                        (remhash oldest *sessions*)
@@ -134,21 +136,25 @@ Returns what it did, or nil."
                        (full-gc))))
           (nreverse done))))))
 
-(defun session-table (id)
-  "The documents table of session ID, made on first sight and touched
-now; the shared pool for no id.  A touch also sweeps idle sessions and,
-when the heap is short, relieves it (relieve-memory!)."
+(defun session-for (id)
+  "The session of ID, made on first sight and touched now; the shared
+session for no id.  A touch also sweeps idle sessions and, when the heap
+is short, relieves it (relieve-memory!)."
   (if (or (null id) (string= id ""))
-      *documents*
-      (let ((cell (or (gethash id *sessions*)
-                      (setf (gethash id *sessions*) (cons (make-hash-table :test 'equal) 0)))))
-        (setf (cdr cell) (get-universal-time))
+      *shared-session*
+      (let ((session (or (gethash id *sessions*)
+                         (setf (gethash id *sessions*) (%make-session)))))
+        (setf (sess-touched session) (get-universal-time))
         (sweep-sessions!)
         (relieve-memory! id)
-        (car cell))))
+        session)))
 
-(defun request-session-table (req)
-  (session-table (net.aserve:request-query-value "s" req)))
+(defun session-table (id)
+  "The documents table of session ID; the shared pool for no id."
+  (sess-table (session-for id)))
+
+(defun request-session (req)
+  (session-for (net.aserve:request-query-value "s" req)))
 
 (defun find-document (name)
   "The session's document NAME, a sample made on first sight; its
@@ -455,7 +461,7 @@ Paste the new layer as handle-layers does."
     (json-string
      (cond ((equal op "copy")
             (copy-selection! layer)
-            (json-object "clipboard" (json-object "w" (getf *clipboard* :w) "h" (getf *clipboard* :h))))
+            (json-object "clipboard" (json-object "w" (getf (clipboard) :w) "h" (getf (clipboard) :h))))
            ((equal op "cut")
             (rect-json doc layer :layer (cut-selection! layer)))
            ((equal op "paste")
@@ -1191,7 +1197,8 @@ layer."
 (defun serve-door (req ent content-type fn &key pack)
   (reply req ent content-type
          (lambda ()
-           (let ((*documents* (request-session-table req)))
+           (let* ((*session* (request-session req))
+                  (*documents* (sess-table *session*)))
              (funcall fn req)))
          :pack pack))
 

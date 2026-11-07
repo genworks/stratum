@@ -4554,6 +4554,17 @@
         return fetchJSON(apiFor(made, 'close'), { method: 'POST' });
       }).then(function () { return fetchJSON(api('documents')); }).then(function (r) {
         check('Close drops it from the session', r.documents.indexOf(made) < 0, r.documents);
+        // What this session copied is not on another's clipboard.
+        var raster = doc.layers.filter(function (L) { return L.kind === 'raster'; })[0];
+        return postJSON('clipboard', JSON.stringify({ op: 'copy', layer: raster.index }));
+      }).then(function (copied) {
+        check('Copy fills this session\'s clipboard', copied.clipboard.w > 0, copied);
+        return fetch('/stratum/api/clipboard?doc=parity&s=' + encodeURIComponent(other),
+                     { method: 'POST', body: JSON.stringify({ op: 'paste' }) });
+      }).then(function (res) {
+        return res.text().then(function (text) {
+          check('another session cannot paste it', !res.ok && /clipboard is empty/i.test(text), { status: res.status, text: text.slice(0, 200) });
+        });
       });
     }).then(function () {
       // Image > Mode > Grayscale on the document: every raster layer

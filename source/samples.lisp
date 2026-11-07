@@ -106,11 +106,11 @@ with BACKGROUND, :white, :transparent or an (r g b) list."
 ;;; load meets no forward reference: CI compiles each file in its own
 ;;; unit and fails on the warning one would raise.
 
-(defvar *documents* (make-hash-table :test 'equal)
+(defvar *documents* (sess-table *shared-session*)
   "The documents of the session being served, by name.  Bound around
-every request to its session's table (request-session-table, web.lisp);
-the global value is the shared pool, which a request without a session
-(?s=) and Lisp callers use.")
+every request to its session's table (serve-door, web.lisp); the global
+value is the shared session's, which a request without a session (?s=)
+and Lisp callers use.")
 
 (defun unique-document-name (name)
   "NAME, or NAME-2, NAME-3 ... when a document or a sample already has it."

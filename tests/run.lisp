@@ -1454,6 +1454,65 @@ asked, one undo like a prompt; and the picture as a generator's input."
                        answer)
                 (stratum-api:undo))))))))))
 
+(defun test-generate-references ()
+  "A model that cannot be shown a picture: what the generator is sent,
+and what the person hears.  The replies have sd-server's own shape."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*)))
+    (flet ((capabilities (name references)
+             (format nil "{\"model\":{\"name\":~s,\"path\":\"\",\"stem\":\"\"},~
+                         \"generation_features\":{\"ref_images\":~:[false~;true~],\"img2img\":~:[false~;true~]}}"
+                     name references (plusp (length name))))
+           (with-stub (capabilities fn)
+             (call-with-stub-generator
+              (lambda (generator seen)
+                (let ((*generator* generator))
+                  (funcall fn generator (lambda () (first (car (last (funcall seen))))))))
+              :capabilities capabilities)))
+      (with-stub (capabilities "sdxl.safetensors" nil)
+        (lambda (generator last-body)
+          (check "a model with no reference path says so" (eq (generator-references generator) :no))
+          (check "and the planner is told" (search "cannot be shown a picture" (generator-state)))
+          (let ((info (stratum-api:generate-picture "in oils" :name "Oils" :strength 0.4))
+                (body (funcall last-body)))
+            (check "such a model starts from the picture, not from the words alone"
+                   (and (gethash "init_image" body) (null (gethash "ref_images" body))
+                        (< 0.39 (gethash "strength" body) 0.41)))
+            (check "and the answer says which happened"
+                   (search "started from the picture" (getf info :note)) info))
+          (stratum-api:delete-layer "Oils")
+          (let ((answer (prompt-document doc "in oils"
+                                         :forms "(generate-picture \"in oils\" :name \"Oils\")")))
+            (check "the person who asked hears it too"
+                   (and (getf answer :ok) (search "started from the picture" (getf answer :reply)))
+                   answer))
+          (stratum-api:undo)
+          (let ((info (stratum-api:generate-picture "in oils" :name "Oils" :reference nil)))
+            (check "a starting point asked for needs no word" (null (getf info :note)) info))
+          (stratum-api:delete-layer "Oils")))
+      (with-stub (capabilities "klein.gguf" t)
+        (lambda (generator last-body)
+          (check "a model with a reference path says so" (eq (generator-references generator) :yes))
+          (let ((info (stratum-api:generate-picture "in oils" :name "Oils"))
+                (body (funcall last-body)))
+            (check "and is shown the picture, with nothing to add"
+                   (and (gethash "ref_images" body) (null (gethash "init_image" body))
+                        (null (getf info :note)))
+                   info))
+          (stratum-api:delete-layer "Oils")))
+      (dolist (case (list (capabilities "" nil) nil))
+        (with-stub case
+          (lambda (generator last-body)
+            (check "nothing loaded, or no answer, is not a model with no reference path"
+                   (null (generator-references generator)))
+            (let ((info (stratum-api:generate-picture "in oils" :name "Oils"))
+                  (body (funcall last-body)))
+              (check "it goes as asked, and says it could not tell"
+                     (and (gethash "ref_images" body) (search "did not say" (getf info :note)))
+                     info))
+            (stratum-api:delete-layer "Oils")))))))
+
 (defun with-exif (jpeg orientation &key big-endian)
   "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."
   (flet ((u16 (v) (if big-endian (list (ash v -8) (logand v 255)) (list (logand v 255) (ash v -8))))
@@ -2910,13 +2969,15 @@ leaving an empty turn to break the next request."
         (check "an ordinary answer is not declined"
                (and (getf answer :ok) (not (getf answer :declined))) answer)))))
 
-(defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)) paint)
+(defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)) paint
+                                         capabilities)
   "FN called with a generator on a server of its own, a stand-in for
 sd-server's job API: a job is accepted with STATUS and is then JOB-STATE
 at its second asking, with a picture of COLOR at the size asked -- or
 of PAINT, a function of (w h init), INIT the picture it was sent or nil,
-answering RGBA.  And with a function answering what it has seen: (body
-lock-free?) each, oldest first."
+answering RGBA.  CAPABILITIES, a string, is the answer to asking what
+it can do; with none it has no such door.  And with a function answering
+what it has seen: (body lock-free?) each, oldest first."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
          (seen '())
@@ -2951,6 +3012,13 @@ lock-free?) each, oldest first."
                                net.aserve:*response-internal-server-error*)
                            (object "id" "j1" "kind" "img_gen" "status" "queued"
                                    "poll_url" "/sdcpp/v1/jobs/j1")))))
+      (when capabilities
+        (net.aserve:publish
+         :path "/sdcpp/v1/capabilities" :server server :content-type "application/json"
+         :function (lambda (req ent)
+                     (net.aserve:with-http-response (req ent :content-type "application/json")
+                       (net.aserve:with-http-body (req ent)
+                         (write-string capabilities (net.aserve:request-reply-stream req)))))))
       (net.aserve:publish
        :path "/sdcpp/v1/jobs/j1" :server server :content-type "application/json"
        :function (lambda (req ent)
@@ -3232,7 +3300,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -166,6 +166,27 @@ the picture, (values pixels w h).  Errors say what a person can act on."
 (defun require-generator ()
   (or *generator* (error "This server has no image generator.")))
 
+(defun generator-references (generator)
+  "Whether GENERATOR's loaded model can be shown a picture: :yes, :no, or
+nil when it cannot be told.  Asked for each generation, since the model
+can be changed behind us.  A server with nothing loaded answers with
+every feature false, which says nothing about any model, so a model's
+name comes first."
+  (let* ((reply (ignore-errors (generator-get generator "/sdcpp/v1/capabilities")))
+         (features (and (hash-table-p reply) (gethash "generation_features" reply)))
+         (model (and (hash-table-p reply) (gethash "model" reply)))
+         (name (and (hash-table-p model) (gethash "name" model))))
+    (when (and (hash-table-p features) (stringp name) (plusp (length name)))
+      (if (gethash "ref_images" features) :yes :no))))
+
+(defun generator-state ()
+  "What this server can do about pictures, for the model that plans."
+  (cond ((null *generator*)
+         "has no image generator: generate-fill, generate-layer and generate-picture will fail")
+        ((eq (generator-references *generator*) :no)
+         "has an image generator whose model cannot be shown a picture: generate-picture starts from the picture, by :strength, and its prompt describes the result")
+        (t "has an image generator")))
+
 (defun faded-coverage (coverage w h)
   "COVERAGE, W x H bytes, fading to nothing at its edge over about a
 fiftieth of its longer side.  A generator's idea of the surroundings is
@@ -323,11 +344,20 @@ top of it, the picture's shape.  With REFERENCE the model is shown the
 picture and PROMPT reads as an instruction: said to keep the composition,
 it does.  With none it starts from the picture with STRENGTH of noise,
 0 to 1, and PROMPT describes the result: 0.3 keeps the pose and little
-of the style, 0.6 redraws the subject.  Slow: a minute or so.  The
-layer's layer-info."
-  (let ((generator (require-generator))
-        (doc (stratum-api::doc))
-        dw dh sw sh body)
+of the style, 0.6 redraws the subject.  A model that cannot be shown a
+picture would answer from the words alone and say nothing, so with one
+of those it starts from the picture all the same.  Slow: a minute or so.
+The layer's layer-info, with a :note when REFERENCE did not go as asked."
+  (let* ((generator (require-generator))
+         (doc (stratum-api::doc))
+         (takes (and reference (generator-references generator)))
+         (reference (and reference (not (eq takes :no))))
+         (note (cond (reference
+                      (unless takes
+                        "The image generator did not say whether its model can be shown a picture, so it may have worked from the words alone."))
+                     ((eq takes :no)
+                      (format nil "This model cannot be shown a picture, so it started from the picture, with ~,2f of noise." strength))))
+         dw dh sw sh body)
     (bt:with-lock-held (*lock*)
       (setf dw (the-object doc doc-width)
             dh (the-object doc doc-height))
@@ -337,7 +367,8 @@ layer's layer-info."
                        (generator-body generator prompt seed sw sh :reference picture)
                        (generator-body generator prompt seed sw sh :image picture :strength strength)))))
     (multiple-value-bind (pixels w h) (ask-generator generator body)
-      (whole-layer! doc pixels w h name))))
+      (let ((info (whole-layer! doc pixels w h name)))
+        (if note (append info (list :note note)) info)))))
 
 (defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer stratum-api:generate-picture)
   "The operations run-forms calls without the lock, which they take for

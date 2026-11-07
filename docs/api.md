@@ -138,9 +138,10 @@ the operations above, which are exact and immediate.
   composition, pose and framing".  Without those last words it redraws
   the subject in a pose of its own.  With `:reference nil` it starts from
   the picture with `:strength` of noise, 0 to 1, default 0.35: 0.3 keeps
-  the pose and little of a new style, 0.6 redraws the subject.  The
-  result is a megapixel or so, scaled up: fine detail of a large
-  photograph is lost.
+  the pose and little of a new style, 0.6 redraws the subject.  A model
+  that cannot be shown a picture starts from it in either case, and the
+  answer's `:note` says so.  The result is a megapixel or so, scaled up:
+  fine detail of a large photograph is lost.
 
 `prompt` is a description of the result in plain visual words, not an
 instruction: "weathered stone wall in soft afternoon light", not "make

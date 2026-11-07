@@ -413,6 +413,11 @@ PROMPT painted with no model between it and the generator."
                    prompt name seed changed?))
           (t (error "Generate from ~s is not something this server knows." source)))))
 
+(defun result-note (result)
+  "What the form of RESULT had to say beyond its value, or nil."
+  (let ((value (getf result :value)))
+    (and (consp value) (ignore-errors (getf value :note)))))
+
 (defun prompt-document (doc prompt &key session who forms)
   "PROMPT done to DOC: the document described, pictured and sent with
 the prompt to the model; its forms run under the lock on DOC; the
@@ -455,15 +460,18 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                          (let ((results (mapcar (lambda (r)
                                                   (list* :form (sexp-agent:form-string *agent* (getf r :form)) r))
                                                 results)))
-                           (list :reply (if passed "Generated with no planner." "")
+                           (list :reply (cond ((not passed) "")
+                                              ((some #'result-note results)
+                                               (format nil "~{~a~^ ~}" (remove nil (mapcar #'result-note results))))
+                                              (t "Generated with no planner."))
                                  :forms (mapcar (lambda (r) (getf r :form)) results)
                                  :results results
                                  :ok passed
                                  :rounds 0
                                  :assistant forms)))
                        (sexp-agent:ask *agent* prompt
-                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~:[has no image generator: generate-fill, generate-layer and generate-picture will fail~;has an image generator~]."
-                                                           state (picture-note picture) *generator*)
+                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~a."
+                                                           state (picture-note picture) (generator-state))
                                        :image-png (picture-png picture)
                                        :session-id (and session (format nil "stratum-~a" session))
                                        :history history

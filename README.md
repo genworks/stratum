@@ -396,7 +396,7 @@ The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,
 as unavailable commands do. Built so far: File ▸ New (Ctrl+N), Open
-(Ctrl+O), Open Sample, Place, Place Gendl Drawing, Save (Ctrl+S), Save As PNG
+(Ctrl+O), Open from Clipboard, Open Sample, Place, Place Gendl Drawing, Save (Ctrl+S), Save As PNG
 (Ctrl+Shift+S), Save As OpenRaster, Export As PNG and Close; Edit ▸
 Undo (Ctrl+Z), Redo (Ctrl+Shift+Z or Ctrl+Y), Cut (Ctrl+X), Copy
 (Ctrl+C), Paste (Ctrl+V), Fill (Shift+F5), Clear (Delete) and Free

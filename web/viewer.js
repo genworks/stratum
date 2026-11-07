@@ -171,8 +171,6 @@
     });
   }
 
-  // Pixels go up one layer at a time, so only one layer's bytes are in
-  // flight at once (a 4K layer is 33 MB).
   // What the layer and mask textures hold, by texture index: the content
   // stamp of each (pixelStamp and maskStamp in the document's JSON).
   // Equal stamps are equal bytes, so after any change only content new
@@ -316,6 +314,21 @@
       });
   }
 
+  // TASKS, functions answering promises, at most LIMIT at a time.  A
+  // page's first load is a round trip a layer through whatever is in
+  // front of the server, so they overlap; no more than this, since each
+  // layer of a photograph is 72 MB once it is here.
+  var FETCHES_AT_ONCE = 4;
+  function atOnce(tasks, limit) {
+    var next = 0, workers = [];
+    function worker() {
+      if (next >= tasks.length) return Promise.resolve();
+      return tasks[next++]().then(worker);
+    }
+    for (var k = 0; k < Math.min(limit, tasks.length); k++) workers.push(worker());
+    return Promise.all(workers);
+  }
+
   function uploadPixels() {
     var w = doc.width, h = doc.height, want = wantedStamps(doc);
     held = { w: 0, h: 0, rasters: [], masks: [] };
@@ -324,33 +337,33 @@
     texLayers = arrayTexture(gl.SRGB8_ALPHA8, w, h, doc.rasterCount);
     texMasks = arrayTexture(gl.R8, w, h, doc.maskCount);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    var chain = Promise.resolve();
-    for (var i = 0; i < doc.rasterCount; i++) {
-      chain = chain.then((function (i) {
-        return function () {
-          status('loading layer ' + (i + 1) + ' of ' + doc.rasterCount);
-          var url = api('raster?i=' + i);
-          return takeStashed(url, w * h * 4).then(function (kept) {
-            if (kept) S.stashed++;
-            return kept || fetchPixels(url);
-          }).then(function (bytes) {
-            gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
-            gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
-          });
-        };
-      })(i));
+    var tasks = [], arrived = 0;
+    status('loading layers');
+    function raster(i) {
+      return function () {
+        var url = api('raster?i=' + i);
+        return takeStashed(url, w * h * 4).then(function (kept) {
+          if (kept) S.stashed++;
+          return kept || fetchPixels(url);
+        }).then(function (bytes) {
+          gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
+          gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+          arrived++;
+          status('loaded layer ' + arrived + ' of ' + doc.rasterCount);
+        });
+      };
     }
-    for (var j = 0; j < doc.maskCount; j++) {
-      chain = chain.then((function (j) {
-        return function () {
-          return fetchPixels(api('mask?i=' + j)).then(function (bytes) {
-            gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
-            gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, gl.RED, gl.UNSIGNED_BYTE, bytes);
-          });
-        };
-      })(j));
+    function mask(j) {
+      return function () {
+        return fetchPixels(api('mask?i=' + j)).then(function (bytes) {
+          gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
+          gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, gl.RED, gl.UNSIGNED_BYTE, bytes);
+        });
+      };
     }
-    return chain.then(function () {
+    for (var i = 0; i < doc.rasterCount; i++) tasks.push(raster(i));
+    for (var j = 0; j < doc.maskCount; j++) tasks.push(mask(j));
+    return atOnce(tasks, FETCHES_AT_ONCE).then(function () {
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, texLayers);
       gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, texMasks);
@@ -2550,6 +2563,39 @@
     });
   };
 
+  // File > Open from Clipboard.  What was copied can be several things
+  // at once, a picture among them.  The browser asks the person once;
+  // it needs https, or localhost.
+  S.readClipboard = function () { return navigator.clipboard.read(); };
+
+  S.clipboardFile = function () {
+    return S.readClipboard().then(function (items) {
+      for (var i = 0; i < items.length; i++) {
+        var types = items[i].types.filter(function (t) { return /^image\//.test(t); });
+        if (types.length) {
+          return items[i].getType(types[0]).then(function (blob) {
+            return new File([blob], 'clipboard.' + types[0].split('/')[1], { type: types[0] });
+          });
+        }
+      }
+      return null;
+    });
+  };
+
+  S.openClipboard = function () {
+    if (!(navigator.clipboard && navigator.clipboard.read)) {
+      S.notice('Could not read the clipboard', 'This browser does not let a page read pictures from the clipboard here. Save the picture to a file and use File > Open.');
+      return Promise.resolve(null);
+    }
+    return S.clipboardFile().then(function (file) {
+      if (file) return S.openFile(file);
+      S.notice('Nothing to open', 'There is no picture on the clipboard. Copy one, then try again.');
+      return null;
+    }).catch(function (e) {
+      S.notice('Could not read the clipboard', plainError(e));
+    });
+  };
+
   // The open's account in words: 'opened in 21.4 s: decode 1.1, pack
   // 2.5, send 9.3 (15.2 MB; the server read it in 8.8 and worked 0.4),
   // keep 0.3, load 1.2 (pixels kept)'.  Load is the page that came
@@ -2730,6 +2776,7 @@
       { title: 'File', items: [
         { label: 'New...', key: 'Ctrl+N', run: function () { S.openNew(); } },
         { label: 'Open...', key: 'Ctrl+O', run: function () { chooseFile(S.openFile); } },
+        { label: 'Open from Clipboard', run: function () { S.openClipboard(); } },
         { label: 'Open Sample', sub: ['demo', 'parity', 'stress'].map(function (n) {
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + n; } }; }) },
         '-',
@@ -3783,6 +3830,24 @@
                 d.width === w && d.height === h && d.layers.length === 1 && d.layers[0].name === 'Background',
                 { doc: res.doc, width: d.width, height: d.height, layers: d.layers.length });
           return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
+        });
+      }).then(function () {
+        // What was copied, as the browser hands it over: a picture may
+        // come among other things, or not at all.
+        var read = S.readClipboard;
+        function words() { return { types: ['text/plain'], getType: function () { return Promise.resolve(new Blob(['words'])); } }; }
+        S.readClipboard = function () {
+          return Promise.resolve([words(), { types: ['text/html', 'image/png'], getType: function () { return Promise.resolve(pngBlob); } }]);
+        };
+        return S.clipboardFile().then(function (file) {
+          check('Open from Clipboard finds the picture among what was copied',
+                file && file.type === 'image/png' && file.size === pngBlob.size && /^clipboard/.test(file.name),
+                file && { type: file.type, name: file.name });
+          S.readClipboard = function () { return Promise.resolve([words()]); };
+          return S.clipboardFile();
+        }).then(function (file) {
+          check('and finds none in words alone', file === null, file);
+          S.readClipboard = read;
         });
       }).then(function () {
         // A JPEG sent as the file: the server's decode is the page's, by

@@ -25,9 +25,15 @@
   "Held to look in *pixel-cache* or add to it, never while a generator
 runs.")
 
+(defvar *packed-pixels* (make-hash-table :test 'eq)
+  "Each array in the pixel cache -> (step . its packing), or nil before
+it is asked for.  What the cache holds is never painted, so its packing
+holds too (packed-once, web.lisp).  Under *pixel-cache-lock*.")
+
 (defun clear-pixel-cache ()
   (bt:with-lock-held (*pixel-cache-lock*)
-    (clrhash *pixel-cache*)))
+    (clrhash *pixel-cache*)
+    (clrhash *packed-pixels*)))
 
 (defun cached-pixels (key make)
   "The pixels under KEY, from MAKE, a function, on the first asking.
@@ -37,7 +43,8 @@ the one both keep."
       (let ((pixels (funcall make)))
         (bt:with-lock-held (*pixel-cache-lock*)
           (or (gethash key *pixel-cache*)
-              (setf (gethash key *pixel-cache*) pixels))))))
+              (progn (setf (gethash pixels *packed-pixels*) nil)
+                     (setf (gethash key *pixel-cache*) pixels)))))))
 
 (defun make-rgba (w h)
   (make-array (* w h 4) :element-type '(unsigned-byte 8) :initial-element 0))

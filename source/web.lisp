@@ -1208,6 +1208,31 @@ on: the document as it was, and past the invite gate, to whoever has
 the address."
   (setf (net.aserve:reply-header-slot-value req :cache-control) "no-store"))
 
+(defun packed-once (octets step)
+  "OCTETS packed by STEP, kept when they are the pixel cache's, which
+never change: every session's demo sends the same bytes."
+  (multiple-value-bind (kept cached?)
+      (bt:with-lock-held (*pixel-cache-lock*) (gethash octets *packed-pixels*))
+    (if (and kept (eql (car kept) step))
+        (cdr kept)
+        (let ((packed (pack-pixels octets step)))
+          (when cached?
+            (bt:with-lock-held (*pixel-cache-lock*)
+              (setf (gethash octets *packed-pixels*) (cons step packed))))
+          packed))))
+
+(defun warm-samples! ()
+  "The default document's layers and masks made and packed, for the
+first visitor after a start.  What fails here is left for that visitor
+to meet, in words."
+  (handler-case
+      (let ((doc (make-sample-document "demo")))
+        (dolist (layer (the-object doc raster-layers))
+          (packed-once (the-object layer pixels) 4))
+        (dolist (layer (the-object doc masked-layers))
+          (packed-once (the-object layer mask-pixels) 0)))
+    (serious-condition () nil)))
+
 (defun reply (req ent content-type thunk &key pack)
   "Run THUNK under *lock*, then send its string or octets; a failure
 goes back as a 500 carrying the condition's text.  With PACK, a step,
@@ -1223,7 +1248,7 @@ layer."
         (serious-condition (e) (setf failure (princ-to-string e)))))
     (when (and pack (not failure)
                (equal (net.aserve:request-query-value "enc" req :post nil) "d"))
-      (handler-case (setf result (pack-pixels result pack))
+      (handler-case (setf result (packed-once result pack))
         (serious-condition (e) (setf failure (princ-to-string e)))))
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)
@@ -1399,4 +1424,5 @@ a worker lost for good."
       (pub "/stratum/api/load" "application/json" #'handle-load :upload? t)
       (pub "/stratum/api/save.ora" "image/openraster"
            (lambda (req) (document-ora-octets (request-doc req))))
-      (dolist (publisher *stratum-publishers*) (funcall publisher server host)))))
+      (dolist (publisher *stratum-publishers*) (funcall publisher server host))))
+  (bt:make-thread #'warm-samples! :name "stratum warm"))

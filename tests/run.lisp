@@ -1574,6 +1574,31 @@ selection reaches: a long narrow selection is filled nearly to its edge."
                (and (zerop (alpha faded 99 200))
                     (every #'<= faded coverage)))))))
 
+(defun test-first-load ()
+  "What the first load of the default document leans on: a generated
+layer is packed once, and a person's own pixels never are kept."
+  (clear-pixel-cache)
+  (let* ((pixels (generate-pixels '(:solid :color (9 8 7) :alpha 255) 64 64))
+         (own (copy-seq pixels))
+         (once (packed-once pixels 4)))
+    (check "a generated layer's packing is made once, and is the same bytes"
+           (and (eq once (packed-once pixels 4)) (equalp once (pack-pixels pixels 4))))
+    (check "asked by another step it is packed by that step"
+           (equalp (packed-once pixels 0) (pack-pixels pixels 0)))
+    (check "an array of a person's own is packed afresh each time"
+           (let ((one (packed-once own 4)))
+             (and (equalp one (pack-pixels own 4)) (not (eq one (packed-once own 4))))))
+    (clear-pixel-cache)
+    (check "clearing the cache forgets the packings"
+           (zerop (hash-table-count *packed-pixels*))))
+  (warm-samples!)
+  (let ((doc (make-sample-document "demo")))
+    (check "warming leaves every layer and mask of the default document packed"
+           (and (every (lambda (l) (gethash (the-object l pixels) *packed-pixels*))
+                       (the-object doc raster-layers))
+                (every (lambda (l) (gethash (the-object l mask-pixels) *packed-pixels*))
+                       (the-object doc masked-layers))))))
+
 (defun with-exif (jpeg orientation &key big-endian)
   "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."
   (flet ((u16 (v) (if big-endian (list (ash v -8) (logand v 255)) (list (logand v 255) (ash v -8))))
@@ -3361,7 +3386,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

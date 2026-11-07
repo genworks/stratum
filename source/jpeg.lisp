@@ -27,12 +27,16 @@
   "Whether the library is loaded: true, nil, or :unknown before the
 first asking.")
 
+(defvar *turbojpeg-lock* (bt:make-lock "stratum turbojpeg")
+  "Held to load the library, which two sessions may ask for at once.")
+
 (defun turbojpeg? ()
   "Whether this server can read a JPEG."
-  (when (eq *turbojpeg* :unknown)
-    (setf *turbojpeg* (handler-case (progn (cffi:load-foreign-library *turbojpeg-file*) t)
-                        (error () nil))))
-  *turbojpeg*)
+  (bt:with-lock-held (*turbojpeg-lock*)
+    (when (eq *turbojpeg* :unknown)
+      (setf *turbojpeg* (handler-case (progn (cffi:load-foreign-library *turbojpeg-file*) t)
+                          (error () nil))))
+    *turbojpeg*))
 
 (defun jpeg-octets-p (octets)
   (and (> (length octets) 3)

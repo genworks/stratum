@@ -43,13 +43,18 @@
 ;;; for, so a spec copied and given other pixels can never keep it.
 
 ;;; Sessions.  Two browsers open the same sample as two documents, and
-;;; each tester's work is its own: a session holds a documents table, the
-;;; clipboard, and when it was last touched.  *session* is the one a
-;;; request runs on (bound in web.lisp and in a prompt job); the shared
-;;; session is for Lisp callers and requests with no id.
+;;; each tester's work is its own: a session holds a documents table, a
+;;; lock, the clipboard, and when it was last touched.  Sessions share no
+;;; document, so they run in parallel.  Gendl's referencing needs no lock
+;;; of ours; a session's lock keeps an edit's steps together (pixels
+;;; changed in place, the undo lists, a prompt's journal) and keeps a
+;;; read from meeting them half done.  *session* is the one a request
+;;; runs on (bound in web.lisp and in a prompt job); the shared session
+;;; is for Lisp callers and requests with no id.
 
 (defstruct (session (:conc-name sess-) (:constructor %make-session))
   (table (make-hash-table :test 'equal))
+  (lock (bt:make-lock "stratum session"))
   (touched (get-universal-time))
   clipboard)
 
@@ -70,8 +75,13 @@ editor's clipboard that every document of the session shares."
 (defvar *content-stamp* (* 1000 (get-universal-time))
   "The last content stamp given out.")
 
+(defvar *content-stamp-lock* (bt:make-lock "stratum stamps")
+  "Held to give out a stamp: sessions run in parallel, and incf is not
+one step.")
+
 (defun next-content-stamp ()
-  (incf *content-stamp*))
+  (bt:with-lock-held (*content-stamp-lock*)
+    (incf *content-stamp*)))
 
 (defun without-stamps (spec)
   "SPEC less its content stamps, which hold the arrays themselves: for

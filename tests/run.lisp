@@ -1803,6 +1803,131 @@ has a decoder."
     (remhash "test-a" *sessions*)
     (remhash "test-b" *sessions*)))
 
+(defun test-session-locks ()
+  "Sessions run in parallel behind real doors, a session's own requests
+stay in order, and what they share stands two threads at once."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 4 :host "127.0.0.1"))
+         (nothing (make-array 0 :element-type '(unsigned-byte 8)))
+         (old-gate *gate*)
+         (held nil) (release nil) (followed nil))
+    (flet ((post (path) (raw-post port path nothing "application/octet-stream"))
+           (await (test)
+             (loop repeat 400 until (funcall test) do (sleep 0.05))
+             (funcall test))
+           (at-once (count fn)
+             ;; FN of an index in COUNT threads; their answers, or the
+             ;; words of what stopped them
+             (let ((answers (make-array count :initial-element nil)))
+               (mapc #'bt:join-thread
+                     (loop for i below count
+                           collect (let ((i i))
+                                     (bt:make-thread
+                                      (lambda ()
+                                        (setf (aref answers i)
+                                              (handler-case (funcall fn i)
+                                                (serious-condition (e) (princ-to-string e)))))
+                                      :name "stratum test"))))
+               (coerce answers 'list))))
+      (unwind-protect
+           (progn
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (publish-door server nil "/hold" "application/json"
+                           (lambda (req) (declare (ignore req))
+                             (setf held *session*)
+                             (loop repeat 400 until release do (sleep 0.05))
+                             "{}"))
+             (publish-door server nil "/quick" "application/json"
+                           (lambda (req) (declare (ignore req)) "{}"))
+             (let ((holder (bt:make-thread (lambda () (post "/hold?s=locks-a")) :name "stratum test"))
+                   (follower nil))
+               (await (lambda () held))
+               (check "a door runs on its session's lock, not a shared one"
+                      (and held (eq held (gethash "locks-a" *sessions*))
+                           (not (session-idle? held)) (session-idle? *shared-session*)))
+               (check "one session's long request does not stop another's"
+                      (eql (first (post "/quick?s=locks-b")) 200))
+               (setf follower (bt:make-thread (lambda () (post "/quick?s=locks-a") (setf followed t))
+                                              :name "stratum test"))
+               (sleep 0.3)
+               (check "the session's own next request waits its turn" (not followed))
+               (setf release t)
+               (bt:join-thread holder)
+               (bt:join-thread follower)
+               (check "and is served once the first is done" followed))
+             (let* ((session (session-for "locks-c"))
+                    (doc (with-session (session) (find-document "parity")))
+                    (id (bt:with-lock-held (*lock*)
+                          (start-prompt-job! session doc "paste" "locks-c" nil "(paste)"))))
+               (check "a prompt job runs on its session's lock, not the shared one"
+                      (bt:with-lock-held (*lock*)
+                        (await (lambda ()
+                                 (equal "done" (gethash "status" (yason:parse (prompt-job-json id)))))))))
+             (let* ((spec '(:solid :color (10 20 30)))
+                    (answers (progn (clear-pixel-cache)
+                                    (at-once 8 (lambda (i)
+                                                 (dotimes (n 200) (generate-pixels spec (+ 8 n) (+ 8 i)))
+                                                 (generate-pixels spec 64 64))))))
+               (check "threads asking the pixel cache at once all hold the one copy"
+                      (and (typep (first answers) '(simple-array (unsigned-byte 8) (*)))
+                           (every (lambda (a) (eq a (first answers))) answers))
+                      (remove-if-not #'stringp answers)))
+             (let ((stamps (at-once 8 (lambda (i)
+                                        (declare (ignore i))
+                                        (loop repeat 5000 collect (next-content-stamp))))))
+               (check "content stamps stay unique across threads"
+                      (let ((seen (make-hash-table)))
+                        (dolist (some stamps) (dolist (stamp some) (setf (gethash stamp seen) t)))
+                        (= (hash-table-count seen) 40000))))
+             (let* ((one (render-checksum "parity+stroke"))
+                    (answers (at-once 4 (lambda (i)
+                                          (declare (ignore i))
+                                          (with-session ((%make-session))
+                                            (render-checksum "parity+stroke"))))))
+               (check "four sessions making, painting and rendering at once get what one gets"
+                      (every (lambda (a) (eql a one)) answers)
+                      answers)))
+        (setf release t *gate* old-gate)
+        (dolist (id '("locks-a" "locks-b" "locks-c")) (remhash id *sessions*))
+        (net.aserve:shutdown :server server))))
+  ;; relief, where the Lisp can say how full the heap is
+  (when (heap-used-fraction)
+    (let* ((*sessions* (make-hash-table :test 'equal))
+           (*shared-session* (%make-session))
+           (*heap-high-water* 0.0)
+           (idle (%make-session)) (busy (%make-session)) (mine (%make-session))
+           (stop nil))
+      (flet ((doc-in (session id)
+               (setf (gethash id *sessions*) session)
+               (let ((doc (make-sample-document "parity")))
+                 (the-object doc (set-slot! :undo-entries (list :mark)))
+                 (setf (gethash "parity" (sess-table session)) doc)))
+             (relieve (keep)
+               (bt:with-lock-held (*sessions-lock*) (relieve-memory! keep))))
+        (let* ((idle-doc (doc-in idle "idle"))
+               (busy-doc (doc-in busy "busy"))
+               (mine-doc (doc-in mine "mine"))
+               (worker (bt:make-thread (lambda ()
+                                         (bt:with-lock-held ((sess-lock busy))
+                                           (loop repeat 2000 until stop do (sleep 0.01))))
+                                       :name "stratum test"))
+               (done (progn (loop repeat 400 while (session-idle? busy) do (sleep 0.01))
+                            (relieve mine))))
+          (check "relief drops an idle session's history and forgets it"
+                 (and (null (the-object idle-doc undo-entries)) (null (gethash "idle" *sessions*))))
+          (check "relief passes over a session at work, without waiting for it"
+                 (and (the-object busy-doc undo-entries) (eq busy (gethash "busy" *sessions*))))
+          (check "the session asking comes last: kept, and its history goes only when nothing else is left"
+                 (and (eq mine (gethash "mine" *sessions*))
+                      (null (the-object mine-doc undo-entries))
+                      (eql (car (last done)) :own-undo-dropped))
+                 done)
+          (relieve busy)
+          (check "a session at work keeps its history even when it is the one asking"
+                 (the-object busy-doc undo-entries))
+          (setf stop t)
+          (bt:join-thread worker))))))
+
 (defun test-threads ()
   (let* ((doc (make-sample-document "parity"))
          (threaded (let ((*render-threads* 8)) (the-object doc (render-cpu))))
@@ -3107,7 +3232,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

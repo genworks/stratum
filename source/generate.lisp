@@ -341,5 +341,5 @@ layer's layer-info."
 
 (defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer stratum-api:generate-picture)
   "The operations run-forms calls without the lock, which they take for
-themselves: a generation would hold every other request up for a
-minute.")
+themselves: a generation would hold up the session's other requests
+for a minute.")

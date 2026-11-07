@@ -18,9 +18,26 @@
 ;; that repeats a source holds one copy of its pixels.
 ;;
 
-(defvar *pixel-cache* (make-hash-table :test 'equal))
+(defvar *pixel-cache* (make-hash-table :test 'equal)
+  "What the generators made, shared by every session.")
 
-(defun clear-pixel-cache () (clrhash *pixel-cache*))
+(defvar *pixel-cache-lock* (bt:make-lock "stratum pixel cache")
+  "Held to look in *pixel-cache* or add to it, never while a generator
+runs.")
+
+(defun clear-pixel-cache ()
+  (bt:with-lock-held (*pixel-cache-lock*)
+    (clrhash *pixel-cache*)))
+
+(defun cached-pixels (key make)
+  "The pixels under KEY, from MAKE, a function, on the first asking.
+Two sessions asking at once may both make them; the first to finish is
+the one both keep."
+  (or (bt:with-lock-held (*pixel-cache-lock*) (gethash key *pixel-cache*))
+      (let ((pixels (funcall make)))
+        (bt:with-lock-held (*pixel-cache-lock*)
+          (or (gethash key *pixel-cache*)
+              (setf (gethash key *pixel-cache*) pixels))))))
 
 (defun make-rgba (w h)
   (make-array (* w h 4) :element-type '(unsigned-byte 8) :initial-element 0))
@@ -85,28 +102,26 @@ PIXELS (WIDTH wide, CHANNELS bytes a pixel) at X, Y."
 
 (defun generate-pixels (spec w h)
   "RGBA8 pixels for the raster SPEC, (generator &key ...)."
-  (let ((key (list :rgba spec w h)))
-    (or (gethash key *pixel-cache*)
-        (setf (gethash key *pixel-cache*)
-              (destructuring-bind (kind &rest args) spec
-                (ecase kind
-                  (:solid (apply #'gen-solid w h args))
-                  (:gradient (apply #'gen-gradient w h args))
-                  (:discs (apply #'gen-discs w h args))
-                  (:clouds (apply #'gen-clouds w h args))
-                  (:stripes (apply #'gen-stripes w h args))
-                  (:drawing (apply #'gen-drawing w h args))))))))
+  (cached-pixels (list :rgba spec w h)
+                 (lambda ()
+                   (destructuring-bind (kind &rest args) spec
+                     (ecase kind
+                       (:solid (apply #'gen-solid w h args))
+                       (:gradient (apply #'gen-gradient w h args))
+                       (:discs (apply #'gen-discs w h args))
+                       (:clouds (apply #'gen-clouds w h args))
+                       (:stripes (apply #'gen-stripes w h args))
+                       (:drawing (apply #'gen-drawing w h args)))))))
 
 (defun generate-mask (spec w h)
   "One byte a pixel for the mask SPEC, (generator &key ...)."
-  (let ((key (list :mask spec w h)))
-    (or (gethash key *pixel-cache*)
-        (setf (gethash key *pixel-cache*)
-              (destructuring-bind (kind &rest args) spec
-                (ecase kind
-                  (:flat (apply #'mask-flat w h args))
-                  (:radial (apply #'mask-radial w h args))
-                  (:linear (apply #'mask-linear w h args))))))))
+  (cached-pixels (list :mask spec w h)
+                 (lambda ()
+                   (destructuring-bind (kind &rest args) spec
+                     (ecase kind
+                       (:flat (apply #'mask-flat w h args))
+                       (:radial (apply #'mask-radial w h args))
+                       (:linear (apply #'mask-linear w h args)))))))
 
 (defun lcg (seed)
   "A deterministic source of doubles in [0,1): the same SEED draws the

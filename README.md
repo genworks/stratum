@@ -223,9 +223,11 @@ twin is `composite-mask-stroke!`, and undo covers mask strokes too.
 
 Documents belong to sessions. The page keeps a session id in the
 browser's own storage and sends it on every call, and the server
-keeps a table of documents and a clipboard per session, so two
-browsers opening "demo" get two documents and one's edits never show
-in the other, and what one copies the other cannot paste. A call
+keeps a table of documents, a clipboard and a lock per session, so
+two browsers opening "demo" get two documents and one's edits never
+show in the other, what one copies the other cannot paste, and one's
+long filter does not hold up the other's stroke: sessions run in
+parallel, and a session's own requests one at a time. A call
 without a session id reaches the shared pool, which Lisp callers and
 the earlier API use as before. A session idle for four hours is
 forgotten with its documents and its clipboard. The Window menu lists the session's open
@@ -605,6 +607,13 @@ It checks:
   shared pool; each has its own clipboard, and a prompt job pastes from
   its own session's and no other; an idle session is swept and comes
   back empty;
+- session locks: a long request on one session leaves another's
+  answered and the session's own next request waiting its turn; a
+  prompt job runs on its session's lock; the pixel cache and the
+  content stamps stand eight threads at once; four sessions making,
+  painting and rendering at once get what one gets; memory relief
+  passes over a session at work and comes to the asking session's undo
+  last;
 - Image ▸ Mode: a color turns to its luminance gray with its alpha
   kept; Grayscale turns every raster layer gray in one undo entry and
   rebuilds nothing; in Grayscale a red stroke, a red fill and a

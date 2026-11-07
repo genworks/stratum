@@ -29,16 +29,25 @@
 (defvar *sessions* (make-hash-table :test 'equal)
   "Session id -> its session (document.lisp).  A browser keeps its id in
 its own storage and sends it as ?s= on every call, so two browsers
-opening \"demo\" get two documents and two clipboards.")
+opening \"demo\" get two documents, two clipboards and two locks.")
+
+(defvar *sessions-lock* (bt:make-lock "stratum sessions")
+  "Held to look up, make, sweep or relieve sessions.  A request takes it
+before its session's lock and lets it go first; while it is held a
+session's lock is only ever tried, never waited for, so no two threads
+can wait on each other.")
 
 (defparameter *session-idle-seconds* (* 4 3600)
   "A session untouched this long is forgotten, documents and all.")
 
-(defvar *lock* (bt:make-lock "stratum")
-  "Held around every request: one GDL tree, many server threads.")
+(defvar *lock* (sess-lock *shared-session*)
+  "The lock of the session being served: with-session binds it around
+each request and prompt job, and this global value is the shared
+session's, for Lisp callers.")
 
 (defun sweep-sessions! ()
-  "Forget every session idle longer than *session-idle-seconds*."
+  "Forget every session idle longer than *session-idle-seconds*.  Under
+*sessions-lock*."
   (let ((now (get-universal-time)) (gone '()))
     (maphash (lambda (id session)
                (when (> (- now (sess-touched session)) *session-idle-seconds*) (push id gone)))
@@ -101,60 +110,92 @@ hundred megabytes, and garbage counts as use until it is collected.")
     (when (and used (> used *form-high-water*))
       (full-gc))))
 
-(defun relieve-memory! (keep-id)
+(defun session-idle? (session)
+  "True when no request is at work in SESSION, found without waiting."
+  (when (bt:acquire-lock (sess-lock session) nil)
+    (bt:release-lock (sess-lock session))
+    t))
+
+(defun drop-history! (session)
+  "SESSION's undo and redo lists dropped, unless a request has its lock:
+that one is passed over, not waited for.  True when they went."
+  (when (bt:acquire-lock (sess-lock session) nil)
+    (unwind-protect
+         (progn
+           (maphash (lambda (name doc)
+                      (declare (ignore name))
+                      (the-object doc (set-slot! :undo-entries nil))
+                      (the-object doc (set-slot! :redo-entries nil)))
+                    (sess-table session))
+           t)
+      (bt:release-lock (sess-lock session)))))
+
+(defun relieve-memory! (keep)
   "When the heap is above *heap-high-water*: collect first, since the
 measure counts garbage not yet collected, and if it is still above,
-drop every document's undo and redo lists, collect, and while still
-above forget the sessions touched longest ago, except KEEP-ID's.
-Returns what it did, or nil."
+drop the undo and redo lists of every session but KEEP, collect, while
+still above forget the sessions touched longest ago, and last of all
+drop KEEP's lists.  A session with a request at work is passed over,
+not waited for.  Under *sessions-lock*.  Returns what it did, or nil."
   (let ((before (heap-used-fraction)))
     (when (and before (> before *heap-high-water*))
       (full-gc)
       (when (> (heap-used-fraction) *heap-high-water*)
-        (let ((done (list :collected)))
-          (flet ((drop-history (table)
-                   (maphash (lambda (name doc)
-                              (declare (ignore name))
-                              (the-object doc (set-slot! :undo-entries nil))
-                              (the-object doc (set-slot! :redo-entries nil)))
-                            table)))
-            (drop-history *documents*)
-            (maphash (lambda (id session) (declare (ignore id)) (drop-history (sess-table session))) *sessions*)
-            (push :undo-dropped done)
-            (full-gc)
-            (loop while (and (> (heap-used-fraction) *heap-high-water*)
-                             (> (hash-table-count *sessions*) 0))
-                  do (let ((oldest nil) (when-touched nil))
-                       (maphash (lambda (id session)
-                                  (unless (equal id keep-id)
-                                    (when (or (null when-touched) (< (sess-touched session) when-touched))
-                                      (setf oldest id when-touched (sess-touched session)))))
-                                *sessions*)
-                       (unless oldest (return))
-                       (remhash oldest *sessions*)
-                       (push (list :session-forgotten oldest) done)
-                       (full-gc))))
+        (let ((done (list :collected)) (passed '()))
+          (drop-history! *shared-session*)
+          (maphash (lambda (id session)
+                     (declare (ignore id))
+                     (unless (eq session keep) (drop-history! session)))
+                   *sessions*)
+          (push :undo-dropped done)
+          (full-gc)
+          (loop while (> (heap-used-fraction) *heap-high-water*)
+                do (let ((oldest nil) (when-touched nil))
+                     (maphash (lambda (id session)
+                                (unless (or (eq session keep) (member id passed :test #'equal))
+                                  (when (or (null when-touched) (< (sess-touched session) when-touched))
+                                    (setf oldest id when-touched (sess-touched session)))))
+                              *sessions*)
+                     (unless oldest (return))
+                     (cond ((session-idle? (gethash oldest *sessions*))
+                            (remhash oldest *sessions*)
+                            (push (list :session-forgotten oldest) done)
+                            (full-gc))
+                           (t (push oldest passed)))))
+          (when (and (> (heap-used-fraction) *heap-high-water*) (drop-history! keep))
+            (push :own-undo-dropped done)
+            (full-gc))
           (nreverse done))))))
 
 (defun session-for (id)
   "The session of ID, made on first sight and touched now; the shared
 session for no id.  A touch also sweeps idle sessions and, when the heap
-is short, relieves it (relieve-memory!)."
+is short, relieves it (relieve-memory!).  Asked before the session's
+lock is taken, and never with one held."
   (if (or (null id) (string= id ""))
       *shared-session*
-      (let ((session (or (gethash id *sessions*)
-                         (setf (gethash id *sessions*) (%make-session)))))
-        (setf (sess-touched session) (get-universal-time))
-        (sweep-sessions!)
-        (relieve-memory! id)
-        session)))
+      (bt:with-lock-held (*sessions-lock*)
+        (let ((session (or (gethash id *sessions*)
+                           (setf (gethash id *sessions*) (%make-session)))))
+          (setf (sess-touched session) (get-universal-time))
+          (sweep-sessions!)
+          (relieve-memory! session)
+          session))))
 
 (defun session-table (id)
   "The documents table of session ID; the shared pool for no id."
   (sess-table (session-for id)))
 
 (defun request-session (req)
-  (session-for (net.aserve:request-query-value "s" req)))
+  (session-for (net.aserve:request-query-value "s" req :post nil)))
+
+(defmacro with-session ((session) &body body)
+  "BODY with SESSION's clipboard, documents and lock the current ones.
+The lock is not taken."
+  `(let* ((*session* ,session)
+          (*documents* (sess-table *session*))
+          (*lock* (sess-lock *session*)))
+     ,@body))
 
 (defun find-document (name)
   "The session's document NAME, a sample made on first sight; its
@@ -1168,7 +1209,7 @@ the address."
   (setf (net.aserve:reply-header-slot-value req :cache-control) "no-store"))
 
 (defun reply (req ent content-type thunk &key pack)
-  "Run THUNK under the lock, then send its string or octets; a failure
+  "Run THUNK under *lock*, then send its string or octets; a failure
 goes back as a 500 carrying the condition's text.  With PACK, a step,
 the octets are pixels and go packed to a page that asks (?enc=d, see
 pack-pixels): outside the lock, a second or so for a photograph's
@@ -1195,12 +1236,15 @@ layer."
                   (write-sequence result s))))))))
 
 (defun serve-door (req ent content-type fn &key pack)
-  (reply req ent content-type
-         (lambda ()
-           (let* ((*session* (request-session req))
-                  (*documents* (sess-table *session*)))
-             (funcall fn req)))
-         :pack pack))
+  "FN answers REQ on its session, found before any lock is taken: one
+session's long filter does not stop another's stroke."
+  (let ((session nil) (failure nil))
+    (handler-case (setf session (request-session req))
+      (serious-condition (e) (setf failure (princ-to-string e))))
+    (if failure
+        (reply-text req ent net.aserve:*response-internal-server-error* failure)
+        (with-session (session)
+          (reply req ent content-type (lambda () (funcall fn req)) :pack pack)))))
 
 (defun serve-upload (req ent content-type fn)
   "Read the body, outside the lock since a slow link can take minutes

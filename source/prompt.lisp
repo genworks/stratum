@@ -394,12 +394,33 @@ cannot be written must not cost anyone their prompt."
         (let ((*print-readably* nil))
           (format *error-output* "~&[stratum] prompt log: ~a~%" e))))))
 
-(defun prompt-document (doc prompt &key session who)
+(defun generation-forms (settings prompt)
+  "The forms for the Generate dialog's SETTINGS, a table from the page:
+PROMPT painted with no model between it and the generator."
+  (let* ((source (gethash "source" settings))
+         (name (let ((n (gethash "name" settings))) (if (and (stringp n) (plusp (length n))) n "Generated")))
+         (seed (let ((s (gethash "seed" settings))) (if (integerp s) s -1)))
+         (reference? (gethash "reference" settings))
+         (strength (let ((s (gethash "strength" settings))) (if (realp s) (max 0.05d0 (min 1d0 (float s 1d0))) 0.35d0)))
+         (changed? (not (eq (gethash "keepAll" settings) t))))
+    (cond ((equal source "new")
+           (format nil "(generate-layer ~s :name ~s :seed ~d)" prompt name seed))
+          ((equal source "picture")
+           (format nil "(generate-picture ~s :name ~s :seed ~d :strength ~,2f :reference ~:[nil~;t~])"
+                   prompt name seed strength (eq reference? t)))
+          ((equal source "selection")
+           (format nil "(generate-fill ~s :name ~s :seed ~d :keep ~:[:all~;:changed~])"
+                   prompt name seed changed?))
+          (t (error "Generate from ~s is not something this server knows." source)))))
+
+(defun prompt-document (doc prompt &key session who forms)
   "PROMPT done to DOC: the document described, pictured and sent with
 the prompt to the model; its forms run under the lock on DOC; the
 turn kept on the document, and what its forms did one undo, however
 it ended (brush.lisp), unless they remade the document, which like
-Image > Crop has no undo.  WHO is the invitee, for the prompt log.  A
+Image > Crop has no undo.  With FORMS, a string, those run and no model
+is asked: everything else is the same.  WHO is the invitee, for the
+prompt log.  A
 plist for the page: :reply :forms :results :ok :declined :stopped :changed :usage :width
 :height."
   (let ((name (the-object doc doc-name))
@@ -416,31 +437,44 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
             journal (begin-prompt-journal! doc)))
     (unwind-protect
          (handler-bind ((serious-condition (lambda (e) (setf failure (princ-to-string e)))))
-           (setf answer
-                 (sexp-agent:ask *agent* prompt
-                                 :state-text (format nil "~a~%The picture with this message is ~a~%This server ~:[has no image generator: generate-fill and generate-layer will fail~;has an image generator~]."
-                                                     state (picture-note picture) *generator*)
-                                 :image-png (picture-png picture)
-                                 :session-id (and session (format nil "stratum-~a" session))
-                                 :history history
-                                 ;; a form that remade the document (crop, a
-                                 ;; resize) registered the new one under the
-                                 ;; name: each round runs on the one there now
-                                 :runner (lambda (code)
-                                           (multiple-value-bind (results passed)
-                                               (run-forms code (or (gethash name *documents*) doc))
-                                             (incf ran (length results))
-                                             (when (some #'changing-result? results) (setf changed t))
-                                             (funcall *prompt-progress* (format nil "~d form~:p run" ran))
-                                             (values results passed)))
-                                 :looks *prompt-looks*
-                                 :picture-of (lambda (value)
-                                               (when (picture-p value)
-                                                 (push value looks)
-                                                 (values (picture-png value) (picture-note value))))
-                                 ;; a Gendl whose sexp-agent has no looks yet
-                                 ;; runs the forms and stops there
-                                 :allow-other-keys t))
+           (let ((runner
+                   ;; a form that remade the document (crop, a resize)
+                   ;; registered the new one under the name: each round
+                   ;; runs on the one there now
+                   (lambda (code)
+                     (multiple-value-bind (results passed)
+                         (run-forms code (or (gethash name *documents*) doc))
+                       (incf ran (length results))
+                       (when (some #'changing-result? results) (setf changed t))
+                       (funcall *prompt-progress* (format nil "~d form~:p run" ran))
+                       (values results passed)))))
+             (setf answer
+                   (if forms
+                       (multiple-value-bind (results passed) (funcall runner forms)
+                         (let ((results (mapcar (lambda (r)
+                                                  (list* :form (sexp-agent:form-string *agent* (getf r :form)) r))
+                                                results)))
+                           (list :reply (if passed "Generated with no planner." "")
+                                 :forms (mapcar (lambda (r) (getf r :form)) results)
+                                 :results results
+                                 :ok passed
+                                 :rounds 0
+                                 :assistant forms)))
+                       (sexp-agent:ask *agent* prompt
+                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~:[has no image generator: generate-fill, generate-layer and generate-picture will fail~;has an image generator~]."
+                                                           state (picture-note picture) *generator*)
+                                       :image-png (picture-png picture)
+                                       :session-id (and session (format nil "stratum-~a" session))
+                                       :history history
+                                       :runner runner
+                                       :looks *prompt-looks*
+                                       :picture-of (lambda (value)
+                                                     (when (picture-p value)
+                                                       (push value looks)
+                                                       (values (picture-png value) (picture-note value))))
+                                       ;; a Gendl whose sexp-agent has no looks yet
+                                       ;; runs the forms and stops there
+                                       :allow-other-keys t))))
            (bt:with-lock-held (*lock*)
              (let ((doc (or (gethash name *documents*) doc)))
                (the-object doc (set-slot! :prompt-log
@@ -471,8 +505,8 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
           (setf after (after-picture (or (gethash name *documents*) doc))))
         (log-turn! (list :who who :session session :document name
                          :prompt prompt :state state
-                         :model (sexp-agent:agent-model *agent*)
-                         :effort (sexp-agent:agent-effort *agent*)
+                         :model (if forms "no planner" (sexp-agent:agent-model *agent*))
+                         :effort (unless forms (sexp-agent:agent-effort *agent*))
                          :seconds (round (elapsed-ms began) 1000)
                          :rounds (getf answer :rounds)
                          :failure (or failure (getf answer :stopped))
@@ -528,8 +562,9 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
              *prompt-jobs*)
     (dolist (id gone) (remhash id *prompt-jobs*))))
 
-(defun start-prompt-job! (documents doc prompt session &optional who)
-  "The prompt started on its own thread; the job's id."
+(defun start-prompt-job! (documents doc prompt session &optional who forms)
+  "The prompt started on its own thread, FORMS in place of a model's
+when given; the job's id."
   (let ((id (format nil "~36r~36r" (get-universal-time) (random (expt 36 6) (make-random-state t)))))
     (bt:with-lock-held (*prompt-jobs-lock*)
       (sweep-prompt-jobs!)
@@ -546,7 +581,7 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                                           (setf (gethash id *prompt-jobs*)
                                                 (list :status :working :started (getf job :started)
                                                       :note note))))))))
-                            (list :status :done :result (prompt-json (prompt-document doc prompt :session session :who who))))
+                            (list :status :done :result (prompt-json (prompt-document doc prompt :session session :who who :forms forms))))
                         (serious-condition (e)
                           (list :status :failed :error (princ-to-string e))))))
          (bt:with-lock-held (*prompt-jobs-lock*)
@@ -573,7 +608,9 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
 
 (defun handle-prompt (req ent)
   "POST /stratum/api/prompt?doc=&s= {prompt}: the prompt started on the
-session's document, answering {job}; GET ...?job=ID: the job's state,
+session's document, answering {job}; with {generate: {...}} as well
+(generation-forms) it goes to the image generator with no model asked;
+GET ...?job=ID: the job's state,
 and its result once done (prompt-job-json).  A 500 carries what went
 wrong, as the other doors answer."
   (let ((result nil) (failure nil))
@@ -583,6 +620,7 @@ wrong, as the other doors answer."
               (setf result (prompt-job-json job))
               (let* ((body (yason:parse (gwl:request-body-text req)))
                      (prompt (and (hash-table-p body) (gethash "prompt" body)))
+                     (settings (and (hash-table-p body) (gethash "generate" body)))
                      (session (net.aserve:request-query-value "s" req))
                      (documents nil)
                      (doc nil))
@@ -592,7 +630,9 @@ wrong, as the other doors answer."
                   (setf documents (request-session-table req))
                   (let ((*documents* documents)) (setf doc (request-doc req))))
                 (setf result (json-string (json-object "job" (start-prompt-job! documents doc prompt session
-                                                                                   (invitee req))))))))
+                                                                                   (invitee req)
+                                                                                   (and (hash-table-p settings)
+                                                                                        (generation-forms settings prompt)))))))))
       (serious-condition (e) (setf failure (princ-to-string e))))
     (if failure
         (reply-text req ent net.aserve:*response-internal-server-error* failure)

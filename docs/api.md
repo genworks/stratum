@@ -129,6 +129,18 @@ the operations above, which are exact and immediate.
   and describe what should be there instead.
 - `(generate-layer prompt &key name seed)` — a whole new picture of the
   document's shape as a new raster layer on top.
+- `(generate-picture prompt &key name seed reference strength)` — the
+  whole picture made over as a new raster layer on top: a change of
+  style, season or light across all of it.  With `:reference t`, the
+  default, the generator is shown the picture and `prompt` is an
+  instruction, unlike the other two: say what to change and to keep the
+  rest, as in "turn this into an oil painting, keeping the same
+  composition, pose and framing".  Without those last words it redraws
+  the subject in a pose of its own.  With `:reference nil` it starts from
+  the picture with `:strength` of noise, 0 to 1, default 0.35: 0.3 keeps
+  the pose and little of a new style, 0.6 redraws the subject.  The
+  result is a megapixel or so, scaled up: fine detail of a large
+  photograph is lost.
 
 `prompt` is a description of the result in plain visual words, not an
 instruction: "weathered stone wall in soft afternoon light", not "make

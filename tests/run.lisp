@@ -1371,6 +1371,67 @@ rectangle answered."
              (= 1 (length (gethash "changed" (yason:parse (prompt-json answer))))))
       (stratum-api:undo))))
 
+(defun test-generate-direct ()
+  "The Generate dialog: forms made from its settings, run with no model
+asked, one undo like a prompt; and the picture as a generator's input."
+  (flet ((settings (&rest kv)
+           (let ((table (make-hash-table :test 'equal)))
+             (loop for (k v) on kv by #'cddr do (setf (gethash k table) v))
+             table)))
+    (check "the dialog's settings become one form"
+           (and (equal (generation-forms (settings "source" "new" "name" "Sky") "a \"blue\" sky")
+                       "(generate-layer \"a \\\"blue\\\" sky\" :name \"Sky\" :seed -1)")
+                (search ":keep :changed" (generation-forms (settings "source" "selection") "grass"))
+                (search ":keep :all" (generation-forms (settings "source" "selection" "keepAll" t) "grass"))
+                (search ":strength 0.30 :reference nil"
+                        (generation-forms (settings "source" "picture" "strength" 0.3d0) "grass"))
+                (search ":reference t" (generation-forms (settings "source" "picture" "reference" t) "grass"))))
+    (check "an unknown source is refused"
+           (search "not something"
+                   (handler-case (generation-forms (settings "source" "(quit)") "grass")
+                     (error (e) (princ-to-string e)))))
+    (let* ((stratum-api:*document* nil)
+           (*documents* (make-hash-table :test 'equal))
+           (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+           (before (copy-seq (the-object doc (render-cpu))))
+           (layers (length (stratum-api:layers))))
+      (call-with-stub-generator
+       (lambda (generator seen)
+         (call-with-stub-model
+          '()
+          (lambda (agent requests)
+            (let ((*generator* generator) (*agent* agent))
+              (let ((answer (prompt-document doc "a meadow"
+                                             :forms (generation-forms (settings "source" "new" "name" "Meadow") "a meadow"))))
+                (check "a generation runs with no model asked"
+                       (and (getf answer :ok) (zerop (length (funcall requests)))
+                            (= (length (stratum-api:layers)) (1+ layers))
+                            (search "no planner" (getf answer :reply))
+                            (search "generate-layer" (first (getf answer :forms))))
+                       answer)
+                (check "and the page can read the answer"
+                       (eq (gethash "ok" (yason:parse (prompt-json answer))) t)))
+              (stratum-api:undo)
+              (check "it is one undo like a prompt"
+                     (and (= (length (stratum-api:layers)) layers)
+                          (equalp before (the-object doc (render-cpu)))))
+              (stratum-api:generate-picture "in oils" :name "Oils")
+              (let ((body (first (car (last (funcall seen))))))
+                (check "the picture goes as a reference"
+                       (and (= 1 (length (gethash "ref_images" body)))
+                            (null (gethash "init_image" body)) (null (gethash "mask_image" body)))))
+              (stratum-api:delete-layer "Oils")
+              (stratum-api:generate-picture "in oils" :name "Oils" :reference nil :strength 0.3)
+              (let ((body (first (car (last (funcall seen))))))
+                (check "or as a starting point, with its strength and no mask"
+                       (and (gethash "init_image" body) (null (gethash "mask_image" body))
+                            (null (gethash "ref_images" body))
+                            (< 0.29 (gethash "strength" body) 0.31))
+                       (gethash "strength" body)))
+              (check "the layer is the picture's size, on top"
+                     (= (length (stratum-api:layers)) (1+ layers)))
+              (stratum-api:delete-layer "Oils")))))))))
+
 (defun with-exif (jpeg orientation &key big-endian)
   "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."
   (flet ((u16 (v) (if big-endian (list (ash v -8) (logand v 255)) (list (logand v 255) (ash v -8))))
@@ -2997,7 +3058,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -344,7 +344,13 @@ a generator repaints the whole of its mask, and its copy of the
 surroundings is never quite the picture's.  Nothing outside the
 selection can change, and the layer takes masks, blends and undo like
 any other.  `(generate-layer prompt)` makes a picture of
-the document's shape.  Both run outside the server's lock.
+the document's shape, and `(generate-picture prompt)` remakes the open
+picture, shown to the model as a reference (`:reference nil :strength
+0.35` starts from it instead).  All run outside the server's lock.
+
+Layer > Generate Image does these with no model planning them: the
+words go to the generator as they are, through the prompt door and its
+one undo, from nothing, from the open picture or into the selection.
 
 ### Keeping a record of prompts
 

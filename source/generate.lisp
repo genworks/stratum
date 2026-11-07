@@ -89,9 +89,11 @@ matches what it paints to what it can see."
 (defun data-url (png)
   (format nil "data:image/png;base64,~a" (sexp-agent:base64-encode png)))
 
-(defun generator-body (generator prompt seed w h &optional image mask)
-  "The job for a picture of W x H, as JSON text; with IMAGE and MASK,
-PNG octets, a repainting of them."
+(defun generator-body (generator prompt seed w h &key image mask strength reference)
+  "The job for a picture of W x H, as JSON text.  With IMAGE, PNG octets,
+a repainting of it, by STRENGTH or the generator's own, and with MASK
+of that part alone; with REFERENCE, PNG octets, a picture the model is
+shown and works from."
   (flet ((object (&rest keys-and-values)
            (let ((table (make-hash-table :test 'equal)))
              (loop for (key value) on keys-and-values by #'cddr
@@ -107,8 +109,11 @@ PNG octets, a repainting of them."
                                                 "guidance" (object "txt_cfg" (float (generator-cfg-scale generator) 1d0))))))
       (when image
         (setf (gethash "init_image" body) (data-url image)
-              (gethash "mask_image" body) (data-url mask)
-              (gethash "strength" body) (float (generator-strength generator) 1d0)))
+              (gethash "strength" body) (float (or strength (generator-strength generator)) 1d0)))
+      (when mask
+        (setf (gethash "mask_image" body) (data-url mask)))
+      (when reference
+        (setf (gethash "ref_images" body) (list (data-url reference))))
       (yason:with-output-to-string* () (yason:encode body)))))
 
 (defparameter *generator-poll-seconds* 1
@@ -259,9 +264,9 @@ layer's layer-info."
                 sent (resample-rgba (rgba-rect (the-object doc (render-cpu)) dw dh x y rw rh)
                                     rw rh sw sh)
                 body (generator-body generator prompt seed sw sh
-                                     (png-octets sent sw sh)
-                                     (gray-png (resample-gray coverage rw rh sw sh) sw sh
-                                               (generator-invert-mask generator)))))))
+                                     :image (png-octets sent sw sh)
+                                     :mask (gray-png (resample-gray coverage rw rh sw sh) sw sh
+                                                     (generator-invert-mask generator)))))))
     (multiple-value-bind (pixels w h) (ask-generator generator body)
       (destructuring-bind (x y rw rh) rect
         (declare (ignore x y))
@@ -287,7 +292,30 @@ layer-info."
         (bt:with-lock-held (*lock*)
           (stratum-api:layer-info (generated-layer! doc pixels w h (list 0 0 dw dh) nil name)))))))
 
-(defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer)
+(defun stratum-api:generate-picture (prompt &key (name "Generated") (seed -1) (reference t) (strength 0.35))
+  "The open picture made over by PROMPT, as a new raster layer NAME on
+top of it, the picture's shape.  With REFERENCE the model is shown the
+picture and PROMPT reads as an instruction: said to keep the composition,
+it does.  With none it starts from the picture with STRENGTH of noise,
+0 to 1, and PROMPT describes the result: 0.3 keeps the pose and little
+of the style, 0.6 redraws the subject.  Slow: a minute or so.  The
+layer's layer-info."
+  (let ((generator (require-generator))
+        (doc (stratum-api::doc))
+        dw dh sw sh body)
+    (bt:with-lock-held (*lock*)
+      (setf dw (the-object doc doc-width)
+            dh (the-object doc doc-height))
+      (multiple-value-setq (sw sh) (fitted-size dw dh (generator-size generator)))
+      (let ((picture (png-octets (resample-rgba (the-object doc (render-cpu)) dw dh sw sh) sw sh)))
+        (setf body (if reference
+                       (generator-body generator prompt seed sw sh :reference picture)
+                       (generator-body generator prompt seed sw sh :image picture :strength strength)))))
+    (multiple-value-bind (pixels w h) (ask-generator generator body)
+      (bt:with-lock-held (*lock*)
+        (stratum-api:layer-info (generated-layer! doc pixels w h (list 0 0 dw dh) nil name))))))
+
+(defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer stratum-api:generate-picture)
   "The operations run-forms calls without the lock, which they take for
 themselves: a generation would hold every other request up for a
 minute.")

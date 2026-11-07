@@ -2754,6 +2754,8 @@
           { label: 'Send Backward', key: 'Ctrl+[', enabled: activeL,
             run: function () { S.layerOp({ op: 'move', delta: -1 }); } }] },
         '-',
+        { label: 'Generate Image...', run: function () { S.openGenerate(); } },
+        '-',
         { label: 'Merge Down', key: 'Ctrl+E', enabled: canMergeDown, run: function () { S.layerOp({ op: 'merge' }); } },
         { label: 'Flatten Image', enabled: function () { return doc && doc.layers.length > 0; },
           run: function () { S.layerOp({ op: 'flatten' }); } }] },
@@ -3741,6 +3743,19 @@
               return fetchJSON(apiFor(res.doc, 'close'), { method: 'POST' });
             });
           });
+        });
+      }).then(function () {
+        // The Generate dialog: its rows follow its source, it wants words,
+        // and what it asks reaches the door with no model.
+        var g = S.openGenerate();
+        check('the Generate dialog opens', !!document.getElementById('stratum-generate-text') && !!g);
+        g.set({ source: 'picture' });
+        check('it asks for words before it goes', g.ok() === null && S.generateDialog === g);
+        g.set({ prompt: 'a meadow', source: 'new' });
+        return g.ok().then(function (res) {
+          check('a generation reaches the door and answers one form, with no model',
+                S.generateDialog === null && res.results.length === 1 && /generate-layer/.test(res.results[0].form),
+                res);
         });
       }).then(function () {
         // The same PNG file sent whole: the server's own reader decodes
@@ -4801,9 +4816,11 @@
     });
   }
 
-  S.prompt = function (text) {
+  // GENERATE, the Generate dialog's settings: the text goes to the image
+  // generator with no model between them.
+  S.prompt = function (text, generate) {
     return S.strokesSettled().then(function () {
-      return postJSON('prompt', JSON.stringify({ prompt: text }));
+      return postJSON('prompt', JSON.stringify(generate ? { prompt: text, generate: generate } : { prompt: text }));
     }).then(function (res) {
       return awaitPromptJob(res.job);
     }).then(function (res) {
@@ -4819,6 +4836,74 @@
       // forms may have run before it failed: show what is there now
       return S.refreshAll().then(function () { throw e; }, function () { throw e; });
     });
+  };
+
+  // Layer > Generate Image: a picture from the words alone, or from the
+  // open picture, or into the selection, with no model planning it.  An
+  // uploaded image is the open picture: open it first.
+  S.openGenerate = function () {
+    if (S.generateDialog) S.generateDialog.cancel();
+    var state = { prompt: '', source: S.selection ? 'selection' : 'new', reference: true, strength: 0.35, keepAll: false, name: 'Generated' };
+    var words = el('textarea', { 'class': 'st-prompt-box', rows: '4', id: 'stratum-generate-text',
+      placeholder: 'Describe the picture, for example: a stone bridge in morning fog' });
+    words.addEventListener('input', function () { state.prompt = words.value; });
+    var source = el('select', {}, [
+      el('option', { value: 'new', text: 'nothing: a new picture' }),
+      el('option', { value: 'picture', text: 'the open picture' }),
+      el('option', { value: 'selection', text: 'the selection' })]);
+    source.value = state.source;
+    var how = el('select', {}, [
+      el('option', { value: 'reference', text: 'as a reference' }),
+      el('option', { value: 'start', text: 'as a starting point' })]);
+    var strength = settingSlider(state, 'strength', function () {});
+    var keep = el('input', { type: 'checkbox' });
+    keep.addEventListener('change', function () { state.keepAll = keep.checked; });
+    var howRow = el('div', { 'class': 'st-row' }, [el('span', { text: 'use it' }), how]);
+    var keepRow = el('div', { 'class': 'st-row' }, [keep, el('span', { text: 'Keep the whole selection, not only what changed' })]);
+    function shown() {
+      words.placeholder = state.source === 'picture' && state.reference
+        ? 'Say what to change, for example: turn this into an oil painting, keeping the same composition'
+        : 'Describe the picture, for example: a stone bridge in morning fog';
+      howRow.style.display = state.source === 'picture' ? '' : 'none';
+      strength.style.display = state.source === 'picture' && !state.reference ? '' : 'none';
+      keepRow.style.display = state.source === 'selection' ? '' : 'none';
+    }
+    source.addEventListener('change', function () { state.source = source.value; shown(); });
+    how.addEventListener('change', function () { state.reference = how.value === 'reference'; shown(); });
+    var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: 'Generate Image' }), words,
+      el('div', { 'class': 'st-row' }, [el('span', { text: 'start from' }), source]),
+      howRow, strength, keepRow]);
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'Generate' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    shown();
+    var dialog = S.generateDialog = {
+      state: state,
+      set: function (changes) {
+        Object.assign(state, changes);
+        words.value = state.prompt;
+        source.value = state.source;
+        how.value = state.reference ? 'reference' : 'start';
+        keep.checked = state.keepAll;
+        shown();
+      },
+      cancel: function () { box.remove(); S.generateDialog = null; },
+      ok: function () {
+        var text = state.prompt.trim();
+        if (!text) { words.focus(); return null; }
+        box.remove();
+        S.generateDialog = null;
+        status('generating...');
+        return S.prompt(text, { source: state.source, name: state.name, reference: state.reference,
+                                strength: state.strength, keepAll: state.keepAll })
+          .then(function (res) { status(); return res; });
+      }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    words.focus();
+    return dialog;
   };
 
   function installPrompt() {

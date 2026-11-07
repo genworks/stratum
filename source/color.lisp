@@ -20,6 +20,11 @@
 ;; bound to double-float); the GPU's float32 is the coarser of the two.
 ;;
 
+(defconstant +pi+ (float pi 1d0)
+  "Pi as a double.  PI is a long-float on some Lisps (ECL), which would
+carry into everything computed from it and break double-float
+declarations there.")
+
 (declaim (inline srgb->linear linear->srgb unit->byte))
 
 (defun srgb->linear (c)

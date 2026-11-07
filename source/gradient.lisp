@@ -53,7 +53,7 @@ drag's length) falls on the ramp of SHAPE, 0 to 1."
     (:radial (min 1d0 (sqrt (+ (* u u) (* v v)))))
     (:diamond (min 1d0 (max (abs u) (abs v))))
     (:angle (let ((a (atan v u)))
-              (/ (if (< a 0d0) (+ a (* 2d0 pi)) a) (* 2d0 pi))))))
+              (/ (if (< a 0d0) (+ a (* 2d0 +pi+)) a) (* 2d0 +pi+))))))
 
 (defun gradient-rgba (pixels w h x0 y0 x1 y1 start end shape opacity)
   "PIXELS (RGBA8 straight, W x H) with the ramp from START at (X0, Y0)

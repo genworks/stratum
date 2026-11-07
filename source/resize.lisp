@@ -185,7 +185,7 @@ whole."
 
 (defun rotated-size (w h degrees)
   "(values nw nh): the canvas that holds a W x H picture turned by DEGREES."
-  (let* ((a (* pi (/ (float degrees 1d0) 180d0)))
+  (let* ((a (* +pi+ (/ (float degrees 1d0) 180d0)))
          (c (abs (cos a))) (s (abs (sin a))))
     (values (max 1 (ceiling (- (+ (* w c) (* h s)) 1d-9)))
             (max 1 (ceiling (- (+ (* w s) (* h c)) 1d-9))))))
@@ -199,7 +199,7 @@ on its own scale for a mask -- transparent (zero) beyond the picture."
   (multiple-value-bind (nw nh) (rotated-size w h degrees)
     (let* ((out (make-array (* nw nh channels) :element-type '(unsigned-byte 8) :initial-element 0))
            (decode *srgb-decode*)
-           (a (* pi (/ (float degrees 1d0) 180d0)))
+           (a (* +pi+ (/ (float degrees 1d0) 180d0)))
            (c (cos a)) (s (sin a))
            (cx (* 0.5d0 w)) (cy (* 0.5d0 h))
            (ncx (* 0.5d0 nw)) (ncy (* 0.5d0 nh)))

@@ -145,7 +145,7 @@ same picture on every implementation."
 ;;; Directional ramp: TT runs 0 to 1 across the canvas along ANGLE
 ;;; (degrees, 0 = left to right, 90 = top to bottom).
 (defun ramp-fn (w h angle)
-  (let* ((th (* (float angle 1d0) (/ pi 180)))
+  (let* ((th (* (float angle 1d0) (/ +pi+ 180)))
          (dx (cos th)) (dy (sin th))
          (corners (list 0d0 (* w dx) (* h dy) (+ (* w dx) (* h dy))))
          (lo (reduce #'min corners))
@@ -270,7 +270,7 @@ grid four pixels apart and interpolated, which a smooth field allows."
                           (color '(20 20 30)) (alpha 160))
   "Hard-edged parallel stripes: the aliasing test."
   (let* ((px (make-rgba w h))
-         (th (* (float angle 1d0) (/ pi 180)))
+         (th (* (float angle 1d0) (/ +pi+ 180)))
          (dx (cos th)) (dy (sin th)))
     (dotimes (y h px)
       (dotimes (x w)

@@ -69,6 +69,10 @@ error in words."
                                                         :int))
                      (failed))
                    (values (cffi:mem-ref w :int) (cffi:mem-ref h :int)))
+               ;; a truncated file has been seen to come back from the
+               ;; header with no failure and a size that is nonsense
+               (unless (and (< 0 w 65536) (< 0 h 65536))
+                 (error "The JPEG could not be read: it gives its size as ~d x ~d." w h))
                (funcall check w h)
                (let ((pixels (make-rgba w h)))
                  (cffi:with-pointer-to-vector-data (target pixels)

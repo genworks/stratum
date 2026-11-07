@@ -358,7 +358,7 @@ selection mode . items)."
 ;;; bytes), newest first.
 
 (defstruct (prompt-journal (:constructor make-prompt-journal (specs selection mode undo stamps)))
-  specs selection mode undo stamps (items nil))
+  specs selection mode undo stamps (items nil) (stretched nil))
 
 (defun begin-prompt-journal! (doc)
   "A journal for a prompt on DOC, now running on it; nil when one is
@@ -398,6 +398,17 @@ megabytes, and the journal has every in-place change."
                           (y1 (reduce #'max items :key (lambda (item) (+ (fourth item) (sixth item))))))
                       (list :from (first was) :stamp (the-object layer pixel-stamp)
                             :x x0 :y y0 :w (- x1 x0) :h (- y1 y0))))))
+
+(defun prompt-stretched (doc journal)
+  "The layers the running prompt made by stretching a smaller picture,
+and still there as made: a plist for each of :stamp, :w :h and :png, so
+that a page can stretch the picture itself and not fetch the layer."
+  (when journal
+    (loop with stamps = (mapcar (lambda (layer) (the-object layer pixel-stamp))
+                                (the-object doc raster-layers))
+          for (stamp png w h) in (prompt-journal-stretched journal)
+          when (member stamp stamps)
+            collect (list :stamp stamp :w w :h h :png png))))
 
 (defun end-prompt-journal! (doc journal changed?)
   "The prompt is over: with CHANGED? its journal goes on the undo list

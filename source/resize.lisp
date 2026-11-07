@@ -39,7 +39,8 @@ Crop."
 
 (defun resample-rgba (pixels w h nw nh)
   "PIXELS (W x H RGBA8, straight alpha) resampled to NW x NH, bilinear
-in premultiplied linear light.  The same size comes back unchanged."
+in premultiplied linear light, rows on every thread.  The same size
+comes back unchanged."
   (if (and (= w nw) (= h nh))
       (copy-seq pixels)
       (let ((out (make-rgba nw nh))
@@ -53,28 +54,32 @@ in premultiplied linear light.  The same size comes back unchanged."
                  (let* ((o (* 4 (+ x (* y w))))
                         (a (/ (float (aref pixels (+ o 3)) 1d0) 255d0)))
                    (if (= k 3) a (* a (aref decode (aref pixels (+ o k))))))))
-          (dotimes (ny nh out)
-            (let* ((fy (- (* (+ ny 0.5d0) sy) 0.5d0))
-                   (y0 (max 0 (min (1- h) (floor fy))))
-                   (y1 (min (1- h) (1+ y0)))
-                   (ty (max 0d0 (min 1d0 (- fy y0)))))
-              (dotimes (nx nw)
-                (let* ((fx (- (* (+ nx 0.5d0) sx) 0.5d0))
-                       (x0 (max 0 (min (1- w) (floor fx))))
-                       (x1 (min (1- w) (1+ x0)))
-                       (tx (max 0d0 (min 1d0 (- fx x0))))
-                       (o (* 4 (+ nx (* ny nw)))))
-                  (flet ((sample (k)
-                           (+ (* (+ (* (premul x0 y0 k) (- 1d0 tx)) (* (premul x1 y0 k) tx)) (- 1d0 ty))
-                              (* (+ (* (premul x0 y1 k) (- 1d0 tx)) (* (premul x1 y1 k) tx)) ty))))
-                    (let ((a (sample 3)))
-                      (if (> a 0d0)
-                          (setf (aref out o) (unit->byte (linear->srgb (/ (sample 0) a)))
-                                (aref out (+ o 1)) (unit->byte (linear->srgb (/ (sample 1) a)))
-                                (aref out (+ o 2)) (unit->byte (linear->srgb (/ (sample 2) a)))
-                                (aref out (+ o 3)) (unit->byte a))
-                          (setf (aref out o) 0 (aref out (+ o 1)) 0
-                                (aref out (+ o 2)) 0 (aref out (+ o 3)) 0))))))))))))
+          (parallel-ranges
+           nh
+           (lambda (start end)
+             (loop for ny from start below end
+                   do (let* ((fy (- (* (+ ny 0.5d0) sy) 0.5d0))
+                             (y0 (max 0 (min (1- h) (floor fy))))
+                             (y1 (min (1- h) (1+ y0)))
+                             (ty (max 0d0 (min 1d0 (- fy y0)))))
+                        (dotimes (nx nw)
+                          (let* ((fx (- (* (+ nx 0.5d0) sx) 0.5d0))
+                                 (x0 (max 0 (min (1- w) (floor fx))))
+                                 (x1 (min (1- w) (1+ x0)))
+                                 (tx (max 0d0 (min 1d0 (- fx x0))))
+                                 (o (* 4 (+ nx (* ny nw)))))
+                            (flet ((sample (k)
+                                     (+ (* (+ (* (premul x0 y0 k) (- 1d0 tx)) (* (premul x1 y0 k) tx)) (- 1d0 ty))
+                                        (* (+ (* (premul x0 y1 k) (- 1d0 tx)) (* (premul x1 y1 k) tx)) ty))))
+                              (let ((a (sample 3)))
+                                (if (> a 0d0)
+                                    (setf (aref out o) (unit->byte (linear->srgb (/ (sample 0) a)))
+                                          (aref out (+ o 1)) (unit->byte (linear->srgb (/ (sample 1) a)))
+                                          (aref out (+ o 2)) (unit->byte (linear->srgb (/ (sample 2) a)))
+                                          (aref out (+ o 3)) (unit->byte a))
+                                    (setf (aref out o) 0 (aref out (+ o 1)) 0
+                                          (aref out (+ o 2)) 0 (aref out (+ o 3)) 0)))))))))))
+        out)))
 
 (defun resample-gray (mask w h nw nh)
   "MASK (W x H, one byte a pixel) resampled to NW x NH, bilinear."

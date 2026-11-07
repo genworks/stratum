@@ -188,12 +188,45 @@
     return { rasters: rasters, masks: masks };
   }
 
+  // S, a picture from a prompt's answer, stretched over layer J of TEX:
+  // bilinear in linear light, as resample-rgba does it, within a level.
+  function stretchInto(tex, j, s, w, h) {
+    var binary = atob(s.png), bytes = new Uint8Array(binary.length);
+    for (var k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
+    return createImageBitmap(new Blob([bytes], { type: 'image/png' }),
+                             { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }).then(function (bmp) {
+      var small = gl.createTexture(), from = gl.createFramebuffer(), to = gl.createFramebuffer();
+      gl.bindTexture(gl.TEXTURE_2D, small);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.SRGB8_ALPHA8, s.w, s.h);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+      bmp.close();
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, from);
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, small, 0);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, to);
+      gl.framebufferTextureLayer(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex, 0, j);
+      gl.blitFramebuffer(0, 0, s.w, s.h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      var failed = gl.getError();
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.deleteFramebuffer(from);
+      gl.deleteFramebuffer(to);
+      gl.deleteTexture(small);
+      if (failed) throw new Error('the stretch failed: ' + failed);
+      S.stats.stretches = (S.stats.stretches || 0) + 1;
+    });
+  }
+
   // One array texture brought to the stamps WANT.  Content the old
   // texture holds at another index is copied across on the GPU, into a
   // new texture; content it holds in place stays; the rest is fetched.
   // CHANGED, from a prompt, says which new stamps are old content with
   // one rectangle changed: only the rectangle is fetched for those.
-  function syncArray(oldTex, have, want, internal, path, format, w, h, changed) {
+  // STRETCHED says which are a smaller picture stretched over the whole
+  // layer, as the generator's are: the picture came with the answer and
+  // the GPU stretches it, a tenth of the bytes.
+  function syncArray(oldTex, have, want, internal, path, format, w, h, changed, stretched) {
     function holds(j) { return want[j] != null && want[j] === have[j]; }
     function found(j) { return want[j] == null ? -1 : have.indexOf(want[j]); }
     function change(j) {
@@ -224,8 +257,18 @@
       if (inPlace && holds(j)) return;
       touched = true;
       var i = inPlace ? -1 : found(j), c = change(j);
+      var s = (stretched || []).filter(function (p) { return p.stamp === stamp; })[0];
       if (i >= 0) {
         chain = chain.then(function () { copied(i, j); });
+      } else if (s) {
+        chain = chain.then(function () { return stretchInto(tex, j, s, w, h); }).catch(function (e) {
+          console.info('the layer came whole: ' + e.message);
+          return fetchPixels(api(path + '?i=' + j)).then(function (bytes) {
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+            gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, j, w, h, 1, format, gl.UNSIGNED_BYTE, bytes);
+          });
+        });
       } else if (c) {
         chain = chain.then(function () {
           if (!inPlace) copied(have.indexOf(c.from), j);
@@ -259,10 +302,10 @@
 
   // The textures brought up to date with the document as the server now
   // describes it; everything, when the page holds nothing of this size.
-  function syncPixels(changed) {
+  function syncPixels(changed, stretched) {
     var w = doc.width, h = doc.height, want = wantedStamps(doc);
     if (!texLayers || !texMasks || held.w !== w || held.h !== h) return uploadPixels();
-    return syncArray(texLayers, held.rasters, want.rasters, gl.SRGB8_ALPHA8, 'raster', gl.RGBA, w, h, changed)
+    return syncArray(texLayers, held.rasters, want.rasters, gl.SRGB8_ALPHA8, 'raster', gl.RGBA, w, h, changed, stretched)
       .then(function (tex) {
         texLayers = tex;
         held.rasters = want.rasters;
@@ -4785,7 +4828,7 @@
   // The page brought up to date with the server after changes made
   // outside its own calls: the structure, the selection, and whatever
   // pixels the page does not already hold.
-  S.refreshAll = function (changed) {
+  S.refreshAll = function (changed, stretched) {
     return fetchJSON(api('doc')).then(function (d) {
       doc = d;
       buildProgram(doc.shader);
@@ -4795,7 +4838,7 @@
       S.undoDepth = doc.undoDepth;
       S.redoDepth = doc.redoDepth;
       buildPanel();
-      return syncPixels(changed);
+      return syncPixels(changed, stretched);
     }).then(function () {
       return loadSelection(doc.selection);
     }).then(function () { status(); requestDraw(); });
@@ -4891,7 +4934,7 @@
         return res;
       }
       bringDown();
-      return S.refreshAll(res.changed).then(function () { settled(); return res; },
+      return S.refreshAll(res.changed, res.stretched).then(function () { settled(); return res; },
                                             function (e) { settled(); throw e; });
     }, function (e) {
       settled();

@@ -1430,7 +1430,29 @@ asked, one undo like a prompt; and the picture as a generator's input."
                        (gethash "strength" body)))
               (check "the layer is the picture's size, on top"
                      (= (length (stratum-api:layers)) (1+ layers)))
-              (stratum-api:delete-layer "Oils")))))))))
+              (stratum-api:delete-layer "Oils")
+              ;; the page is given the picture, not left to fetch the layer
+              (let* ((answer (prompt-document doc "a meadow"
+                                              :forms (generation-forms (settings "source" "new") "a meadow")))
+                     (stretched (getf answer :stretched))
+                     (layer (car (last (the-object doc raster-layers)))))
+                (check "a generation answers its picture, at the generator's size"
+                       (and (= 1 (length stretched))
+                            (eql (getf (first stretched) :stamp) (the-object layer pixel-stamp))
+                            (<= (max (getf (first stretched) :w) (getf (first stretched) :h)) 256)
+                            (png-octets-p (getf (first stretched) :png)))
+                       stretched)
+                (check "and the page hears it"
+                       (= 1 (length (gethash "stretched" (yason:parse (prompt-json answer))))))
+                (stratum-api:undo))
+              ;; a layer painted on after it is no picture any more
+              (let ((answer (prompt-document doc "a meadow"
+                                             :forms (format nil "~a (select-rect 10 10 20 20) (fill-selection \"Generated\" (1 2 3)) (select-none)"
+                                                            (generation-forms (settings "source" "new") "a meadow")))))
+                (check "a layer painted on after is not sent as the picture"
+                       (and (getf answer :ok) (null (getf answer :stretched)))
+                       answer)
+                (stratum-api:undo))))))))))
 
 (defun with-exif (jpeg orientation &key big-endian)
   "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."

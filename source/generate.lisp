@@ -218,10 +218,11 @@ crop.  COVERAGE itself, changed."
     (dotimes (i (* rw rh) coverage)
       (setf (aref coverage i) (floor (* (aref coverage i) (aref matte i)) 255)))))
 
-(defun generated-layer! (doc pixels w h rect coverage name)
-  "PIXELS, W x H, scaled to RECT of DOC and laid there as a new raster
-layer on top, each pixel's alpha its own times COVERAGE, the selection
-over RECT, or its own alone with none.  The layer's index."
+(defun generated-pixels (doc pixels w h rect coverage)
+  "The bytes of a layer of DOC holding PIXELS, W x H, scaled to RECT, each
+pixel's alpha its own times COVERAGE, the selection over RECT, or its
+own alone with none.  Seconds on a photograph, and nothing here touches
+the stack, so it wants no lock."
   (destructuring-bind (x y rw rh) rect
     (let* ((dw (the-object doc doc-width))
            (dh (the-object doc doc-height))
@@ -238,7 +239,31 @@ over RECT, or its own alone with none.  The layer's index."
                   (if coverage
                       (floor (* (aref scaled (+ from 3)) (aref coverage (+ col (* row rw)))) 255)
                       (aref scaled (+ from 3)))))))
-      (the-object doc (add-layer! (list :kind :raster :name name :pixels (doc-pixels doc layer)))))))
+      (doc-pixels doc layer))))
+
+(defun generated-layer! (doc layer name)
+  "LAYER, bytes from generated-pixels, as a new raster layer on top of
+DOC, whose lock is held.  The layer's index."
+  (unless (= (length layer) (* 4 (the-object doc doc-width) (the-object doc doc-height)))
+    (error "The document changed size while the picture was being made."))
+  (the-object doc (add-layer! (list :kind :raster :name name :pixels layer))))
+
+(defun whole-layer! (doc pixels w h name)
+  "PIXELS, W x H, stretched over the whole of DOC as a new raster layer,
+taking the lock only to add it.  A prompt's journal keeps the picture
+itself, a tenth of the stretched layer's size on the wire even packed.
+The layer's layer-info."
+  (let ((layer (generated-pixels doc pixels w h
+                                 (list 0 0 (the-object doc doc-width) (the-object doc doc-height))
+                                 nil))
+        (png (and (the-object doc prompt-journal) (png-octets (doc-pixels doc pixels) w h))))
+    (bt:with-lock-held (*lock*)
+      (let ((index (generated-layer! doc layer name))
+            (journal (the-object doc prompt-journal)))
+        (when (and journal png)
+          (push (list (the-object (the-object doc (layer index)) pixel-stamp) png w h)
+                (prompt-journal-stretched journal)))
+        (stratum-api:layer-info index)))))
 
 (defun stratum-api:generate-fill (prompt &key (name "Generated") (seed -1) (keep :changed))
   "PROMPT painted into the selection by the image generator, as a new
@@ -275,8 +300,9 @@ layer's layer-info."
         (let ((coverage (faded-coverage coverage rw rh)))
           (when (eq keep :changed)
             (keep-changed! coverage rw rh sent sw sh pixels w h))
-          (bt:with-lock-held (*lock*)
-            (stratum-api:layer-info (generated-layer! doc pixels w h rect coverage name))))))))
+          (let ((layer (generated-pixels doc pixels w h rect coverage)))
+            (bt:with-lock-held (*lock*)
+              (stratum-api:layer-info (generated-layer! doc layer name)))))))))
 
 (defun stratum-api:generate-layer (prompt &key (name "Generated") (seed -1))
   "A picture of PROMPT from the image generator, the document's shape,
@@ -289,8 +315,7 @@ layer-info."
     (multiple-value-bind (sw sh) (fitted-size dw dh (generator-size generator))
       (multiple-value-bind (pixels w h)
           (ask-generator generator (generator-body generator prompt seed sw sh))
-        (bt:with-lock-held (*lock*)
-          (stratum-api:layer-info (generated-layer! doc pixels w h (list 0 0 dw dh) nil name)))))))
+        (whole-layer! doc pixels w h name)))))
 
 (defun stratum-api:generate-picture (prompt &key (name "Generated") (seed -1) (reference t) (strength 0.35))
   "The open picture made over by PROMPT, as a new raster layer NAME on
@@ -312,8 +337,7 @@ layer's layer-info."
                        (generator-body generator prompt seed sw sh :reference picture)
                        (generator-body generator prompt seed sw sh :image picture :strength strength)))))
     (multiple-value-bind (pixels w h) (ask-generator generator body)
-      (bt:with-lock-held (*lock*)
-        (stratum-api:layer-info (generated-layer! doc pixels w h (list 0 0 dw dh) nil name))))))
+      (whole-layer! doc pixels w h name))))
 
 (defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer stratum-api:generate-picture)
   "The operations run-forms calls without the lock, which they take for

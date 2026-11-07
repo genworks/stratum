@@ -4783,8 +4783,25 @@
       function press(k) {
         return document.body.dispatchEvent(new KeyboardEvent('keydown', { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
       }
-      showPromptTurn('a request', { reply: 'one\ntwo' });
+      showPromptTurn('a request', { reply: 'one\ntwo', results: [
+        { form: '(a)', ok: true, value: '1' }, { form: '(b)', ok: false, error: 'no' }] });
       var sel = window.getSelection(), turn = promptLog.firstChild;
+      var forms = turn.querySelector('details.st-prompt-forms');
+      check('A turn tells the person, the model and what ran apart',
+            turn.querySelector('.st-prompt-you').textContent === 'a request' &&
+            turn.querySelector('.st-prompt-reply').textContent === 'one\ntwo' &&
+            forms && forms.querySelectorAll('.st-form').length === 2,
+            { html: turn.innerHTML.slice(0, 200) });
+      check('The forms say what ran, and a failure stands open and marked',
+            forms && forms.open && /2 forms run, 1 failed/.test(forms.textContent) &&
+            forms.querySelector('.st-form.st-failed').textContent.indexOf('no') >= 0 &&
+            forms.querySelector('.st-form').title === '1');
+      check('Labels are the style sheet\'s, so the text copies clean',
+            getComputedStyle(turn.querySelector('.st-prompt-you'), '::before').content.indexOf('You') >= 0 &&
+            turn.querySelector('.st-prompt-you').textContent.indexOf('You') < 0);
+      var many = [];
+      for (var f = 0; f < 9; f++) many.push({ form: '(f)', ok: true, value: '' });
+      check('A long clean list starts folded', !formsBlock(many).open);
       sel.selectAllChildren(turn);
       check('Ctrl+C on the log\'s text is left to the browser', press('c') && took === 0, { took: took });
       sel.collapse(turn, 0);
@@ -4920,18 +4937,36 @@
     }).then(function () { status(); requestDraw(); });
   };
 
-  function showPromptTurn(text, res) {
+  // What ran, one line a form, its value on hover.  A long list starts
+  // folded, unless something in it failed.
+  var FORMS_SHOWN = 6;
+  function formsBlock(results) {
+    var failed = results.filter(function (r) { return !r.ok; }).length, n = results.length;
+    var block = el('details', { 'class': 'st-prompt-forms' }, [
+      el('summary', { text: n + (n === 1 ? ' form' : ' forms') + ' run' + (failed ? ', ' + failed + ' failed' : '') })]);
+    results.forEach(function (r) {
+      var line = el('div', { 'class': 'st-form' + (r.ok ? '' : ' st-failed'), text: r.form + (r.ok ? '' : '  ; ' + r.error) });
+      if (r.ok && r.value) line.title = r.value;
+      block.appendChild(line);
+    });
+    block.open = failed > 0 || n <= FORMS_SHOWN;
+    return block;
+  }
+
+  // A turn in three voices, told apart by the style sheet: the person's
+  // words, the model's, and what ran.  The labels and marks are the style
+  // sheet's too, so what is copied from the log is the text alone.
+  S.showPromptTurn = showPromptTurn;
+  function showPromptTurn(text, res, generated) {
     if (!promptLog) return;
     var turn = el('div', { 'class': 'st-prompt-turn' });
     turn.appendChild(el('div', { 'class': 'st-prompt-you', text: text }));
-    if (res.reply) turn.appendChild(el('div', { 'class': 'st-prompt-reply' + (res.declined || res.stopped ? ' st-declined' : ''), text: res.reply }));
+    if (res.reply) {
+      turn.appendChild(el('div', { 'class': 'st-prompt-reply' + (generated ? ' st-no-model' : '') +
+                                            (res.declined || res.stopped ? ' st-declined' : ''), text: res.reply }));
+    }
     if (res.results && res.results.length) {
-      var pre = el('div', { 'class': 'st-prompt-forms' });
-      res.results.forEach(function (r) {
-        var line = el('div', { 'class': r.ok ? '' : 'st-failed', text: r.form + (r.ok ? '' : '  ; ' + r.error) });
-        pre.appendChild(line);
-      });
-      turn.appendChild(pre);
+      turn.appendChild(formsBlock(res.results));
     } else if (res.error) {
       turn.appendChild(el('div', { 'class': 'st-prompt-forms st-failed', text: res.error }));
     }
@@ -5003,7 +5038,7 @@
     }).then(function (res) {
       return awaitPromptJob(res.job);
     }).then(function (res) {
-      showPromptTurn(text, res);
+      showPromptTurn(text, res, !!generate);
       if (res.width !== doc.width || res.height !== doc.height) {
         settled();
         if (!S.noReload) location.reload();

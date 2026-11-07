@@ -1095,12 +1095,23 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   border: 1px solid #3a3e45; border-radius: 3px; padding: 4px 6px; font: inherit; resize: vertical; }
 .st-prompt-log { font-size: 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; }
 .st-prompt-turn { border-top: 1px solid #2c2f35; padding: 4px 0; }
-.st-prompt-you { color: #8a9099; }
-.st-prompt-reply { white-space: pre-line; }
-.st-prompt-reply.st-declined { color: #e0b070; }
-.st-prompt-forms { font: 11px/1.4 ui-monospace, Menlo, monospace; color: #c9cdd3;
-  white-space: pre-wrap; margin: 3px 0 0; }
-.st-prompt-forms .st-failed { color: #e07a7a; }
+.st-prompt-you, .st-prompt-reply, .st-prompt-forms { border-left: 3px solid; padding: 2px 4px 2px 7px;
+  margin: 4px 0; white-space: pre-wrap; }
+.st-prompt-you::before, .st-prompt-reply::before { display: block; font-size: 10px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #8a9099; }
+.st-prompt-you { border-color: #4a8fe0; background: #1f2b3a; color: #e8eaed; }
+.st-prompt-you::before { content: 'You'; }
+.st-prompt-reply { border-color: #8a9099; }
+.st-prompt-reply::before { content: 'Model'; }
+.st-prompt-reply.st-no-model::before { content: 'Stratum'; }
+.st-prompt-reply.st-declined { border-color: #e0b070; color: #e0b070; }
+.st-prompt-forms { border-color: #5aa469; background: #17181b; color: #c9cdd3;
+  font: 11px/1.4 ui-monospace, Menlo, monospace; }
+.st-prompt-forms summary { cursor: pointer; color: #8a9099; font-family: inherit; }
+.st-form { padding-left: 1.4em; text-indent: -1.4em; }
+.st-form::before { content: '\\2713\\a0'; color: #5aa469; }
+.st-form.st-failed::before { content: '\\2717\\a0'; color: #e07a7a; }
+.st-prompt-forms .st-failed, .st-prompt-forms.st-failed { color: #e07a7a; }
 .st-prompt-busy { color: #8a9099; font-style: italic; }
 .st-busy { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 50;
   display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px;

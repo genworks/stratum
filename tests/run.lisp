@@ -840,6 +840,81 @@ to alter the pictures."
                            (< 0 (aref m (+ 1 (* 6 1))) 255)
                            (> (aref m (+ 2 (* 6 1))) (aref m (+ 1 (* 6 1)))))))))))
 
+(defun nearest-site-squared (bytes w h x y site?)
+  "The squared distance from X, Y to the nearest byte of BYTES (W x H)
+that satisfies SITE?, by asking every pixel."
+  (let ((best nil))
+    (dotimes (sy h best)
+      (dotimes (sx w)
+        (when (funcall site? (aref bytes (+ sx (* sy w))))
+          (let ((d (+ (* (- x sx) (- x sx)) (* (- y sy) (- y sy)))))
+            (when (or (null best) (< d best)) (setf best d))))))))
+
+(defun test-modify-selection ()
+  "Contract and Expand: the distances exact, the edges where they should
+be, and the picture's edge no edge of the selection."
+  (let* ((w 40) (h 30)
+         (doc (make-file-document "modify" w h (make-rgba w h)))
+         (rect (lambda () (getf (the-object doc selection) :rect)))
+         (at (lambda (x y) (aref (getf (the-object doc selection) :mask) (+ x (* y w))))))
+    (let* ((gw 23) (gh 17) (bytes (test-noise (* gw gh) 7))
+           (site? (lambda (byte) (< byte 40)))
+           (grid (distances-to bytes gw (list 0 0 gw gh) site?)))
+      (check "the distance transform is exact, against every pair"
+             (loop for y below gh
+                   always (loop for x below gw
+                                always (= (aref grid (+ x (* y gw)))
+                                          (nearest-site-squared bytes gw gh x y site?))))))
+    (select-rect! doc 10 8 20 14)
+    (contract-selection! doc 3)
+    (check "Contract moves a straight edge in by exactly that"
+           (and (equal (funcall rect) '(13 11 14 8)) (= 255 (funcall at 13 11)))
+           (funcall rect))
+    (select-rect! doc 10 8 20 14)
+    (contract-selection! doc 2.5)
+    (check "half a pixel of it is half a pixel's coverage"
+           (and (equal (funcall rect) '(12 10 16 10))
+                (< 120 (funcall at 12 15) 135)
+                (= 255 (funcall at 13 15)))
+           (list (funcall rect) (funcall at 12 15)))
+    (select-rect! doc 10 8 20 14)
+    (expand-selection! doc 3)
+    (check "Expand moves it out, and rounds the corners"
+           (and (equal (funcall rect) '(7 5 26 20))
+                (= 255 (funcall at 7 12))
+                (zerop (funcall at 7 5))
+                (= 255 (funcall at 15 15)))
+           (funcall rect))
+    (select-rect! doc 0 0 20 30)
+    (contract-selection! doc 3)
+    (check "what reaches the picture's edge stays on it"
+           (equal (funcall rect) '(0 0 17 30))
+           (funcall rect))
+    (select-rect! doc 0 0 w h)
+    (contract-selection! doc 5)
+    (check "everything selected stays selected"
+           (equal (funcall rect) (list 0 0 w h)))
+    (select-rect! doc 10 10 4 4)
+    (contract-selection! doc 3)
+    (check "contracted past its middle a selection is gone"
+           (null (the-object doc selection)))
+    (contract-selection! doc 3)
+    (expand-selection! doc 3)
+    (check "with no selection there is nothing to do"
+           (null (the-object doc selection)))
+    (select-rect! doc 10 8 20 14)
+    (expand-selection! doc 100)
+    (check "Expand stops at the picture's edge"
+           (equal (funcall rect) (list 0 0 w h))
+           (funcall rect))
+    (let ((stratum-api:*document* doc))
+      (stratum-api:select-rect 10 8 20 14)
+      (let ((results (stratum:run-forms "(contract-selection 3) (expand-selection 1)")))
+        (check "the prompt may use them"
+               (and (every (lambda (r) (getf r :ok)) results)
+                    (equal (funcall rect) '(12 10 16 10)))
+               (list results (funcall rect)))))))
+
 (defun test-floating ()
   (let* ((image (let ((p (make-rgba 4 3)))
                   (dotimes (i 12 p)
@@ -3384,7 +3459,7 @@ and comes back again on redo; the undo list before it stays good."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))

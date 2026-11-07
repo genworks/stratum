@@ -29,7 +29,7 @@
            #:add-layer #:delete-layer #:duplicate-layer #:move-layer #:merge-down #:flatten
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
-           #:invert-selection #:feather #:selection #:look #:generate-fill #:generate-layer #:generate-picture
+           #:invert-selection #:feather #:contract-selection #:expand-selection #:selection #:look #:generate-fill #:generate-layer #:generate-picture
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
@@ -46,7 +46,8 @@
 (defparameter *prompt-operators*
   '(documents describe-document document-info layers layer-info look generate-fill generate-layer generate-picture
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
-    select-rect select-polygon select-wand select-all select-none invert-selection feather selection
+    select-rect select-polygon select-wand select-all select-none invert-selection feather
+    contract-selection expand-selection selection
     fill-selection clear-selection paint gradient move-pixels transform copy cut paste
     levels curves hue-saturation gaussian-blur unsharp-mask add-noise
     crop image-size canvas-size rotate color-mode undo redo set-history-source
@@ -329,6 +330,17 @@ contiguous or not, on LAYER (the composite when nil)."
 (defun feather (radius)
   "The selection's edge softened over RADIUS pixels."
   (stratum::feather-selection! (doc) radius)
+  (selection-result))
+
+(defun contract-selection (pixels)
+  "The selection's edge moved PIXELS in, except where it reaches the
+picture's edge."
+  (stratum::contract-selection! (doc) pixels)
+  (selection-result))
+
+(defun expand-selection (pixels)
+  "The selection's edge moved PIXELS out."
+  (stratum::expand-selection! (doc) pixels)
   (selection-result))
 
 (defun select-all ()

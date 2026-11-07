@@ -227,6 +227,137 @@ nothing without a selection."
                                                        (feather-mask-exact mask w h sigma (getf selection :rect)))
                                                    w h)))))))
 
+;;; Select > Modify > Contract and Expand: the selection's edge moved in
+;;; or out.  A feather spreads both ways, so a cut-out on the outline
+;;; brings a rim of what was behind the subject; moved in first, it does
+;;; not.  The distance from every pixel to the nearest pixel across the
+;;; edge comes from an exact Euclidean transform, whatever the amount.
+
+(defun parabola-envelope! (f d v z n)
+  "D, for each of the N places, the lowest of F[p] + (q - p) squared over
+every p: the lower envelope of the parabolas rooted at F.  V and Z are
+workspace for N and N + 1 entries."
+  (declare (type (simple-array double-float (*)) f d z)
+           (type (simple-array fixnum (*)) v)
+           (type fixnum n)
+           (optimize (speed 3)))
+  (let ((k 0))
+    (declare (type fixnum k))
+    (setf (aref v 0) 0
+          (aref z 0) most-negative-double-float
+          (aref z 1) most-positive-double-float)
+    (loop for q of-type fixnum from 1 below n
+          do (let ((height (+ (aref f q) (* (float q 1d0) (float q 1d0)))))
+               (declare (type double-float height))
+               (loop
+                 (let* ((p (aref v k))
+                        (crossing (/ (- height (+ (aref f p) (* (float p 1d0) (float p 1d0))))
+                                     (* 2d0 (float (- q p) 1d0)))))
+                   (declare (type fixnum p) (type double-float crossing))
+                   (cond ((<= crossing (aref z k)) (decf k))
+                         (t (incf k)
+                            (setf (aref v k) q
+                                  (aref z k) crossing
+                                  (aref z (1+ k)) most-positive-double-float)
+                            (return)))))))
+    (setf k 0)
+    (dotimes (q n d)
+      (let ((place (float q 1d0)))
+        (loop while (< (aref z (1+ k)) place) do (incf k))
+        (let* ((p (aref v k))
+               (run (- place (float p 1d0))))
+          (setf (aref d q) (+ (* run run) (aref f p))))))))
+
+(defun squared-distances! (grid w h)
+  "GRID, W x H doubles, 0 at a site and huge elsewhere, made the squared
+distance from each cell to the nearest site: along the columns, then the
+rows (Felzenszwalb and Huttenlocher)."
+  (declare (type (simple-array double-float (*)) grid) (type fixnum w h))
+  (flet ((lines (count length stride step)
+           (declare (type fixnum count length stride step))
+           (parallel-ranges
+            count
+            (lambda (start end)
+              (let ((f (make-array length :element-type 'double-float))
+                    (d (make-array length :element-type 'double-float))
+                    (v (make-array length :element-type 'fixnum))
+                    (z (make-array (1+ length) :element-type 'double-float)))
+                (loop for line from start below end
+                      do (let ((base (* line step)))
+                           (dotimes (i length)
+                             (setf (aref f i) (aref grid (+ base (* i stride)))))
+                           (parabola-envelope! f d v z length)
+                           (dotimes (i length)
+                             (setf (aref grid (+ base (* i stride))) (aref d i))))))))))
+    (lines w h w 1)
+    (lines h w 1 w)
+    grid))
+
+(defun selected-byte? (byte) (>= byte 128))
+
+(defun distances-to (mask w region site?)
+  "The squared distance across REGION (x y w h) of a MASK W wide from
+each pixel to the nearest one whose byte satisfies SITE?."
+  (destructuring-bind (x0 y0 pw ph) region
+    (let ((grid (make-array (* pw ph) :element-type 'double-float)))
+      (dotimes (y ph)
+        (dotimes (x pw)
+          (setf (aref grid (+ x (* y pw)))
+                (if (funcall site? (aref mask (+ x0 x (* (+ y0 y) w)))) 0d0 1d20))))
+      (squared-distances! grid pw ph))))
+
+(defun region-around (rect margin w h)
+  "RECT grown by MARGIN on every side, inside W x H."
+  (destructuring-bind (x y rw rh) rect
+    (let ((x0 (max 0 (- x margin))) (y0 (max 0 (- y margin)))
+          (x1 (min w (+ x rw margin))) (y1 (min h (+ y rh margin))))
+      (list x0 y0 (- x1 x0) (- y1 y0)))))
+
+(defun contract-selection! (doc pixels)
+  "The selection's edge moved PIXELS in; nothing without a selection.
+The picture's edge is no edge of the selection: what reaches the frame
+stays on it, as a subject cut by the frame must.  A soft edge comes out
+hard: feather after."
+  (let ((selection (the-object doc selection))
+        (w (the-object doc doc-width))
+        (h (the-object doc doc-height))
+        (amount (max 0d0 (float pixels 1d0))))
+    (when selection
+      (let* ((mask (getf selection :mask))
+             (region (region-around (getf selection :rect) 1 w h))
+             (grid (distances-to mask w region (lambda (byte) (not (selected-byte? byte)))))
+             (out (copy-seq mask)))
+        (destructuring-bind (x0 y0 pw ph) region
+          (dotimes (y ph)
+            (dotimes (x pw)
+              (let* ((i (+ x0 x (* (+ y0 y) w)))
+                     (reach (- (sqrt (aref grid (+ x (* y pw)))) amount)))
+                (setf (aref out i)
+                      (floor (* (aref mask i) (max 0d0 (min 1d0 reach)))))))))
+        (the-object doc (set-slot! :selection (make-selection out w h)))))))
+
+(defun expand-selection! (doc pixels)
+  "The selection's edge moved PIXELS out, inside the picture; nothing
+without a selection."
+  (let ((selection (the-object doc selection))
+        (w (the-object doc doc-width))
+        (h (the-object doc doc-height))
+        (amount (max 0d0 (float pixels 1d0))))
+    (when selection
+      (let* ((mask (getf selection :mask))
+             (region (region-around (getf selection :rect) (1+ (ceiling amount)) w h))
+             (grid (distances-to mask w region #'selected-byte?))
+             (out (copy-seq mask)))
+        (destructuring-bind (x0 y0 pw ph) region
+          (dotimes (y ph)
+            (dotimes (x pw)
+              (let* ((i (+ x0 x (* (+ y0 y) w)))
+                     (reach (- (+ amount 1d0) (sqrt (aref grid (+ x (* y pw)))))))
+                (unless (selected-byte? (aref mask i))
+                  (setf (aref out i)
+                        (max (aref mask i) (floor (* 255 (max 0d0 (min 1d0 reach)))))))))))
+        (the-object doc (set-slot! :selection (make-selection out w h)))))))
+
 (defun select-all! (doc)
   (select-rect! doc 0 0 (the-object doc doc-width) (the-object doc doc-height)))
 

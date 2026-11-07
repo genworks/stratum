@@ -209,7 +209,13 @@ cover).
 - `(select-polygon points &key mode)` — points `((x y) ...)`.
 - `(select-wand x y &key (tolerance 32) (contiguous t) mode layer)` —
   the Magic Wand at a pixel, on a layer or the composite.
-- `(feather radius)` — the edge softened over `radius` pixels.
+- `(feather radius)` — the edge softened over `radius` pixels.  A
+  feather spreads both ways.
+- `(contract-selection pixels)`, `(expand-selection pixels)` — the edge
+  moved in or out, except that what reaches the picture's edge stays
+  there.  A soft edge comes out hard, so feather after.  To cut a subject
+  out, `(contract-selection 2.5)` then `(feather 1)`: on the outline
+  itself, a rim of what was behind it comes too.
 - `(select-all)`, `(select-none)`, `(invert-selection)`.
 
 ## Pixels

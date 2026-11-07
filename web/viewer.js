@@ -982,6 +982,8 @@
       else if (e.shiftKey && e.key === 'F6') { e.preventDefault(); S.openFeather(); }
       else if (e.key === 'Escape' && S.featherDialog) S.featherDialog.cancel();
       else if (e.key === 'Enter' && S.featherDialog) S.featherDialog.ok();
+      else if (e.key === 'Escape' && S.modifyDialog) S.modifyDialog.cancel();
+      else if (e.key === 'Enter' && S.modifyDialog) S.modifyDialog.ok();
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) { e.preventDefault(); S.clear(); }
       else if (e.key === 'Escape' && S.fillDialog) S.fillDialog.cancel();
       else if (e.key === 'Enter' && S.fillDialog) S.fillDialog.ok();
@@ -1978,6 +1980,29 @@
     return dialog;
   };
 
+  // Select > Modify: the selection's edge moved in or out.
+  S.openModify = function (op) {
+    if (!S.selection) { status('nothing is selected to ' + op); return null; }
+    if (S.modifyDialog) S.modifyDialog.cancel();
+    var state = { radius: 2 };
+    var box = el('div', { 'class': 'st-dialog' }, [
+      el('h2', { text: (op === 'contract' ? 'Contract' : 'Expand') + ' Selection' }),
+      settingSlider(state, 'radius', function () {})]);
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var ok = el('button', { type: 'button', text: 'OK' });
+    box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.modifyDialog = {
+      state: state,
+      set: function (changes) { Object.assign(state, changes); },
+      cancel: function () { box.remove(); S.modifyDialog = null; },
+      ok: function () { box.remove(); S.modifyDialog = null; return S.select({ op: op, pixels: state.radius }); }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    ok.addEventListener('click', dialog.ok);
+    return dialog;
+  };
+
   // ---- the floating layer: Move, Cut, Copy, Paste -------------------------
   //
   // While the Move tool drags, the shader's floating stage shows the
@@ -2873,7 +2898,10 @@
         '-',
         { label: 'Color Range...' },
         { label: 'Feather...', key: 'Shift+F6', enabled: function () { return !!S.selection; },
-          run: function () { S.openFeather(); } }] },
+          run: function () { S.openFeather(); } },
+        { label: 'Modify', sub: [
+          { label: 'Expand...', enabled: function () { return !!S.selection; }, run: function () { S.openModify('expand'); } },
+          { label: 'Contract...', enabled: function () { return !!S.selection; }, run: function () { S.openModify('contract'); } }] }] },
       { title: 'Filter', items: [
         { label: 'Blur', sub: [{ label: 'Gaussian Blur...', enabled: rasterActive,
                                  run: function () { S.openFilter('gaussian-blur'); } }] },
@@ -4166,7 +4194,19 @@
           d.set({ radius: 6 });
           return d.ok().then(function (rect) {
             check('Feather widens the selection\'s bounds', rect && rect.h >= before.h, { before: before, after: rect });
-            return S.select({ op: 'none' });
+            return S.select({ op: 'rect', x: 40, y: 40, w: 120, h: 100, mode: 'new' });
+          }).then(function (plain) {
+            var d2 = S.openModify('contract');
+            d2.set({ radius: 3 });
+            return d2.ok().then(function (smaller) {
+              check('Contract moves the selection\'s edge in', smaller && smaller.h === plain.h - 6, { before: plain, after: smaller });
+              var d3 = S.openModify('expand');
+              d3.set({ radius: 3 });
+              return d3.ok().then(function (larger) {
+                check('Expand moves it out again', larger && larger.h > smaller.h, { before: smaller, after: larger });
+                return S.select({ op: 'none' });
+              });
+            });
           });
         }).then(function () { S.setActiveLayer(active, false); });
       });

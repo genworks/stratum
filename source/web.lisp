@@ -450,6 +450,8 @@ bytes."
                                     (and (integerp i) (< -1 i (length (the-object doc layer-list)))
                                          (the-object doc (layer i))))))
             ((equal op "feather") (feather-selection! doc (or (gethash "radius" body) 1)))
+            ((equal op "contract") (contract-selection! doc (or (gethash "pixels" body) 1)))
+            ((equal op "expand") (expand-selection! doc (or (gethash "pixels" body) 1)))
             ((equal op "all") (select-all! doc))
             ((equal op "none") (select-none! doc))
             ((equal op "inverse") (select-inverse! doc))

@@ -107,7 +107,9 @@ largest channel difference with alpha included, the connected patch
 when contiguous and every one otherwise, on the active raster layer or
 on the composited picture; with any selection tool Shift adds to the
 selection and Alt takes from it. Feather softens the selection's edge
-with a Gaussian blur of the mask. Edit ▸ Fill paints the selection
+with a Gaussian blur of the mask; Modify ▸ Expand and Contract move the
+edge by an exact distance, and what reaches the picture's edge stays
+there, so a subject cut by the frame keeps to it. Edit ▸ Fill paints the selection
 with the foreground, background, black, white or gray at an opacity,
 and Clear empties it.
 
@@ -406,7 +408,7 @@ with a live preview that bakes the adjustment into the active raster
 layer's pixels on OK; Image ▸ Mode ▸ Grayscale and RGB Color; Image ▸
 Image Size (Ctrl+Alt+I), Canvas Size (Ctrl+Alt+C), Image Rotation
 (180°, 90° either way, Arbitrary, the two flips) and Crop; Select ▸ All (Ctrl+A), Deselect (Ctrl+D),
-Inverse (Ctrl+Shift+I) and Feather (Shift+F6); Filter ▸ Blur ▸
+Inverse (Ctrl+Shift+I), Feather (Shift+F6) and Modify ▸ Expand and Contract; Filter ▸ Blur ▸
 Gaussian Blur, Sharpen ▸
 Unsharp Mask and Noise ▸ Add Noise; Layer ▸ New ▸ Layer, Duplicate Layer,
 Delete Layer, New Adjustment Layer (Levels, Curves, Hue/Saturation),

@@ -118,8 +118,11 @@ the operations above, which are exact and immediate.
   repainted, to match what surrounds it, as a new raster layer visible
   only inside the selection, so nothing else can change.  Select the
   area first and generously, well beyond the thing you want: the result
-  fades out toward the selection's edge, and anything reaching the edge
-  is cut off there.  By default the layer keeps only what the generator
+  fades out over a few pixels at the selection's edge, and anything
+  reaching the edge is cut off there.  The generator works at about a
+  megapixel over the selection's whole bounding box, so give areas far
+  apart a fill each: one fill across both is painted coarser.  When a
+  fill looks wrong, check the selection as well as the words.  By default the layer keeps only what the generator
   changed (`:keep :changed`): where it painted back much the same as
   before, the layer is clear, so a new thing comes without a repainted
   copy of its surroundings and the picture shows through.  `:keep :all`

@@ -1513,6 +1513,67 @@ and what the person hears.  The replies have sd-server's own shape."
                      info))
             (stratum-api:delete-layer "Oils")))))))
 
+(defun test-generate-turn ()
+  "A generator shared with something else: its turn runs around the job
+alone, with no lock of ours held."
+  (let* ((stratum-api:*document* nil)
+         (*documents* (make-hash-table :test 'equal))
+         (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+         (turns 0) (free nil) (inside 0))
+    (declare (ignorable doc))
+    (check "a generator takes its turn at once unless told otherwise"
+           (eq (generator-turn (make-generator "http://localhost" 4 1 0.9d0 256 "" 20 nil)) #'funcall))
+    (let ((*generator* nil))
+      (let ((turn (lambda (thunk) (funcall thunk))))
+        (check "configure-generator! keeps the turn it is given"
+               (eq turn (generator-turn (configure-generator! :url "http://localhost" :turn turn))))))
+    (call-with-stub-generator
+     (lambda (generator seen)
+       (setf (generator-turn generator)
+             (lambda (thunk)
+               (incf turns)
+               (setf free (session-idle? *shared-session*))
+               (funcall thunk)
+               (setf inside (length (funcall seen)))
+               :a-turn-answers-nothing-we-need))
+       (let ((*generator* generator))
+         (stratum-api:generate-layer "a meadow" :name "Meadow")
+         (check "the job runs inside the turn, once"
+                (and (= turns 1) (= inside 1) (= 1 (length (funcall seen))))
+                (list turns inside))
+         (check "no lock of ours is held in it" free)
+         (check "and the picture comes back whatever the turn answers"
+                (find "Meadow" (stratum-api:layers)
+                      :key (lambda (l) (getf l :name)) :test #'equal))
+         (stratum-api:delete-layer "Meadow")
+         (setf (generator-turn generator) (lambda (thunk) (declare (ignore thunk)) nil))
+         (check "a turn that never comes is an error in words"
+                (handler-case (progn (stratum-api:generate-layer "a meadow") nil)
+                  (error (e) (search "turn never came" (princ-to-string e))))))))))
+
+(defun test-fill-fade ()
+  "A fill's fade follows the generator's pixels, not how far the
+selection reaches: a long narrow selection is filled nearly to its edge."
+  (let* ((w 1700) (h 400) (coverage (make-gray w h)))
+    (loop for y from 100 below 300
+          do (loop for x from 100 below 1600
+                   do (setf (aref coverage (+ x (* y w))) 255)))
+    (let* ((faded (faded-coverage coverage w h 1024))
+           (coarse (faded-coverage coverage w h 256)))
+      (flet ((alpha (bytes x y) (aref bytes (+ x (* y w)))))
+        (check "a wide selection is whole a few pixels in from its edge"
+               (>= (alpha faded 115 200) 250) (alpha faded 115 200))
+        (check "and still soft at the edge itself"
+               (and (< (alpha faded 100 200) 64)
+                    (< (alpha faded 100 200) (alpha faded 105 200) (alpha faded 115 200)))
+               (list (alpha faded 100 200) (alpha faded 105 200)))
+        (check "a generator's coarser pixels widen the fade"
+               (< (alpha coarse 115 200) (alpha faded 115 200))
+               (alpha coarse 115 200))
+        (check "and nothing outside the selection is touched"
+               (and (zerop (alpha faded 99 200))
+                    (every #'<= faded coverage)))))))
+
 (defun with-exif (jpeg orientation &key big-endian)
   "JPEG, a file's octets, with an EXIF segment saying ORIENTATION."
   (flet ((u16 (v) (if big-endian (list (ash v -8) (logand v 255)) (list (logand v 255) (ash v -8))))
@@ -3300,7 +3361,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

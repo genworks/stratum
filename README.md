@@ -337,7 +337,9 @@ browser cannot pair an old script with a new server.
 `(stratum:configure-generator! :url "http://generator:7860" :steps 28
 :cfg-scale 7 :strength 0.9 :size 1024)` points Stratum at an image
 generator: stable-diffusion.cpp's `sd-server`, through its job API
-(`/sdcpp/v1/img_gen`).  There is none by default.
+(`/sdcpp/v1/img_gen`).  There is none by default.  On a card shared
+with something else, `:turn`, a function of one thunk, runs each job
+when the card is free; it runs with no lock of Stratum's held.
 `(generate-fill prompt)` sends a crop around the selection, scaled to
 `:size`, with the selection as its mask; the answer lands as a new
 raster layer whose alpha is the selection's coverage, faded in from

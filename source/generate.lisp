@@ -39,23 +39,26 @@
 ;;
 
 (defstruct (generator (:constructor make-generator
-                          (url steps cfg-scale strength size negative seconds invert-mask)))
+                          (url steps cfg-scale strength size negative seconds invert-mask
+                           &optional (turn #'funcall))))
   "A generator's address and how to ask it.  URL is its base, with no
 trailing slash; STEPS, CFG-SCALE and STRENGTH (denoising, 0-1) suit its
 model; SIZE is the longer side, in pixels, of what it is sent; NEGATIVE
 a negative prompt; SECONDS how long to wait; INVERT-MASK true when its
-model wants the selection dark."
-  url steps cfg-scale strength size negative seconds invert-mask)
+model wants the selection dark; TURN a function of one thunk that calls
+it when the generator may be used, for a card shared with something
+else.  It runs with no lock of ours held and must not wait on one."
+  url steps cfg-scale strength size negative seconds invert-mask turn)
 
 (defvar *generator* nil
   "The image generator, or nil: there is none by default.")
 
 (defun configure-generator! (&key url (steps 28) (cfg-scale 7) (strength 0.9d0) (size 1024)
-                                  (negative "") (seconds 300) invert-mask)
+                                  (negative "") (seconds 300) invert-mask (turn #'funcall))
   "Generate images through the service at URL, or not at all with nil.
 The generator as it stands."
   (setf *generator* (and url (make-generator (string-right-trim "/" url) steps cfg-scale strength
-                                             size negative seconds invert-mask))))
+                                             size negative seconds invert-mask turn))))
 
 (defun fitted-size (w h size)
   "W x H scaled so the longer side is SIZE, each side a multiple of 64,
@@ -135,7 +138,7 @@ shown and works from."
       (error "The image generator finished with no image."))
     (read-png (cl-base64:base64-string-to-usb8-array image))))
 
-(defun ask-generator (generator body)
+(defun generator-job (generator body)
   "BODY submitted to the generator as a job, and the job waited for:
 the picture, (values pixels w h).  Errors say what a person can act on."
   (multiple-value-bind (status text)
@@ -163,6 +166,16 @@ the picture, (values pixels w h).  Errors say what a person can act on."
                  (error "The image generator took more than ~a seconds." (generator-seconds generator)))
                 (t (sleep *generator-poll-seconds*))))))))
 
+(defun ask-generator (generator body)
+  "The job BODY run in the generator's turn: the picture, (values pixels
+w h), whatever the turn itself answers."
+  (let ((picture nil))
+    (funcall (generator-turn generator)
+             (lambda () (setf picture (multiple-value-list (generator-job generator body)))))
+    (unless picture
+      (error "The image generator's turn never came."))
+    (values-list picture)))
+
 (defun require-generator ()
   (or *generator* (error "This server has no image generator.")))
 
@@ -187,13 +200,20 @@ name comes first."
          "has an image generator whose model cannot be shown a picture: generate-picture starts from the picture, by :strength, and its prompt describes the result")
         (t "has an image generator")))
 
-(defun faded-coverage (coverage w h)
-  "COVERAGE, W x H bytes, fading to nothing at its edge over about a
-fiftieth of its longer side.  A generator's idea of the surroundings is
-never quite the picture's, so a hard edge shows as a pasted square; and
-each byte is at most what it was, so nothing outside the selection can
-change."
-  (let* ((sigma (max 3d0 (/ (max w h) 50d0)))
+(defparameter *fill-fade-pixels* 3
+  "How wide a fill's fade is: the sigma of its blur, in the generator's
+pixels.  The seam it hides is as coarse as those pixels.  It does not
+follow the size of the selection, whose bounding box may span the
+picture while the part that matters is narrow: a fade set by that box
+left the holes around a bench's legs showing through their fill.")
+
+(defun faded-coverage (coverage w h painted-width)
+  "COVERAGE, W x H bytes, fading to nothing at its edge over a few of
+the generator's pixels, PAINTED-WIDTH of them across these W.  A
+generator's idea of the surroundings is never quite the picture's, so a
+hard edge shows as a pasted square; and each byte is at most what it
+was, so nothing outside the selection can change."
+  (let* ((sigma (max 3d0 (/ (* *fill-fade-pixels* w) (float painted-width 1d0))))
          (blurred (feather-mask-exact coverage w h sigma))
          (out (make-gray w h)))
     (dotimes (i (* w h) out)
@@ -318,7 +338,7 @@ layer's layer-info."
         (declare (ignore x y))
         ;; the alpha is worked out before the lock is taken: nothing
         ;; here reads the document
-        (let ((coverage (faded-coverage coverage rw rh)))
+        (let ((coverage (faded-coverage coverage rw rh sw)))
           (when (eq keep :changed)
             (keep-changed! coverage rw rh sent sw sh pixels w h))
           (let ((layer (generated-pixels doc pixels w h rect coverage)))

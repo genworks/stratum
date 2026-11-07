@@ -1055,6 +1055,13 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
   white-space: pre-wrap; margin: 3px 0 0; }
 .st-prompt-forms .st-failed { color: #e07a7a; }
 .st-prompt-busy { color: #8a9099; font-style: italic; }
+.st-busy { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 50;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px;
+  background: #2a2f36; color: #e8eaed; border: 1px solid #4a5058; font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .4); }
+.st-spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #6a7078;
+  border-top-color: #e8eaed; animation: st-spin .8s linear infinite; }
+@keyframes st-spin { to { transform: rotate(360deg); } }
 body.st-loading #stratum-menubar, body.st-loading #stratum-tools, body.st-loading #stratum-view,
 body.st-loading #stratum-layers, body.st-loading #stratum-prompt { pointer-events: none; }
 body.st-loading #stratum-menubar, body.st-loading #stratum-tools,

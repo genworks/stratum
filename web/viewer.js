@@ -119,10 +119,26 @@
     return t;
   }
 
+  // S.fetchNote, while it is set, hears the bytes as they arrive.
   function fetchBytes(url) {
     return fetch(url).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(url + ': ' + r.status + ' ' + t); });
-      return r.arrayBuffer();
+      if (!S.fetchNote || !r.body) return r.arrayBuffer();
+      var reader = r.body.getReader(), chunks = [], total = 0;
+      function more() {
+        return reader.read().then(function (part) {
+          if (part.done) {
+            var all = new Uint8Array(total), at = 0;
+            chunks.forEach(function (c) { all.set(c, at); at += c.length; });
+            return all;
+          }
+          chunks.push(part.value);
+          total += part.value.length;
+          if (S.fetchNote) S.fetchNote(total);
+          return more();
+        });
+      }
+      return more();
     }).then(function (b) { return new Uint8Array(b); });
   }
 
@@ -3752,10 +3768,15 @@
         g.set({ source: 'picture' });
         check('it asks for words before it goes', g.ok() === null && S.generateDialog === g);
         g.set({ prompt: 'a meadow', source: 'new' });
-        return g.ok().then(function (res) {
+        var going = g.ok();
+        check('the wait is shown over the picture', /Generating/.test(S.busyText()) &&
+              document.getElementById('stratum-busy').style.display !== 'none', { busy: S.busyText() });
+        return going.then(function (res) {
           check('a generation reaches the door and answers one form, with no model',
                 S.generateDialog === null && res.results.length === 1 && /generate-layer/.test(res.results[0].form),
                 res);
+          check('and the wait goes away when it is over',
+                S.busyText() === '' && document.getElementById('stratum-busy').style.display === 'none');
         });
       }).then(function () {
         // The same PNG file sent whole: the server's own reader decodes
@@ -4801,6 +4822,35 @@
   // The test hook and the button's action: resolves to the server's
   // answer ({reply, forms, results, ok, width, height}) once the page
   // has caught up; the page reloads when the document's size changed.
+  // What the page is waiting for, over the picture where it cannot be
+  // missed, with the seconds it has taken; nil takes it away.
+  var busyBox = null, busyWords = null, busyTimer = null, busyBegan = 0, busyText = '';
+  function showBusy() {
+    busyWords.textContent = busyText + '  ' + Math.round((Date.now() - busyBegan) / 1000) + ' s';
+  }
+  S.busy = function (text) {
+    if (!text) {
+      clearInterval(busyTimer);
+      busyTimer = null;
+      busyText = '';
+      if (busyBox) busyBox.style.display = 'none';
+      return;
+    }
+    if (!busyBox) {
+      busyWords = el('span', { text: '' });
+      busyBox = el('div', { 'class': 'st-busy', id: 'stratum-busy' }, [el('div', { 'class': 'st-spinner' }), busyWords]);
+      document.getElementById('stratum-app').appendChild(busyBox);
+    }
+    if (!busyTimer) {
+      busyBegan = Date.now();
+      busyTimer = setInterval(showBusy, 500);
+    }
+    busyText = text;
+    busyBox.style.display = '';
+    showBusy();
+  };
+  S.busyText = function () { return busyText; };
+
   function awaitPromptJob(id) {
     return new Promise(function (resolve, reject) {
       function poll() {
@@ -4819,6 +4869,16 @@
   // GENERATE, the Generate dialog's settings: the text goes to the image
   // generator with no model between them.
   S.prompt = function (text, generate) {
+    function bringDown() {
+      // the server is done; a new layer of a photograph is many megabytes
+      S.busy('Bringing the new pixels down...');
+      S.fetchNote = function (bytes) { S.busy('Bringing the new pixels down: ' + megabytes(bytes)); };
+    }
+    function settled() {
+      S.busy(null);
+      S.fetchNote = null;
+    }
+    S.busy(generate ? 'Generating the picture...' : 'Working on your prompt...');
     return S.strokesSettled().then(function () {
       return postJSON('prompt', JSON.stringify(generate ? { prompt: text, generate: generate } : { prompt: text }));
     }).then(function (res) {
@@ -4826,11 +4886,15 @@
     }).then(function (res) {
       showPromptTurn(text, res);
       if (res.width !== doc.width || res.height !== doc.height) {
+        settled();
         if (!S.noReload) location.reload();
         return res;
       }
-      return S.refreshAll(res.changed).then(function () { return res; });
+      bringDown();
+      return S.refreshAll(res.changed).then(function () { settled(); return res; },
+                                            function (e) { settled(); throw e; });
     }, function (e) {
+      settled();
       showPromptTurn(text, { error: plainError(e) });
       status('prompt failed');
       // forms may have run before it failed: show what is there now
@@ -4894,10 +4958,8 @@
         if (!text) { words.focus(); return null; }
         box.remove();
         S.generateDialog = null;
-        status('generating...');
         return S.prompt(text, { source: state.source, name: state.name, reference: state.reference,
-                                strength: state.strength, keepAll: state.keepAll })
-          .then(function (res) { status(); return res; });
+                                strength: state.strength, keepAll: state.keepAll });
       }
     };
     cancel.addEventListener('click', dialog.cancel);

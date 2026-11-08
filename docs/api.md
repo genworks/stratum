@@ -147,6 +147,40 @@ pixels):
    everything else, and only when step 1 needs it or the person asked:
    a prompt that crops has no undo.
 
+## Keeping a face, changing the rest
+
+To change a person's build, clothes or pose and keep their face, make
+the new body in ONE generation and put the person's own head over it.
+Never build the body up from fills patch by patch: each fill fades out
+at its edge, every patch over a patch leaves another line across the
+body, and each repaint puts the neck somewhere new.
+
+1. Cut out the head first, from the photograph as it is.  Select the
+   head and the neck down to just above the collar, on the edge where
+   they meet the background, and straight across the neck below.
+   `(contract-selection 2)`, `(feather 2)`, then `(cut-out 0 :name
+   "Head")`.
+2. Make the new picture with the photograph as its reference:
+   `(select-none)`, then `(generate-picture "make this person's build
+   much more muscular, keeping the same face, room, pose, framing, shirt
+   and light" :name "New body")`.  Say what stays: the clothes as they are ("the same
+   navy cotton shirt"), the light as it is ("the same soft indoor
+   light"), so the new body is not lit or dressed from another
+   picture.  Ask for a neck to match: a much broader body on the
+   person's own neck makes the head look small and set on top.
+3. `(move-layer "New body" -1)` puts it under the head.  `look` at the
+   neck closely: the cut must fall on the new neck.  If the new neck is
+   a few pixels off, `(move-pixels "Head" dx dy)` with nothing
+   selected; if it is far off or the wrong width, delete the layer and
+   generate again with another seed, rather than patching it.
+4. The new picture redraws the whole frame, the room too, from a
+   megapixel or so.  To keep the room sharp, cut the new body out of
+   it as well (step 2 of the recipe above, on "New body") and hide
+   that layer: that works only where the new body covers the old one,
+   so `look` along its edges for the old shoulders showing.
+5. No generator over the face, ever: the head layer is the person.
+   `look` at the face, the neck and the edges last.
+
 ## Making new pixels
 
 Everything else here changes what is in the picture.  When a request
@@ -173,7 +207,10 @@ the operations above, which are exact and immediate.
   keeps every pixel of the selection: for a fill that must replace
   everything it covers, such as a new background or a changed texture,
   where the new may resemble the old.  To remove something, select it
-  and describe what should be there instead.
+  and describe what should be there instead.  When a fill leaves a seam,
+  a line or a change of texture where it ends, never fill over the
+  seam: that adds a fade of its own and another line.  Delete the fill
+  and do it again over the whole region at once, selected generously.
 - `(generate-layer prompt &key name seed)` — a whole new picture of the
   document's shape as a new raster layer on top.
 - `(generate-picture prompt &key name seed reference strength)` — the

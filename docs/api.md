@@ -103,6 +103,49 @@ eyes, blur a sign):
    result, and put right what is wrong.  Keep your last look for this:
    the caption says how many are left.
 
+## Putting a subject on a new background
+
+To put a person or thing from the photograph in front of a new
+background (the generator and its prompts are under Making new
+pixels):
+
+1. Decide the frame.  A subject that touches the edge of the photograph
+   is cut off there, and moved inward that cut shows as a straight line
+   through an arm or a shoulder.  Leave such a subject where it is, and
+   move the others toward it if they must move.  If it must move too,
+   crop at the end so that its cut lies on the new edge.
+2. Cut it out.  Select it on its edge as above, leaving out any pocket
+   of the old background between an arm and the body, then
+   `(contract-selection 2.5)` and `(feather 1)`: a feather spreads both
+   ways, so a selection on the outline itself brings a rim of the old
+   background with it.  `(copy layer)` and `(paste)` put the subject on
+   a layer of its own; subjects that stay together can share one
+   selection and one layer.  To move it, `(select-none)` and then
+   `(move-pixels layer dx dy)`.
+3. Make the background a layer of its own, never a fill around the
+   subject: `(generate-layer prompt :name "New background")`, then
+   `move-layer` it down past the subject's layers (with one,
+   `(move-layer "New background" -1)`), and `(set-layer 0 :visible nil)`
+   to hide the original, whose layer is most often named "Background"
+   already.  `generate-fill` fades out at the selection's
+   edge, so a fill through `invert-selection` leaves the old picture
+   showing around the subject in a band about six pixels wide.
+4. Blur the background, with nothing selected so that the blur reaches
+   all of it: `(select-none)`, then `(gaussian-blur "New background" 2)`,
+   about 2 for each thousand pixels of the picture's width.  A sharp
+   background behind a sharp subject reads as a sticker; this step does
+   more than any other here.
+5. Leave the subject's colors alone unless the new light is plainly
+   colored; then move them a quarter of the way at most, with `levels`
+   or `hue-saturation` on the subject's layer, since a strong match
+   makes skin look dead.  Add no drop shadow to a subject in front of a
+   distant view.  Run no generator over the subject, neither a fill nor
+   `generate-picture`: over a person it paints someone else.
+6. `look` closely at the subject's edges and at the corners of the
+   frame, and put right what is wrong.  `crop` only now, after
+   everything else, and only when step 1 needs it or the person asked:
+   a prompt that crops has no undo.
+
 ## Making new pixels
 
 Everything else here changes what is in the picture.  When a request
@@ -147,10 +190,34 @@ the operations above, which are exact and immediate.
   fine detail of a large photograph is lost.
 
 `prompt` is a description of the result in plain visual words, not an
-instruction: "weathered stone wall in soft afternoon light", not "make
-this a wall".  `name` names the layer; `seed` repeats a result, and -1,
-the default, varies it.  `look` at the result; a poor one is taken off
-with `(delete-layer name)` before trying again with other words.
+instruction: "weathered stone wall in soft daylight", not "make this a
+wall".  `name` names the layer; `seed` repeats a result, and -1, the
+default, varies it.  `look` at the result; a poor one is taken off with
+`(delete-layer name)` before trying again with other words.
+
+**Writing a prompt.**  Say what the person's words mean, not what they
+sound like.  A name, a title or a figure of speech is not a color or a
+material: "the Golden Age of Athens" means Athens at the height of its
+glory, not a city made of gold.  Use a color word only for a color the
+person asked for, and add no mood, weather, time of day or style they
+did not ask for, such as "sunset", "epic", "ornate" or "rich": the
+generator takes every word at full strength.
+
+Match the medium.  Behind or into a photograph, ask for a photograph:
+begin with "photograph of" and say "natural color".  Say "painting" or
+"illustration" only when the person asked for a painted result, or the
+generator may put a painting into the scene as an object.  Name what
+belongs rather than what does not: "wooden sailing ships in the
+harbor", not "no modern boats".
+
+Match the subject.  When a person or thing from the photograph will
+stand in front of the new picture, describe the camera and the light it
+was photographed with: "taken at eye level from a stone terrace", not a
+view from above, and the same light, most often "soft overcast
+daylight".  Say where the important thing goes, in the gap the subject
+leaves: "one tall temple tower in the exact center of the picture".
+Then `look` at the result for anything wrong for the place or the
+period, such as the wrong symbol on a building.
 
 ## Layers
 

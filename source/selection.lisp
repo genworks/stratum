@@ -628,3 +628,169 @@ changed, on the undo list."
                              (max 0d0 (min 1d0 (float opacity 1d0))) erase?))
         (the-object layer (set-slot! :paint-version (1+ (the-object layer paint-version))))
         rect))))
+
+;;; Cut Out.  A pixel the selection covers only partly is a mix of the
+;;; subject and of what was behind it, and Copy takes the mix as it is:
+;;; on a new background the old one shows as a rim.  Cut Out estimates
+;;; the subject's own color there by blur fusion (Forte and Pitie, 2021):
+;;; local means of subject and background, weighted by the selection and
+;;; by its complement, corrected toward the pixel, in a wide pass and
+;;; then a narrow one.  Then, within a few pixels of the edge, the color
+;;; is drawn from deeper inside, which also takes away the photograph's
+;;; own sharpening rim.  All in linear light, one channel at a time, over
+;;; the selection's rectangle and a margin.
+
+(defparameter *fusion-radii* '(45 3)
+  "Blur fusion's box radii: the wide pass, then the narrow.")
+
+(defun box-sums (src w h r)
+  "The sum of SRC (W x H single floats) over the square of radius R
+around each pixel, clipped to the rectangle: rows, then columns."
+  (declare (type (simple-array single-float (*)) src) (type fixnum w h r))
+  (let ((rows (make-plane (* w h)))
+        (out (make-plane (* w h))))
+    (flet ((pass (from to count length stride step)
+             (declare (type (simple-array single-float (*)) from to)
+                      (type fixnum count length stride step))
+             (parallel-ranges
+              count
+              (lambda (start end)
+                (loop for line of-type fixnum from start below end
+                      do (let ((base (* line step)) (sum 0d0))
+                           (declare (type fixnum base) (type double-float sum))
+                           (dotimes (i (min r length))
+                             (incf sum (aref from (+ base (* i stride)))))
+                           (dotimes (i length)
+                             (let ((add (+ i r)) (drop (- i r 1)))
+                               (when (< add length) (incf sum (aref from (+ base (* add stride)))))
+                               (when (>= drop 0) (decf sum (aref from (+ base (* drop stride)))))
+                               (setf (aref to (+ base (* i stride))) (float sum 1f0))))))))))
+      (pass src rows h w 1 w)
+      (pass rows out w h w 1))
+    out))
+
+(defun fusion-pass (image alpha alpha-sums f b w h r)
+  "One pass of blur fusion over one channel, W x H: the subject's color
+F and the background's B re-estimated as their means over the square of
+radius R, weighted by ALPHA and by its complement, each moved toward
+IMAGE by its share of what the pair fails to explain.  ALPHA-SUMS is
+ALPHA's box sums at R.  Fresh planes for F and B."
+  (declare (type (simple-array single-float (*)) image alpha alpha-sums f b)
+           (type fixnum w h r))
+  (let* ((n (* w h)) (af (make-plane n)) (ab (make-plane n)))
+    (declare (type (simple-array single-float (*)) af ab))
+    (dotimes (k n)
+      (let ((a (aref alpha k)))
+        (setf (aref af k) (* a (aref f k))
+              (aref ab k) (* (- 1f0 a) (aref b k)))))
+    (let ((sf (box-sums af w h r)) (sb (box-sums ab w h r)))
+      (declare (type (simple-array single-float (*)) sf sb))
+      (parallel-ranges
+       h
+       (lambda (start end)
+         (loop for y of-type fixnum from start below end
+               do (let ((rows (float (- (min (1- h) (+ y r)) (max 0 (- y r)) -1) 1d0)))
+                    (dotimes (x w)
+                      (let* ((k (+ x (* y w)))
+                             (count (* rows (float (- (min (1- w) (+ x r)) (max 0 (- x r)) -1) 1d0)))
+                             (a (float (aref alpha k) 1d0))
+                             (in (float (aref alpha-sums k) 1d0))
+                             (mf (/ (aref sf k) (+ in 1d-5)))
+                             (mb (/ (aref sb k) (+ (- count in) 1d-5)))
+                             (e (- (aref image k) (* a mf) (* (- 1d0 a) mb))))
+                        (setf (aref af k) (float (max 0d0 (min 1d0 (+ mf (* a e)))) 1f0)
+                              (aref ab k) (float (max 0d0 (min 1d0 (+ mb (* (- 1d0 a) e)))) 1f0))))))))
+      (values af ab))))
+
+(defun defringe! (colors mask width region depth)
+  "COLORS, three planes over REGION of a MASK WIDTH wide, drawn toward a
+blur of the colors lying DEPTH and more inside the selection's edge:
+wholly at the edge, not at all DEPTH in.  The weight each pixel kept of
+its own color, a plane."
+  (destructuring-bind (x0 y0 pw ph) region
+    (declare (ignore x0 y0))
+    (let* ((n (* pw ph))
+           (grid (distances-to mask width region (lambda (byte) (< byte 243))))
+           (kept (make-plane n))
+           (packed (make-plane (* 4 n))))
+      (declare (type (simple-array double-float (*)) grid)
+               (type (simple-array single-float (*)) kept packed))
+      (dotimes (k n)
+        (let ((u (min 1d0 (/ (sqrt (aref grid k)) depth))))
+          (setf (aref kept k) (float u 1f0))
+          (when (>= u 1d0)
+            (loop for channel from 0 for plane in colors
+                  do (setf (aref packed (+ channel (* 4 k))) (aref plane k)))
+            (setf (aref packed (+ 3 (* 4 k))) 1f0))))
+      (let ((deeper (gaussian-blur-premul packed pw ph depth)))
+        (declare (type (simple-array single-float (*)) deeper))
+        (dotimes (k n)
+          (let ((u (aref kept k)) (weight (aref deeper (+ 3 (* 4 k)))))
+            (when (and (< u 1f0) (> weight 1f-3))
+              (loop for channel from 0 for plane in colors
+                    do (let ((plane plane))
+                         (declare (type (simple-array single-float (*)) plane))
+                         (setf (aref plane k)
+                               (+ (* u (aref plane k))
+                                  (* (- 1f0 u) (/ (aref deeper (+ channel (* 4 k))) weight))))))))))
+      kept)))
+
+(defun cut-out-selection! (layer &key name (defringe 3))
+  "Cut Out (the API's, no menu's): raster LAYER's pixels inside the
+selection as a new raster layer on top, their alpha times the
+selection's; where the selection covers a pixel only partly, or within
+DEFRINGE pixels of its edge, the subject's own color in place of the mix
+with what was behind it.  Elsewhere the pixels are LAYER's own,
+unchanged.  The new layer's index."
+  (unless (eql (the-object layer kind) :raster)
+    (error "~a is not a raster layer." (the-object layer layer-name)))
+  (unless (and (realp defringe) (<= 0 defringe 20))
+    (error "Defringe is a number of pixels from 0 to 20, not ~s." defringe))
+  (let* ((doc (the-object layer parent))
+         (width (the-object doc doc-width))
+         (height (the-object doc doc-height))
+         (selection (or (the-object doc selection)
+                        (error "Nothing is selected: select the subject before cutting it out.")))
+         (mask (getf selection :mask))
+         (source (the-object layer pixels))
+         (decode *srgb-decode*)
+         (depth (float defringe 1d0))
+         (region (region-around (getf selection :rect) (first *fusion-radii*) width height)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) mask source)
+             (type (simple-array double-float (256)) decode))
+    (destructuring-bind (x0 y0 pw ph) region
+      (let* ((n (* pw ph))
+             (alpha (make-plane n))
+             (colors (list (make-plane n) (make-plane n) (make-plane n))))
+        (macrolet ((over-region ((k i) &body body)
+                     `(dotimes (y ph)
+                        (dotimes (x pw)
+                          (let ((,k (+ x (* y pw))) (,i (+ x0 x (* width (+ y0 y)))))
+                            ,@body)))))
+          (over-region (k i) (setf (aref alpha k) (/ (aref mask i) 255f0)))
+          (destructuring-bind (wide narrow) *fusion-radii*
+            (let ((wide-sums (box-sums alpha pw ph wide))
+                  (narrow-sums (box-sums alpha pw ph narrow)))
+              (loop for channel from 0 for out in colors
+                    do (let ((image (make-plane n)))
+                         (over-region (k i)
+                           (setf (aref image k)
+                                 (float (aref decode (aref source (+ channel (* 4 i)))) 1f0)))
+                         (multiple-value-bind (f b) (fusion-pass image alpha wide-sums image image pw ph wide)
+                           (replace out (fusion-pass image alpha narrow-sums f b pw ph narrow)))))))
+          (let ((kept (when (plusp depth) (defringe! colors mask width region depth)))
+                (pixels (make-rgba width height)))
+            (over-region (k i)
+              (let ((s (aref mask i)) (o (* 4 i)))
+                (cond ((zerop s))
+                      ((and (= s 255) (or (null kept) (>= (aref kept k) 1f0)))
+                       (replace pixels source :start1 o :start2 o :end2 (+ o 4)))
+                      (t
+                       (loop for channel from 0 for plane in colors
+                             do (setf (aref pixels (+ o channel))
+                                      (unit->byte (linear->srgb (float (aref plane k) 1d0)))))
+                       (setf (aref pixels (+ o 3))
+                             (unit->byte (* (/ s 255d0) (/ (aref source (+ o 3)) 255d0))))))))
+            (let ((spec (the-object doc (new-layer-spec :raster))))
+              (when name (setf (getf spec :name) name))
+              (the-object doc (add-layer! (plist-merge (list :pixels (doc-pixels doc pixels)) spec))))))))))

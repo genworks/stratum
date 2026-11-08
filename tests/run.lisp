@@ -915,6 +915,136 @@ be, and the picture's edge no edge of the selection."
                     (equal (funcall rect) '(12 10 16 10)))
                (list results (funcall rect)))))))
 
+(defun cut-out-card (w h &key textured rim)
+  "A disk on a background, its edge pixels mixed in linear light by
+their exact coverage, as a camera mixes them; the coverage as the
+selection.  The subject a flat orange, or with TEXTURED a gradient on
+noise; with RIM, a ring of white just inside the edge, as sharpening
+leaves.  The document and each pixel's true subject color, three
+doubles a pixel."
+  (let* ((pixels (make-rgba w h))
+         (mask (make-array (* w h) :element-type '(unsigned-byte 8)))
+         (truth (make-array (* 3 w h) :element-type 'double-float))
+         (noise (test-noise (* 3 w h) 11))
+         (cx (/ w 2d0)) (cy (/ h 2d0)) (radius (* 0.3d0 (min w h))))
+    (flet ((linear (byte) (srgb->linear (/ byte 255d0))))
+      (dotimes (y h)
+        (dotimes (x w)
+          (let ((inside 0) (i (+ x (* y w))))
+            (dotimes (sy 8)
+              (dotimes (sx 8)
+                (let ((dx (- (+ x (/ (+ sx 0.5d0) 8)) cx)) (dy (- (+ y (/ (+ sy 0.5d0) 8)) cy)))
+                  (when (< (+ (* dx dx) (* dy dy)) (* radius radius)) (incf inside)))))
+            (let* ((a (/ inside 64d0))
+                   (depth (- radius (sqrt (+ (expt (- x -0.5d0 cx) 2) (expt (- y -0.5d0 cy) 2)))))
+                   (own (if textured
+                            (list (+ 0.2d0 (* 0.6d0 (/ x w))) (+ 0.1d0 (* 0.3d0 (/ y h))) 0.05d0)
+                            (mapcar #'linear '(220 140 40))))
+                   (subject (if (and rim (< 0.5d0 depth 2d0)) (list 1d0 1d0 1d0) own))
+                   (background (if textured
+                                   (loop for c below 3 collect (* 0.8d0 (/ (aref noise (+ c (* 3 i))) 255d0)))
+                                   (mapcar #'linear '(30 60 200)))))
+              (setf (aref mask i) (round (* 255 a)))
+              (loop for c from 0 for s in subject for b in background for o in own
+                    do (setf (aref truth (+ c (* 3 i))) o
+                             (aref pixels (+ c (* 4 i)))
+                             (unit->byte (linear->srgb (+ (* a s) (* (- 1 a) b))))))
+              (setf (aref pixels (+ 3 (* 4 i))) 255))))))
+    (let ((doc (make-file-document "card" w h pixels)))
+      (the-object doc (set-slot! :selection (make-selection mask w h)))
+      (values doc truth))))
+
+(defun cut-out-error (doc truth &key (from 1) (to 255))
+  "How far, in linear light, the top layer's colors lie from the subject's
+own over the pixels the selection covers by FROM to TO of 255: the root
+mean square, weighted by coverage."
+  (let* ((mask (getf (the-object doc selection) :mask))
+         (pixels (the-object (car (last (the-object doc layer-list))) pixels))
+         (sum 0d0) (weight 0d0))
+    (dotimes (i (length mask) (sqrt (/ sum (max weight 1d-9))))
+      (let ((m (aref mask i)))
+        (when (<= from m to)
+          (let ((a (/ m 255d0)))
+            (dotimes (c 3)
+              (incf sum (* a (expt (- (aref *srgb-decode* (aref pixels (+ c (* 4 i))))
+                                      (aref truth (+ c (* 3 i))))
+                                   2))))
+            (incf weight a)))))))
+
+(defun test-cut-out ()
+  "Cut Out: the edge's colors the subject's own, against cards whose
+truth is known; the interior LAYER's own bytes; the same on one thread
+and many."
+  (let ((w 96) (h 72))
+    (flet ((copied (doc)
+             (copy-selection! (first (the-object doc layer-list)))
+             (paste-clipboard! doc)
+             doc)
+           (cut (doc &rest keys)
+             (apply #'cut-out-selection! (first (the-object doc layer-list)) keys)
+             doc))
+      (multiple-value-bind (doc truth) (cut-out-card w h)
+        (let ((copy-error (cut-out-error (copied doc) truth :to 254)))
+          (multiple-value-bind (doc truth) (cut-out-card w h)
+            (let ((cut-error (cut-out-error (cut doc :defringe 0) truth :to 254)))
+              (check "on a flat subject the edge comes out the subject's color, not the mix"
+                     (and (> copy-error 0.2d0) (< cut-error 0.01d0))
+                     (list copy-error cut-error))))))
+      (multiple-value-bind (doc truth) (cut-out-card w h :textured t)
+        (let ((copy-error (cut-out-error (copied doc) truth :to 254)))
+          (multiple-value-bind (doc truth) (cut-out-card w h :textured t)
+            (let ((fused (cut-out-error (cut doc :defringe 0) truth :to 254)))
+              (multiple-value-bind (doc truth) (cut-out-card w h :textured t)
+                (let ((defringed (cut-out-error (cut doc :defringe 3) truth :to 254)))
+                  (check "on a gradient over noise, under half Copy's error, a sixth defringed"
+                         (and (< fused (/ copy-error 2.5d0)) (< defringed (/ copy-error 6)))
+                         (list copy-error fused defringed))))))))
+      (multiple-value-bind (doc truth) (cut-out-card w h :rim t)
+        (let ((plain (cut-out-error (cut doc :defringe 0) truth :from 255)))
+          (multiple-value-bind (doc truth) (cut-out-card w h :rim t)
+            (let ((defringed (cut-out-error (cut doc :defringe 3) truth :from 255)))
+              (check "defringe takes away a bright rim inside the edge"
+                     (< defringed (/ plain 2))
+                     (list plain defringed))))))
+      (let* ((doc (cut (cut-out-card w h) :defringe 3))
+             (source (the-object (first (the-object doc layer-list)) pixels))
+             (result (the-object (second (the-object doc layer-list)) pixels))
+             (mask (getf (the-object doc selection) :mask))
+             (middle (* 4 (+ (floor w 2) (* (floor h 2) w)))))
+        (check "deep inside, the pixels are the layer's own; outside, clear"
+               (and (equalp (subseq result middle (+ middle 4)) (subseq source middle (+ middle 4)))
+                    (zerop (aref result 3)))
+               (subseq result middle (+ middle 4)))
+        (check "the cut-out's alpha is the selection's"
+               (loop for i below (* w h) always (= (aref result (+ 3 (* 4 i))) (aref mask i)))))
+      (let ((pixels (test-noise (* 4 w h) 5)))
+        (flet ((rect-doc ()
+                 (let ((doc (make-file-document "rect" w h (copy-seq pixels))))
+                   (select-rect! doc 20 10 40 30)
+                   doc)))
+          (check "a hard-edged selection with no defringe is Copy and Paste exactly"
+                 (equalp (the-object (second (the-object (copied (rect-doc)) layer-list)) pixels)
+                         (the-object (second (the-object (cut (rect-doc) :defringe 0) layer-list)) pixels)))))
+      (let ((many (the-object (second (the-object (cut (cut-out-card w h :textured t)) layer-list)) pixels))
+            (one (let ((*render-threads* 1))
+                   (the-object (second (the-object (cut (cut-out-card w h :textured t)) layer-list)) pixels))))
+        (check "one thread and many cut out the same bytes" (equalp many one)))
+      (let ((doc (make-file-document "none" w h (make-rgba w h))))
+        (check "with nothing selected, an error in words"
+               (search "select the subject"
+                       (handler-case (progn (cut doc) "no error")
+                         (error (e) (princ-to-string e))))))
+      (let ((doc (cut-out-card w h)))
+        (let ((stratum-api:*document* doc))
+          (let ((results (stratum:run-forms "(cut-out 0 :name \"Disk\" :defringe 2) (cut-out 0 :defringe 50)")))
+            (check "the prompt may cut out, and a wild defringe is refused in words"
+                   (and (getf (first results) :ok)
+                        (equal (getf (getf (first results) :value) :name) "Disk")
+                        (= 1 (getf (getf (first results) :value) :index))
+                        (not (getf (second results) :ok))
+                        (search "0 to 20" (getf (second results) :error)))
+                   results)))))))
+
 (defun test-floating ()
   (let* ((image (let ((p (make-rgba 4 3)))
                   (dotimes (i 12 p)
@@ -3459,7 +3589,7 @@ and comes back again on redo; the undo list before it stays good."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-floating test-transform test-resize test-rotate
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))

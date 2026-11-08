@@ -118,9 +118,10 @@ pixels):
    of the old background between an arm and the body, then
    `(contract-selection 2.5)` and `(feather 1)`: a feather spreads both
    ways, so a selection on the outline itself brings a rim of the old
-   background with it.  `(copy layer)` and `(paste)` put the subject on
-   a layer of its own; subjects that stay together can share one
-   selection and one layer.  To move it, `(select-none)` and then
+   background with it.  `(cut-out layer :name "Subject")` puts the
+   subject on a layer of its own without the old background's tint at
+   its edge; subjects that stay together can share one selection and one
+   layer.  To move it, `(select-none)` and then
    `(move-pixels layer dx dy)`.
 3. Make the background a layer of its own, never a fill around the
    subject: `(generate-layer prompt :name "New background")`, then
@@ -304,6 +305,16 @@ These change a raster layer's pixels and go on the undo list.
   x' = ax + by + c, y' = dx + ey + f.
 - `(copy layer)`, `(cut layer)`, `(paste &optional above)` — the
   clipboard; paste makes a new raster layer.
+- `(cut-out layer &key name (defringe 3))` — the selection on `layer`
+  as a new raster layer on top, for a subject to go in front of
+  something else.  Where the selection covers a pixel only partly, the
+  pixel is a mix of the subject and of what was behind it; `copy` keeps
+  the mix, which shows as a rim of the old background, and `cut-out`
+  works out the subject's own color there.  Within `defringe` pixels of
+  the edge the color is drawn from deeper inside, which also takes away
+  the bright rim a sharpened photograph has; 0 leaves it.  The rest of
+  the subject is the layer's pixels unchanged.  A few seconds for a
+  large subject.
 
 ## Adjustments and filters
 

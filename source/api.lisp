@@ -31,7 +31,7 @@
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
            #:invert-selection #:feather #:contract-selection #:expand-selection #:selection #:look #:generate-fill #:generate-layer #:generate-picture
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
-           #:copy #:cut #:paste
+           #:copy #:cut #:paste #:cut-out
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
            #:crop #:image-size #:canvas-size #:rotate #:color-mode
            #:undo #:redo #:set-history-source
@@ -48,7 +48,7 @@
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
     select-rect select-polygon select-wand select-all select-none invert-selection feather
     contract-selection expand-selection selection
-    fill-selection clear-selection paint gradient move-pixels transform copy cut paste
+    fill-selection clear-selection paint gradient move-pixels transform copy cut paste cut-out
     levels curves hue-saturation gaussian-blur unsharp-mask add-noise
     crop image-size canvas-size rotate color-mode undo redo set-history-source
     drawing-sources place-drawing)
@@ -433,6 +433,13 @@ selected) moved DX, DY."
 its layer-info."
   (unless (stratum::clipboard) (error "The clipboard is empty."))
   (layer-info (stratum::paste-clipboard! (doc) (and above (index (layer-of above))))))
+
+(defun cut-out (layer &key name (defringe 3))
+  "The selection on raster LAYER as a new raster layer on top, NAME its
+name, the colors at its edge the subject's own rather than a mix with
+what was behind it, and those within DEFRINGE pixels of the edge drawn
+from deeper inside; its layer-info."
+  (layer-info (stratum::cut-out-selection! (raster-layer-of layer) :name name :defringe defringe)))
 
 ;;; Adjustments and filters, baked into a raster layer's pixels.
 

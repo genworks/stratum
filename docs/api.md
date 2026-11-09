@@ -336,16 +336,24 @@ harbor", not "no modern boats".
 
 Match the subject.  When a person or thing from the photograph will
 stand in front of the new picture, describe the camera and the light it
-was photographed with: "taken at eye level from a stone terrace", not a
-view from above, and the same light, most often "soft overcast
-daylight".  Say where the important thing goes, in the gap the subject
-leaves: "one tall temple tower in the exact center of the picture".
-For `generate-background`, describe the place alone and never the
-people in it: "a person crouching on the path" paints a second person.
-When their feet are in the picture, say where the ground lies in it,
-as far up as their feet: "the path filling the picture from the bottom
-up to above its middle"; a ground that ends lower leaves them standing
-on air.
+was photographed with, as the photograph shows them, and the same
+light, most often "soft overcast daylight".  Judge the camera by the
+ground: where the original's ground stops, at a wall, at trees, at the
+sky, is where the new one must stop too, and say so in parts of the
+picture's height: "the grassy ground filling the lower two thirds of
+the picture".  When the ground reaches above the middle, the camera
+looked down: say "looking down from standing height", never "eye
+level", which puts the horizon through the middle and the ground
+below the feet of anyone crouching or close.  "Taken at eye level" is
+for a horizon at about the heads of people standing.  Say where the
+important thing goes, in the gap the subject leaves: "one tall temple
+tower in the exact center of the picture".  For `generate-background`,
+describe the place alone and never the people in it: "a person
+crouching on the path" paints a second person.  A ground that ends
+lower than the original's leaves them standing on air: `look` at their
+feet in the result, and if they float, make it again with another
+`:seed` and the ground asked higher, a path or a bank running up to
+where their feet are; twice if need be.
 Then `look` at the result for anything wrong for the place or the
 period, such as the wrong symbol on a building.
 

@@ -626,10 +626,6 @@ SESSION, FORMS in place of a model's when given; the job's id."
       (:failed (json-string (json-object "status" "failed" "error" (getf job :error))))
       (t (json-string (json-object "status" "unknown"))))))
 
-(defun invitee (req)
-  "The name on REQ's invite, for the prompt log; nil with the gate open."
-  (second (find-invite (invite-gate:request-token *gate* req))))
-
 (defun handle-prompt (req ent)
   "POST /stratum/api/prompt?doc=&s= {prompt}: the prompt started on the
 session's document, answering {job}; with {generate: {...}} as well
@@ -710,12 +706,14 @@ the invite gate like every door under /stratum."
                       :content-type "application/json"
                       :function (lambda (req ent)
                                   (when (door-admits? req ent *max-request-bytes*)
-                                    (handle-prompt req ent))))
+                                    (handle-prompt req ent)
+                                    (note-activity! req))))
   (net.aserve:publish :path "/stratum/api/generator" :server server :host host
                       :content-type "application/json"
                       :function (lambda (req ent)
                                   (when (door-admits? req ent *max-request-bytes*)
-                                    (handle-generator req ent))))
+                                    (handle-generator req ent)
+                                    (note-activity! req))))
   (publish-door server host "/stratum/api/reference" "text/markdown; charset=utf-8"
                 (lambda (req) (declare (ignore req)) (api-reference))))
 

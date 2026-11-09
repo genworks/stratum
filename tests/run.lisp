@@ -2752,6 +2752,201 @@ as it is for a person."
             do (setf (aref px i) (logand 255 (+ (aref px i) (aref px (- i step)))))))
     px))
 
+(defun lines-written (who count)
+  "WHO's activity lines once there are COUNT of them, waiting up to two
+seconds: a door writes its line just after its reply goes out."
+  (loop repeat 40
+        for lines = (activity-lines who)
+        until (>= (length lines) count)
+        do (sleep 0.05)
+        finally (return lines)))
+
+(defun test-activity-log ()
+  "The activity log over a real connection, behind a gate with one
+invite: a visit, a change and an upload each make a line in the
+visitor's file, the page's own fetches and a refused visitor none, the
+upload is kept byte for byte, no token is written anywhere, the report
+counts it, forget-visitor! takes it all away, and with the log off
+nothing is written."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (old-gate *gate*) (old-dir *activity-directory*)
+         (stamp (get-universal-time))
+         (roster (format nil "/tmp/stratum-activity-roster-~d.sexp" stamp))
+         (dir (format nil "/tmp/stratum-activity-~d/" stamp))
+         (picture (let ((v (make-array 5000 :element-type '(unsigned-byte 8))))
+                    (dotimes (i (length v) v) (setf (aref v i) (mod (* i 13) 256)))
+                    (setf (aref v 0) #xff (aref v 1) #xd8)
+                    v))
+         (changed nil))
+    (flet ((alice-file () (probe-file (format nil "~aAlice.log" dir)))
+           (everything ()
+             ;; every file the log wrote, as text one char a byte
+             (with-output-to-string (out)
+               (dolist (f (append (uiop:directory-files dir)
+                                  (mapcan #'uiop:directory-files (uiop:subdirectories dir))))
+                 (write-string (namestring f) out)
+                 (with-open-file (in f :element-type '(unsigned-byte 8))
+                   (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                     (read-sequence v in)
+                     (write-string (map 'string #'code-char v) out)))))))
+      (unwind-protect
+           (progn
+             (with-open-file (out roster :direction :output :if-exists :supersede)
+               (format out "~s~%" '("alicetoken" "Alice" "2026-11-09")))
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (configure-gate! :invites-file roster)
+             (configure-activity-log! :directory dir)
+             (publish-door server nil "/stratum/" "text/html" (lambda (req) (declare (ignore req)) "<p>page</p>"))
+             (publish-door server nil "/stratum/api/doc" "application/json"
+                           (lambda (req) (declare (ignore req)) "{}"))
+             (publish-door server nil "/stratum/api/layers" "application/json"
+                           (lambda (req) (setf changed (gwl:request-body-text req)) "{}"))
+             (publish-door server nil "/stratum/api/open" "application/json"
+                           (lambda (req) (request-octets req) "{}") :upload? t)
+             (raw-get port "/stratum/?invite=alicetoken")
+             (raw-get port "/stratum/api/doc?invite=alicetoken&doc=photo")
+             (raw-post port "/stratum/api/layers?invite=alicetoken&s=abc&doc=photo"
+                       (map '(vector (unsigned-byte 8)) #'char-code "{\"op\":\"add\"}") "application/json")
+             (raw-post port "/stratum/api/open?invite=alicetoken&s=abc" picture)
+             (check "a refused visitor is turned away and leaves no line"
+                    (eql 403 (first (raw-get port "/stratum/?invite=nobody"))))
+             (let ((lines (lines-written "Alice" 3)))
+               (check "a visit, a change and an upload make a line each; the page's fetches none"
+                      (and (equal (mapcar (lambda (l) (getf l :door)) lines)
+                                  '("/stratum/" "/stratum/api/layers" "/stratum/api/open"))
+                           (every (lambda (l) (equal (getf l :who) "Alice")) lines))
+                      lines)
+               (check "a change keeps its body and its query, the door having read the body"
+                      (and (equal changed "{\"op\":\"add\"}")
+                           (equal (getf (second lines) :body) "{\"op\":\"add\"}")
+                           (equal (getf (second lines) :query) "s=abc&doc=photo"))
+                      (second lines))
+               (let ((kept (getf (third lines) :upload)))
+                 (check "an upload is kept byte for byte, named for a JPEG"
+                        (and kept (search ".jpg" kept) (= (getf (third lines) :bytes) 5000)
+                             (with-open-file (in (merge-pathnames kept dir) :element-type '(unsigned-byte 8))
+                               (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                                 (read-sequence v in)
+                                 (equalp v picture))))
+                        kept)))
+             (check "no invite token is written anywhere"
+                    (and (alice-file) (not (search "alicetoken" (everything))) (not (search "nobody" (everything)))))
+             (let ((report (activity-report)))
+               (check "the report counts the visitor's requests and uploads"
+                      (and (equal (first (first report)) "Alice")
+                           (= 3 (getf (rest (first report)) :requests))
+                           (= 1 (getf (rest (first report)) :uploads)))
+                      report))
+             ;; two prompts in the prompt log, written as log-turn! writes them
+             (dolist (turn '(("t1/" "Alice") ("t2/" "Bob")))
+               (let ((path (format nil "~aprompts/~a" dir (first turn))))
+                 (ensure-directories-exist path)
+                 (with-open-file (out (merge-pathnames "turn.sexp" path) :direction :output)
+                   (let ((*package* (find-package :common-lisp)) (*print-case* :downcase))
+                     (prin1 (list :who (second turn) :prompt "x" :ok t :changed nil) out)))))
+             (let ((gone (let ((*prompt-log-directory* (uiop:ensure-directory-pathname (format nil "~aprompts/" dir))))
+                           (forget-visitor! "Alice"))))
+               (check "forget-visitor! takes the visitor's lines, pictures and prompts away, and no one else's"
+                      (and (getf gone :activity) (= 1 (getf gone :uploads)) (= 1 (getf gone :prompts))
+                           (null (alice-file)) (null (activity-lines "Alice"))
+                           (null (probe-file (format nil "~aprompts/t1/" dir)))
+                           (probe-file (format nil "~aprompts/t2/turn.sexp" dir)))
+                      gone))
+             (configure-activity-log! :directory nil)
+             (raw-get port "/stratum/?invite=alicetoken")
+             (check "with the log off, nothing is written" (null (alice-file))))
+        (setf *gate* old-gate *activity-directory* old-dir)
+        (when (probe-file roster) (delete-file roster))
+        (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
+        (net.aserve:shutdown :server server)))))
+
+(defun test-my-uploads ()
+  "File > My Uploads over a real connection, behind a gate with two
+invites: a visitor sees their own kept pictures, a small picture of
+each, and deletes one or everything; another visitor sees none of them
+and cannot name them, nor any other file under the log; with the gate
+open there is no one to delete for."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (stamp (get-universal-time))
+         (roster (format nil "/tmp/stratum-myuploads-roster-~d.sexp" stamp))
+         (dir (format nil "/tmp/stratum-myuploads-~d/" stamp))
+         (picture (let* ((w 300) (h 200) (rgba (make-rgba w h)))
+                    (dotimes (i (* w h)) (replace rgba (list (mod i 256) 90 160 255) :start1 (* 4 i)))
+                    (png-octets rgba w h))))
+    (labels ((text (octets) (map 'string #'code-char octets))
+             (listing (token)
+               (destructuring-bind (code body) (raw-get port (format nil "/stratum/api/my-uploads?invite=~a" token))
+                 (list code (ignore-errors (yason:parse (text body))))))
+             (ask (token body)
+               (raw-post port (format nil "/stratum/api/my-uploads?invite=~a" token)
+                         (map '(vector (unsigned-byte 8)) #'char-code body) "application/json"))
+             (files (token) (mapcar (lambda (u) (gethash "file" u)) (gethash "uploads" (second (listing token))))))
+      (unwind-protect
+           (progn
+             (with-open-file (out roster :direction :output :if-exists :supersede)
+               (format out "~s~%~s~%" '("alicetoken" "Alice" "2026-11-09") '("bobtoken" "Bob" "2026-11-09")))
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
+                   ;; never the room's own prompt log, whose visitors are
+                   ;; real: set globally, since the doors run in the
+                   ;; server's threads
+                   *prompt-log-directory* nil)
+             (configure-gate! :invites-file roster)
+             (configure-activity-log! :directory dir)
+             (publish-door server nil "/stratum/api/open" "application/json"
+                           (lambda (req) (request-octets req) "{}") :upload? t)
+             (publish-visitor! server nil)
+             (raw-post port "/stratum/api/open?invite=alicetoken" picture)
+             (raw-post port "/stratum/api/open?invite=alicetoken" picture)
+             (lines-written "Alice" 2)
+             (let ((alice (listing "alicetoken")))
+               (check "a visitor's own pictures are listed, with whose and whether kept"
+                      (and (eql (first alice) 200)
+                           (equal (gethash "who" (second alice)) "Alice")
+                           (eq (gethash "kept" (second alice)) t)
+                           (= 2 (length (gethash "uploads" (second alice))))
+                           (equal (gethash "door" (first (gethash "uploads" (second alice)))) "open"))
+                      alice))
+             (let* ((file (first (files "alicetoken")))
+                    (preview (raw-get port (format nil "/stratum/api/my-upload?invite=alicetoken&file=~a"
+                                                   (net.aserve:uriencode-string file)))))
+               (check "each has a small picture"
+                      (and (eql (first preview) 200) (png-octets-p (second preview))
+                           (multiple-value-bind (rgba w h) (read-png (second preview))
+                             (declare (ignore rgba))
+                             (and (= w 160) (<= h 160)))))
+               (check "another visitor sees none of them and cannot name them"
+                      (and (null (files "bobtoken"))
+                           (eql 500 (first (raw-get port (format nil "/stratum/api/my-upload?invite=bobtoken&file=~a"
+                                                                 (net.aserve:uriencode-string file)))))
+                           (eql 500 (first (ask "bobtoken" (format nil "{\"delete\": [~s]}" file))))
+                           (= 2 (length (files "alicetoken"))))))
+             (check "no other file under the log can be named"
+                    (and (eql 500 (first (ask "alicetoken" "{\"delete\": [\"Alice.log\"]}")))
+                         (eql 500 (first (ask "alicetoken" "{\"delete\": [\"Alice/../Bob.log\"]}")))
+                         (probe-file (format nil "~aAlice.log" dir))))
+             (let ((first-file (first (files "alicetoken"))))
+               (ask "alicetoken" (format nil "{\"delete\": [~s]}" first-file))
+               (check "a visitor deletes one of their pictures, and it is gone"
+                      (and (= 1 (length (files "alicetoken")))
+                           (not (member first-file (files "alicetoken") :test #'equal))
+                           (null (probe-file (merge-pathnames first-file dir))))
+                      (files "alicetoken")))
+             (ask "alicetoken" "{\"everything\": true}")
+             (check "and everything kept of them"
+                    (and (null (files "alicetoken"))
+                         (null (probe-file (format nil "~aAlice/" dir)))))
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (check "with the gate open, there is no one to delete for"
+                    (and (null (gethash "who" (second (listing "x"))))
+                         (eql 500 (first (ask "x" "{\"everything\": true}"))))))
+        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts)
+        (when (probe-file roster) (delete-file roster))
+        (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
+        (net.aserve:shutdown :server server)))))
+
 (defun test-uploads ()
   "The doors over a real connection, on a server of their own: a body
 comes through byte for byte as octets and no string; an upload over the
@@ -3974,7 +4169,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -395,6 +395,26 @@ log by default: the pictures are the visitors', so keeping them is the
 operator's decision, and the visitors should be told.  A log that
 cannot be written costs nobody their prompt.
 
+### Keeping a record of what each visitor does
+
+`(stratum:configure-activity-log! :directory "/path/")` keeps the rest:
+a file per visitor, `<name>.log`, named for their invite (`open-gate`
+with no gate), one readable line per request: the time, the door, the
+query and the body it sent, with any invite token taken out.  Every
+change counts (strokes, filters, layers, selections, the Generate
+dialog, prompts) and so do visits to the page and downloads; the
+page's own fetches of what it shows do not.  Each picture a visitor
+opens or places is kept as they sent it, under `<name>/`, and its line
+names the file.  `(stratum:activity-report)` sums each visitor up, and
+`(stratum:forget-visitor! "name")` deletes everything kept of one
+visitor, their prompts in the prompt log included.  A visitor can do
+the same for themselves: File > My Uploads lists the pictures kept of
+them, each with a small picture of it, and deletes some, all, or
+everything kept of them (GET and POST `/stratum/api/my-uploads`, GET
+`/stratum/api/my-upload?file=` for a picture), naming only files
+listed under their own invite.  Off by default, for the same reason as
+the prompt log.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file

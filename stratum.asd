@@ -21,5 +21,6 @@
   (:file "source/png") (:file "source/jpeg") (:file "source/onnx")
   (:file "source/subject") (:file "source/zip") (:file "source/ora")
   (:file "source/ora-document") (:file "source/invite")
-  (:file "source/web") (:file "source/api") (:file "source/generate")
-  (:file "source/prompt") (:file "source/stubs")))
+  (:file "source/activity") (:file "source/web") (:file "source/api")
+  (:file "source/generate") (:file "source/prompt")
+  (:file "source/visitor") (:file "source/stubs")))

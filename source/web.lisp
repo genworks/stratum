@@ -1296,7 +1296,8 @@ over it, then serve the door with it in *upload-octets*."
                        (body-refusal (1+ *max-upload-bytes*) *max-upload-bytes*)))
           (t (let ((*upload-octets* octets)
                    (*upload-read-ms* (elapsed-ms began)))
-               (serve-door req ent content-type fn))))))
+               (serve-door req ent content-type fn))
+             (note-activity! req :upload octets)))))
 
 (defun publish-door (server host path content-type fn &key upload? pack)
   "Publish FN, a function of the request answering a string or octets,
@@ -1311,7 +1312,8 @@ PACK, a step, it answers pixels (see reply)."
                                                       :upload? upload?)
                                     (if upload?
                                         (serve-upload req ent content-type fn)
-                                        (serve-door req ent content-type fn :pack pack))))))
+                                        (progn (serve-door req ent content-type fn :pack pack)
+                                               (note-activity! req)))))))
 
 (defvar *stratum-publishers* nil
   "Functions of (server host) that publish doors of their own when

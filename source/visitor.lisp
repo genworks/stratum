@@ -1,0 +1,151 @@
+;; Copyright © 2026 Genworks International
+;;
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as
+;; published by the Free Software Foundation, either version 3 of the
+;; License, or (at your option) any later version.  Distributed WITHOUT
+;; ANY WARRANTY; see <https://www.gnu.org/licenses/agpl-3.0.html>.
+
+(in-package :stratum)
+
+;;
+;; What is kept of a visitor, in their own hands: File > My Uploads lists
+;; the pictures the activity log (activity.lisp) kept of them, with a
+;; small picture of each, and deletes some, all, or everything kept of
+;; them, their prompts in the prompt log (prompt.lisp) included.  Only an
+;; invited visitor has any of this: with the gate open there is no one to
+;; say whose pictures are whose.
+;;
+
+(defparameter *upload-preview-size* 160
+  "The longer side, in pixels, of an upload's picture in My Uploads.")
+
+(defun turn-who (record)
+  "The name a prompt record begins with: log-turn! writes (:who NAME
+...) first, so only that much is read, not the record's forms and
+results (300 of them read whole took five seconds)."
+  (ignore-errors
+   (with-open-file (in record :external-format :utf-8)
+     (with-standard-io-syntax
+       (let ((*read-eval* nil) (*package* (find-package :keyword)))
+         (and (eql (peek-char t in) #\()
+              (read-char in)
+              (eq (read in) :who)
+              (let ((who (read in))) (and (stringp who) who))))))))
+
+(defun visitor-turns (who)
+  "The prompt log's directories of WHO's prompts."
+  (when (and who *prompt-log-directory*)
+    (remove-if-not
+     (lambda (turn)
+       (let ((record (probe-file (merge-pathnames "turn.sexp" turn))))
+         (and record (equal who (turn-who record)))))
+     (uiop:subdirectories *prompt-log-directory*))))
+
+(defun visitor-uploads (who)
+  "WHO's kept pictures, newest first, each (:file :time :door :bytes):
+:file as the activity log names it, under the log's directory, and only
+while the file is there."
+  (when (and who *activity-directory*)
+    (let ((uploads '()))
+      (dolist (line (activity-lines who) uploads)
+        (let ((file (getf line :upload)))
+          (when (and file (probe-file (merge-pathnames file *activity-directory*)))
+            (push (list :file file :time (getf line :time)
+                        :door (subseq (getf line :door) (1+ (or (position #\/ (getf line :door) :from-end t) -1)))
+                        :bytes (getf line :bytes))
+                  uploads)))))))
+
+(defun visitor-upload-path (who file)
+  "The path of FILE, one of WHO's kept pictures by its listed name, or
+an error: nothing else under the log can be named here."
+  (unless (find file (visitor-uploads who) :key (lambda (u) (getf u :file)) :test #'equal)
+    (error "That is not one of your pictures."))
+  (merge-pathnames file *activity-directory*))
+
+(defun upload-preview (path)
+  "A small PNG of the picture at PATH, a JPEG or a PNG; nil for anything
+else, or what will not decode."
+  (ignore-errors
+   (let* ((octets (with-open-file (in path :element-type '(unsigned-byte 8))
+                    (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                      (read-sequence v in)
+                      v)))
+          (type (upload-type octets)))
+     (multiple-value-bind (pixels w h)
+         (cond ((equal type "jpg")
+                (multiple-value-bind (pixels w h) (decode-jpeg octets)
+                  (oriented-rgba pixels w h (jpeg-orientation octets))))
+               ((equal type "png") (read-png octets)))
+       (when pixels
+         (let* ((scale (min 1 (/ *upload-preview-size* (max w h))))
+                (tw (max 1 (round (* w scale))))
+                (th (max 1 (round (* h scale)))))
+           (png-octets (rgba-thumb pixels w h tw th) tw th)))))))
+
+(defun forget-visitor! (who)
+  "Everything kept of WHO, the name on an invite: their activity file,
+the pictures they opened, and their prompts in the prompt log.  What
+was removed, as (:activity t-or-nil :uploads n :prompts n)."
+  (let ((uploads 0) (prompts 0) (activity nil))
+    (when *activity-directory*
+      (let ((file (probe-file (merge-pathnames (format nil "~a.log" (visitor-file-name who))
+                                               *activity-directory*)))
+            (dir (probe-file (merge-pathnames (format nil "~a/" (visitor-file-name who))
+                                              *activity-directory*))))
+        (when file (delete-file file) (setf activity t))
+        (when dir
+          (setf uploads (length (uiop:directory-files dir)))
+          (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))))
+    (dolist (turn (visitor-turns who))
+      (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
+      (incf prompts))
+    (list :activity activity :uploads uploads :prompts prompts)))
+
+(defun my-uploads-json (who)
+  (json-string
+   (json-object "who" who
+                "kept" (json-bool (and who *activity-directory*))
+                ;; a vector, so that none is [] and not null
+                "uploads" (map 'vector (lambda (u)
+                                         (json-object "file" (getf u :file) "time" (getf u :time)
+                                                      "door" (getf u :door) "bytes" (or (getf u :bytes) 0)))
+                               (visitor-uploads who))
+                "prompts" (length (visitor-turns who)))))
+
+(defun handle-my-uploads (req)
+  "GET /stratum/api/my-uploads: what is kept of the visitor asking.
+POST {delete: [file ...]} deletes those of their pictures; {everything:
+true} deletes everything kept of them.  Either answers the list again."
+  (let ((who (invitee req)))
+    (when (eq (net.aserve:request-method req) :post)
+      (unless who
+        (error "Only an invited visitor has pictures kept here."))
+      (let ((body (yason:parse (gwl:request-body-text req))))
+        (unless (hash-table-p body)
+          (error "Say which pictures to delete."))
+        (cond ((eq (gethash "everything" body) t) (forget-visitor! who))
+              ((listp (gethash "delete" body))
+               (let ((paths (mapcar (lambda (file)
+                                      (unless (stringp file) (error "That is not one of your pictures."))
+                                      (visitor-upload-path who file))
+                                    (gethash "delete" body))))
+                 (mapc #'delete-file paths)))
+              (t (error "Say which pictures to delete.")))))
+    (my-uploads-json who)))
+
+(defun handle-my-upload (req)
+  "GET /stratum/api/my-upload?file=: a small PNG of one of the asking
+visitor's pictures; an empty answer when it cannot be shown."
+  (let ((who (invitee req)))
+    (unless who (error "Only an invited visitor has pictures kept here."))
+    (or (upload-preview (visitor-upload-path who (net.aserve:request-query-value "file" req)))
+        (make-array 0 :element-type '(unsigned-byte 8)))))
+
+(defun publish-visitor! (server host)
+  "The My Uploads doors, behind the invite gate like every door under
+/stratum."
+  (publish-door server host "/stratum/api/my-uploads" "application/json" #'handle-my-uploads)
+  (publish-door server host "/stratum/api/my-upload" "image/png" #'handle-my-upload))
+
+(pushnew 'publish-visitor! *stratum-publishers*)

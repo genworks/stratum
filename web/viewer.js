@@ -2397,6 +2397,89 @@
 
   function megabytes(n) { return (n / 1e6).toFixed(1) + ' MB'; }
 
+  // File > My Uploads: the pictures this server kept of the visitor (the
+  // activity log), each with a small picture of it, to delete some, all,
+  // or everything kept of them, their prompts included.  The dialog
+  // object is the test hook: del(files), deleteAll(), deleteEverything()
+  // and refresh() answer promises; the buttons ask before deleting.
+  S.openMyUploads = function () {
+    if (S.myUploadsDialog) S.myUploadsDialog.close();
+    var list = el('div', { style: 'max-height: 50vh; overflow: auto; margin: 6px 0' });
+    var note = el('div', {});
+    var close = el('button', { type: 'button', text: 'Close' });
+    var delSome = el('button', { type: 'button', text: 'Delete Selected' });
+    var delAll = el('button', { type: 'button', text: 'Delete All Pictures' });
+    var delEverything = el('button', { type: 'button', text: 'Delete Everything' });
+    var box = el('div', { 'class': 'st-dialog', style: 'width: 440px' }, [
+      el('h2', { text: 'My Uploads' }), note, list,
+      el('div', { 'class': 'st-row st-dialog-buttons' }, [delEverything, delAll, delSome, close])]);
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.myUploadsDialog = { data: null };
+    function show(data) {
+      dialog.data = data;
+      list.textContent = '';
+      var some = data.uploads.length > 0;
+      [delSome, delAll].forEach(function (b) { b.disabled = !some; });
+      delEverything.disabled = !data.kept;
+      if (!data.who) {
+        note.textContent = 'Only an invited visitor has pictures kept here.';
+      } else if (!data.kept) {
+        note.textContent = 'This server keeps nothing you open.';
+      } else {
+        note.textContent = (some ? 'Pictures you opened or placed here, kept for testing Stratum.'
+                                 : 'No picture of yours is kept here.') +
+          (data.prompts ? ' ' + data.prompts + ' prompt' + (data.prompts === 1 ? '' : 's') +
+                          ' of yours ' + (data.prompts === 1 ? 'is' : 'are') +
+                          ' kept too, with small pictures of them; Delete Everything takes those as well.' : '');
+      }
+      data.uploads.forEach(function (u) {
+        var check = el('input', { type: 'checkbox' });
+        check.dataset.file = u.file;
+        var img = el('img', { alt: '', style: 'width: 64px; height: 64px; object-fit: contain; background: #1b1d21' });
+        img.onerror = function () { img.style.visibility = 'hidden'; };
+        img.src = api('my-upload?file=' + encodeURIComponent(u.file));
+        list.appendChild(el('label', { 'class': 'st-row', style: 'gap: 8px; align-items: center; margin: 4px 0' }, [
+          check, img,
+          el('span', { text: (u.door === 'place' ? 'Placed ' : 'Opened ') + u.time.replace('T', ' ').replace('Z', ' UTC') +
+                             ', ' + megabytes(u.bytes) })]));
+      });
+      return data;
+    }
+    function asked(body) {
+      return postJSON('my-uploads', JSON.stringify(body)).then(show)
+        .catch(function (e) { S.notice('My Uploads', plainError(e)); throw e; });
+    }
+    dialog.refresh = function () {
+      return fetchJSON(api('my-uploads')).then(show)
+        .catch(function (e) { note.textContent = plainError(e); throw e; });
+    };
+    dialog.del = function (files) { return asked({ delete: files }); };
+    dialog.deleteAll = function () {
+      return dialog.del(dialog.data.uploads.map(function (u) { return u.file; }));
+    };
+    dialog.deleteEverything = function () { return asked({ everything: true }); };
+    dialog.close = function () { box.remove(); S.myUploadsDialog = null; };
+    close.addEventListener('click', dialog.close);
+    delSome.addEventListener('click', function () {
+      var files = Array.prototype.map.call(list.querySelectorAll('input:checked'),
+                                           function (c) { return c.dataset.file; });
+      if (!files.length) { note.textContent = 'Tick the pictures to delete first.'; return; }
+      if (confirm('Delete ' + files.length + ' picture' + (files.length === 1 ? '' : 's') + '? This cannot be undone.')) {
+        dialog.del(files);
+      }
+    });
+    delAll.addEventListener('click', function () {
+      if (confirm('Delete every picture of yours kept here? This cannot be undone.')) dialog.deleteAll();
+    });
+    delEverything.addEventListener('click', function () {
+      if (confirm('Delete everything kept of you here: your pictures, your prompts and the record of what you did? This cannot be undone.')) {
+        dialog.deleteEverything();
+      }
+    });
+    dialog.ready = dialog.refresh();
+    return dialog;
+  };
+
   // Refuse here what the server would refuse after a long upload: an
   // image travels as raw pixels, four bytes each, however small its file.
   function checkImageSize(w, h) {
@@ -2812,6 +2895,8 @@
         { label: 'Save As PNG...', key: 'Ctrl+Shift+S', run: S.saveAs },
         { label: 'Save As OpenRaster...', run: S.saveOra },
         { label: 'Export', sub: [{ label: 'Export As PNG...', run: function () { window.open(S.exportAddress()); } }] },
+        '-',
+        { label: 'My Uploads...', run: function () { S.openMyUploads(); } },
         '-',
         { label: 'Close', run: S.closeDocument }] },
       { title: 'Edit', items: [

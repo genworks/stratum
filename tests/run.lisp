@@ -1185,11 +1185,29 @@ model, a subject found from a rough box."
                   (search "Points are"
                           (handler-case (progn (select-subject! doc 10 10 50 50 :points '(1 2)) "no error")
                             (error (e) (princ-to-string e))))))))
+  (flet ((mask (n) (let ((m (make-gray 10 10))) (fill m 255 :end n) m)))
+    (let ((part (mask 30)) (whole (mask 80)) (wild (mask 100)) (box '(0 0 9 7)))
+      (check "of the candidates scored near the best, the largest; one far below is passed over"
+             (eq whole (widest-near-best (list (cons 0.82f0 part) (cons 0.80f0 whole) (cons 0.60f0 wild))
+                                         box 10 10)))
+      (check "a candidate spilling far out of the box is passed over too"
+             (eq whole (widest-near-best (list (cons 0.82f0 part) (cons 0.80f0 whole) (cons 0.81f0 wild))
+                                         '(0 0 9 6) 10 10)))))
   (when (subject-model?)
     (multiple-value-bind (doc truth) (refine-card 240 180)
       (select-subject! doc 40 10 165 165)
       (let ((misses (selection-misses doc truth)))
         (check "with the model, a rough box gives the subject: under 2% of the picture off"
+               (< misses (* 0.02 240 180))
+               misses))
+      (the-object doc (add-layer! (plist-merge (list :pixels (let ((p (make-rgba 240 180)))
+                                                               (dotimes (i (* 240 180) p)
+                                                                 (setf (aref p (* 4 i)) 90 (aref p (+ 1 (* 4 i))) 140
+                                                                       (aref p (+ 2 (* 4 i))) 200 (aref p (+ 3 (* 4 i))) 255))))
+                                               (the-object doc (new-layer-spec :raster)))))
+      (select-subject! doc 40 10 165 165 :layer (first (the-object doc layer-list)))
+      (let ((misses (selection-misses doc truth)))
+        (check "under a layer that covers it, :layer finds the subject in its own pixels"
                (< misses (* 0.02 240 180))
                misses)))))
 

@@ -114,10 +114,12 @@ held."
                answer)
           (cffi:foreign-free input))))))
 
-(defun subject-logits (encoding prompts)
-  "The decoder's best mask for PROMPTS, ((x y label) ...) in the
+(defun subject-candidates (encoding prompts)
+  "The decoder's candidate masks for PROMPTS, ((x y label) ...) in the
 encoder's square (label 1 a point on the subject, 0 a point off it, 2
-and 3 a box's corners): 256 x 256 single floats, positive inside."
+and 3 a box's corners): ((score . logits) ...), each logits 256 x 256
+single floats, positive inside, and its score the model's own guess at
+how good it is."
   (destructuring-bind (feats-0 feats-1 embed) encoding
     (let* ((n (length prompts))
            (side *subject-mask-side*)
@@ -147,17 +149,13 @@ and 3 a box's corners): 256 x 256 single floats, positive inside."
                     (multiple-value-bind (mask-data dimensions) (onnx-floats masks)
                       (unless (equal (last dimensions 2) (list side side))
                         (error "The subject model answered masks of ~a, not ~a square." dimensions side))
-                      (let* ((score-data (onnx-floats scores))
-                             (candidates (first (last dimensions 3)))
-                             (best (loop with best = 0
-                                         for k from 1 below candidates
-                                         when (> (cffi:mem-aref score-data :float k)
-                                                 (cffi:mem-aref score-data :float best))
-                                           do (setf best k)
-                                         finally (return best)))
-                             (out (make-array (* side side) :element-type 'single-float)))
-                        (dotimes (i (* side side) out)
-                          (setf (aref out i) (cffi:mem-aref mask-data :float (+ i (* best side side)))))))
+                      (let ((score-data (onnx-floats scores)))
+                        (loop for k below (first (last dimensions 3))
+                              collect (let ((out (make-array (* side side) :element-type 'single-float)))
+                                        (dotimes (i (* side side))
+                                          (setf (aref out i)
+                                                (cffi:mem-aref mask-data :float (+ i (* k side side)))))
+                                        (cons (cffi:mem-aref score-data :float k) out)))))
                  (onnx-release masks)
                  (onnx-release scores))))
         (mapc #'onnx-release tensors)
@@ -215,6 +213,51 @@ does not reach the picture's edge filled.  MASK, changed."
       (settle 0 (lambda (x y) (or (= x 0) (= y 0) (= x (1- w)) (= y (1- h))))))
     mask))
 
+(defun best-scored (masks box w h)
+  "Of MASKS, ((score . bytes) ...), the one the model scores best."
+  (declare (ignore box w h))
+  (cdr (first (sort (copy-list masks) #'> :key #'car))))
+
+(defparameter *subject-score-margin* 0.05
+  "How far below the best score a candidate may be and still be chosen
+for being larger.")
+
+(defparameter *subject-spill* 0.15
+  "A candidate with more than this share of itself outside the box has
+taken the background too.")
+
+(defun widest-near-best (masks box w h)
+  "Of MASKS, ((score . bytes) ...), the largest of those the model scores
+within *subject-score-margin* of its best and that stay in BOX (no more
+than *subject-spill* of them outside it); the best-scored when none
+does.  The decoder's three answers run from a part to the whole, and a
+subject is the whole: on a man holding a child, its best-scored answer
+was a patchwork of the two, the largest (0.02 behind) both of them
+whole.  A box may be drawn short of an arm, so a little outside is the
+subject; much outside is a wall or a floor, as a test card's largest
+answer (a quarter of it outside) was."
+  (destructuring-bind (bx by bw bh) box
+    (flet ((area (m) (count 255 (cdr m)))
+           (outside (m)
+             (let ((bytes (cdr m)) (out 0) (all 0))
+               (dotimes (i (length bytes) (if (zerop all) 1 (/ out all)))
+                 (when (= 255 (aref bytes i))
+                   (incf all)
+                   (multiple-value-bind (y x) (floor i w)
+                     (unless (and (<= bx x (+ bx bw)) (<= by y (+ by bh)))
+                       (incf out))))))))
+      (let* ((best (reduce #'max masks :key #'car))
+             (near (remove-if (lambda (m) (or (< (car m) (- best *subject-score-margin*))
+                                              (> (outside m) *subject-spill*)))
+                              masks)))
+        (if near
+            (cdr (first (sort (copy-list near) #'> :key #'area)))
+            (best-scored masks box w h))))))
+
+(defparameter *subject-choice* 'widest-near-best
+  "A function of the candidate masks, the box, and the picture's size,
+choosing one.")
+
 (defun subject-mask (pixels w h box &key points exclude)
   "The subject inside BOX (x y w h in PIXELS' own coordinates) as a mask,
 W x H bytes, 0 or 255; POINTS ((x y) ...) on the subject and EXCLUDE
@@ -226,16 +269,22 @@ points off it steer the model.  Nil when the model finds nothing."
                                   (list (* (+ bx bw) sx) (* (+ by bh) sy) 3))
                             (loop for (x y) in points collect (list (* x sx) (* y sy) 1))
                             (loop for (x y) in exclude collect (list (* x sx) (* y sy) 0))))
-           (logits (bt:with-lock-held (*subject-lock*)
-                     (subject-logits (subject-encoding pixels w h) prompts)))
-           (mask (without-specks! (stretched-logits logits w h) w h *subject-specks*))
-           (rect (mask-bounds mask w h)))
+           (candidates (bt:with-lock-held (*subject-lock*)
+                         (subject-candidates (subject-encoding pixels w h) prompts)))
+           (masks (mapcar (lambda (candidate)
+                            (cons (car candidate)
+                                  (without-specks! (stretched-logits (cdr candidate) w h) w h *subject-specks*)))
+                          candidates))
+           (mask (funcall *subject-choice* masks box w h))
+           (rect (and mask (mask-bounds mask w h))))
       (when rect
         (refined-mask mask rect w h pixels (max 3 (round (max w h) 340)) 2)))))
 
-(defun select-subject! (doc x y w h &key points exclude (mode :new))
-  "The subject in the W x H box at X, Y of the composited picture
-selected, by model, combined with the selection by MODE."
+
+(defun select-subject! (doc x y w h &key points exclude (mode :new) layer)
+  "The subject in the W x H box at X, Y selected by model, combined with
+the selection by MODE: judged on raster LAYER's pixels, or on the
+composited picture (nil, or any other layer)."
   (unless (subject-model?)
     (error "This server has no subject model: outline the subject with select-polygon and refine-selection instead."))
   (let ((dw (the-object doc doc-width))
@@ -247,7 +296,10 @@ selected, by model, combined with the selection by MODE."
       (unless (and (listp list)
                    (every (lambda (p) (and (consp p) (= 2 (length p)) (every #'realp p))) list))
         (error "Points are ((x y) ...), not ~s." list)))
-    (let ((mask (subject-mask (the-object doc (render-cpu)) dw dh (list x y w h)
+    (let ((mask (subject-mask (if (and layer (eql (the-object layer kind) :raster))
+                                  (the-object layer pixels)
+                                  (the-object doc (render-cpu)))
+                              dw dh (list x y w h)
                               :points points :exclude exclude)))
       (unless mask
         (error "The model found no subject in that box: draw it around the subject, with a little margin."))

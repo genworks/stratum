@@ -123,13 +123,17 @@ pixels):
    with `:mode :add`.  The box may be rough: one cut into a head or
    short of an arm still gives the whole person, and it costs nothing
    to be generous, but keep other people out of it as far as you can.
-   `look` at the selection, all the way round each subject.  If it
-   missed a part of one (a bag, a hand), or took something that is not
+   A child held in someone's arms goes in that person's box.  `look` at
+   the selection, all the way round each subject.  If it missed a part
+   of one (a held toy, a shoe, a bag), or took something that is not
    the subject, select them all again, giving that subject's
-   `select-subject` `:points ((x y))` on the missed part or `:exclude
-   ((x y))` on the wrong one.  Then go on with step 3; the polygon below
-   is only for a server without a subject model, or a thing the model
-   will not take.
+   `select-subject` `:points ((x y) ...)` on each missed part or
+   `:exclude ((x y))` on the wrong one; a point on what was missed
+   brings it in far better than a polygon added over it.  Select
+   before step 4 hides the original: to select again after it, give
+   every `select-subject` `:layer 0`.  Then go on with step 3; the
+   polygon below is only for a server without a subject model, or a
+   thing the model will not take.
 
    Without one, outline it with `select-polygon` as above, leaving out
    any pocket of the old background between an arm and the body; the
@@ -371,13 +375,16 @@ cover).
   subject outlined by eye and not refined, `(contract-selection 2.5)`
   then `(feather 1)`: on the outline itself, a rim of what was behind it
   comes too.
-- `(select-subject x y w h &key points exclude mode)` — the person or
-  thing in the w x h box at x, y selected by a model that knows what
+- `(select-subject x y w h &key points exclude mode layer)` — the person
+  or thing in the w x h box at x, y selected by a model that knows what
   things are, its edge on the subject's own; the box may be rough.
   `points` ((x y) ...) lie on the subject and `exclude` points off it,
-  to steer the model when it misses a part or takes too much.  The
-  first on a picture takes a few seconds, later ones well under one.
-  Fails on a server without the model, which the message says.
+  to steer the model when it misses a part (a toy, a shoe, a bag) or
+  takes too much.  It reads the picture as it now shows, so once the
+  original is hidden or covered, give `:layer` its layer ("Background"
+  or 0), or it looks for people in the new background.  The first on a
+  picture takes a few seconds, later ones well under one.  Fails on a
+  server without the model, which the message says.
 - `(refine-selection &key (radius 8) (passes 5) layer)` — the edge moved
   onto the subject's own outline by color, within RADIUS pixels (1 to
   100) either side of it, judged again around the new edge for each of

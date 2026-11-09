@@ -352,13 +352,15 @@ The edge comes out hard: feather after."
                (stratum::refine-selection! (doc) :radius radius :passes passes
                                            :layer (and layer (layer-of layer))))))
 
-(defun select-subject (x y w h &key points exclude (mode :new))
+(defun select-subject (x y w h &key points exclude (mode :new) layer)
   "The person or thing in the W x H box at X, Y selected by model, its
 edge on the subject's own; POINTS ((x y) ...) on it and EXCLUDE points
-off it steer the model.  The box may be rough."
+off it steer the model.  The box may be rough.  Judged on LAYER's
+pixels, or the composite when nil."
   (selecting (lambda ()
                (stratum::select-subject! (doc) x y w h :points points :exclude exclude
-                                                         :mode (mode-key mode)))))
+                                                         :mode (mode-key mode)
+                                                         :layer (and layer (layer-of layer))))))
 
 (defun select-all ()
   "Everything selected."

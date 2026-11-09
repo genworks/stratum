@@ -117,7 +117,15 @@ pixels):
    is cut off there, and moved inward that cut shows as a straight line
    through an arm or a shoulder.  Leave such a subject where it is, and
    move the others toward it if they must move.  If it must move too,
-   crop at the end so that its cut lies on the new edge.
+   crop at the end so that its cut lies on the new edge.  Anything
+   standing in front of a subject cuts it off in the same way: a table,
+   a car, a chair's arm, a railing, another person.  Taken away with
+   the old background, it leaves the subject ending in mid-air along
+   its edge, a child behind a table as half a child, a car seat sliced
+   along the table's corner.  So keep what stands in front with the
+   subject (select it as well, or give that `select-subject` `:points`
+   on it), or, for someone at the back who is not what the picture is
+   about, leave them out altogether, never half of them.
 2. Select it.  When this server can select a subject by model (the
    message says whether it can), `select-subject` with a box around
    each subject and a little margin all round, the second and later
@@ -129,12 +137,19 @@ pixels):
    too: where people overlap, the one behind shows again on the far
    side of the one in front (legs beside a child, an arm behind a
    shoulder), and a box alone may leave such a piece out, as it may a
-   held toy.  Anything of a person under the magenta wash is missing.  If it missed a part
-   of one (a held toy, a shoe, a bag), or took something that is not
-   the subject, select them all again, giving that subject's
-   `select-subject` `:points ((x y) ...)` on each missed part or
-   `:exclude ((x y))` on the wrong one; a point on what was missed
-   brings it in far better than a polygon added over it.  Select
+   held toy.  Anything of a person under the magenta wash is missing,
+   and so is a shoe or a sandal: look at the feet.  A whole person
+   missed is added with a `select-subject` of their own and `:mode
+   :add`; the rest stand.  If it missed a part of one (a held toy, a
+   shoe, a bag), or took something that is not the subject (a hand of
+   someone behind, on a head), select them all again, giving that
+   subject's `select-subject` `:points ((x y) ...)` on each missed part
+   or `:exclude ((x y))` on the wrong one; a point on what was missed
+   brings it in far better than a polygon added over it, and an
+   excluded hand goes cleanly where clearing it afterwards leaves a
+   rim.  Give two or three points, not more: many points on one box
+   confuse the model, and it may drop what it had.  A large thing
+   holding a small one (a car seat and the baby in it) is two boxes.  Select
    before step 4 hides the original: to select again after it, give
    every `select-subject` `:layer 0`.  Then go on with step 3; the
    polygon below is only for a server without a subject model, or a
@@ -173,14 +188,21 @@ pixels):
    the old background.  Subjects that stay together can share one
    selection and one layer.  To move it, `(select-none)` and then
    `(move-pixels layer dx dy)`.
-4. Make the background a layer of its own, never a fill around the
-   subject: `(generate-layer prompt :name "New background")`, then
-   `move-layer` it down past the subject's layers (with one,
-   `(move-layer "New background" -1)`), and `(set-layer 0 :visible nil)`
-   to hide the original, whose layer is most often named "Background"
-   already.  `generate-fill` fades out at the selection's
-   edge, so a fill through `invert-selection` leaves the old picture
-   showing around the subject in a band about six pixels wide.
+4. Make the background a layer of its own, under the subject:
+   `(generate-background prompt)` paints it around the subject's layer
+   (the top one, or `:layer`) and puts it just under that layer, named
+   "New background".  The generator sees the subject while it paints,
+   so the ground meets the feet and the light and the scale of the
+   place suit the people in it; nothing of the subject changes.  It
+   sees one layer, so subjects that stay together share one (step 3).
+   Then `(set-layer 0 :visible nil)` to hide the original, whose layer
+   is most often named "Background" already.  `look` at the result for
+   anything the generator added against the subject's outline: a
+   second figure, a leg or a head beside theirs, a dark shape going on
+   from their hair.  Take such a layer off with `delete-layer` and make
+   it again with another `:seed`.  Never `generate-fill` around the
+   subject: it fades out at the selection's edge, and the old picture
+   shows around the subject in a band about six pixels wide.
 5. Blur the background, with nothing selected so that the blur reaches
    all of it: `(select-none)`, then `(gaussian-blur "New background" 2)`,
    about 2 for each thousand pixels of the picture's width.  A sharp
@@ -244,7 +266,7 @@ body, and each repaint puts the neck somewhere new.
 Everything else here changes what is in the picture.  When a request
 needs something that is not there and cannot be painted, a realistic
 object, a filled-in background, a thing removed with what was behind
-it, these two ask an image generator.  The message with each request
+it, these ask an image generator.  The message with each request
 says whether this server has one.  Each takes a minute or so, and the
 pictures are small, a megapixel or so scaled to fit.  Use them only for
 that; a recolor, a tone change or a simple shape is better done with
@@ -271,6 +293,12 @@ the operations above, which are exact and immediate.
   and do it again over the whole region at once, selected generously.
 - `(generate-layer prompt &key name seed)` — a whole new picture of the
   document's shape as a new raster layer on top.
+- `(generate-background prompt &key layer name seed)` — a new picture
+  painted around the subject on raster `layer` (the top layer by
+  default), which the generator is shown, as a raster layer `name`
+  ("New background" by default) just under it; `layer` does not
+  change.  For a cut-out subject: see Putting a subject on a new
+  background.
 - `(generate-picture prompt &key name seed reference strength)` — the
   whole picture made over as a new raster layer on top: a change of
   style, season or light across all of it.  With `:reference t`, the
@@ -312,6 +340,12 @@ was photographed with: "taken at eye level from a stone terrace", not a
 view from above, and the same light, most often "soft overcast
 daylight".  Say where the important thing goes, in the gap the subject
 leaves: "one tall temple tower in the exact center of the picture".
+For `generate-background`, describe the place alone and never the
+people in it: "a person crouching on the path" paints a second person.
+When their feet are in the picture, say where the ground lies in it,
+as far up as their feet: "the path filling the picture from the bottom
+up to above its middle"; a ground that ends lower leaves them standing
+on air.
 Then `look` at the result for anything wrong for the place or the
 period, such as the wrong symbol on a building.
 

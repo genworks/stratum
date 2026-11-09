@@ -29,7 +29,7 @@
            #:add-layer #:delete-layer #:duplicate-layer #:move-layer #:merge-down #:flatten
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
-           #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:select-subject #:selection #:look #:generate-fill #:generate-layer #:generate-picture
+           #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:select-subject #:selection #:look #:generate-fill #:generate-layer #:generate-background #:generate-picture
            #:generator-models #:use-generator-model
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste #:cut-out
@@ -45,7 +45,7 @@
   "The document the operations work on; use-document sets it.")
 
 (defparameter *prompt-operators*
-  '(documents describe-document document-info layers layer-info look generate-fill generate-layer generate-picture
+  '(documents describe-document document-info layers layer-info look generate-fill generate-layer generate-background generate-picture
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
     select-rect select-polygon select-wand select-all select-none invert-selection feather
     contract-selection expand-selection refine-selection select-subject selection

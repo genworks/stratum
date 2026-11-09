@@ -3799,6 +3799,70 @@ own, and undoes with the prompt; the lock stays free meanwhile."
                        (getf (first (stratum:run-forms "(generate-fill \"grass\")")) :error)))
         (stratum-api:select-none)))))
 
+(defun test-generate-background ()
+  "A background made around a subject, against a stand-in: the generator
+is shown the subject over gray and nothing else, its mask is everything
+but the subject's inside, it repaints at full strength, and the new
+layer lands just under the subject, which does not change."
+  (let ((stratum-api:*document* nil)
+        (*documents* (make-hash-table :test 'equal))
+        (shown nil))
+    (stratum-api:use-document "parity")
+    (stratum-api:add-layer :raster :name "Subject")
+    (stratum-api:select-rect 100 50 120 100)
+    (stratum-api:fill-selection "Subject" '(200 30 30))
+    (stratum-api:select-none)
+    (flet ((subject () (copy-seq (the-object (stratum-api::layer-of "Subject") pixels))))
+      (let ((before (subject)))
+        (call-with-stub-generator
+         (lambda (generator seen)
+           (let ((*generator* generator))
+             (let ((result (first (stratum:run-forms "(generate-background \"a meadow\")"))))
+               (check "generate-background: a layer named New background just under the subject"
+                      (and (getf result :ok)
+                           (equal (getf (getf result :value) :name) "New background")
+                           (= (getf (stratum-api:layer-info "New background") :index)
+                              (1- (getf (stratum-api:layer-info "Subject") :index))))
+                      result))
+             (check "the subject's layer does not change" (equalp before (subject)))
+             (destructuring-bind (body free) (first (funcall seen))
+               (let* ((w (gethash "width" body))
+                      (mask (multiple-value-bind (rgba mw) (read-png
+                                                             (let ((url (gethash "mask_image" body)))
+                                                               (cl-base64:base64-string-to-usb8-array
+                                                                (subseq url (1+ (position #\, url))))))
+                              (lambda (x y) (aref rgba (* 4 (+ x (* y mw)))))))
+                      (shown-at (lambda (x y) (coerce (subseq shown (* 4 (+ x (* y w))) (+ 3 (* 4 (+ x (* y w))))) 'list)))
+                      (near (lambda (got want) (every (lambda (g v) (<= (abs (- g v)) 1)) got want))))
+                 (check "the generator is shown the subject over gray, at full strength"
+                        (and (= 1 (gethash "strength" body))
+                             (funcall near (funcall shown-at 10 10) '(128 128 128))
+                             (funcall near (funcall shown-at 128 80) '(200 30 30)))
+                        (list (gethash "strength" body) (funcall shown-at 10 10) (funcall shown-at 128 80)))
+                 (check "it paints everywhere but deep inside the subject, under the subject's edge too"
+                        (and (= 255 (funcall mask 10 10))
+                             (zerop (funcall mask 128 80))
+                             (= 255 (funcall mask 81 80)))
+                        (list (funcall mask 10 10) (funcall mask 128 80) (funcall mask 81 80))))
+               (check "the lock is free while the generator works" free))
+             (stratum-api:delete-layer "New background")
+             (let ((answer (prompt-with stratum-api:*document* "(generate-background \"a meadow\" :name \"Meadow\")")))
+               (check "from a prompt, the page is sent the generator's picture to stretch"
+                      (and (getf answer :ok) (getf answer :stretched)
+                           (= (getf (stratum-api:layer-info "Meadow") :index)
+                              (1- (getf (stratum-api:layer-info "Subject") :index))))
+                      answer))
+             (stratum-api:undo)
+             (check "a layer that is not a picture's is refused in words"
+                    (search "needs a raster layer"
+                            (getf (first (stratum:run-forms "(generate-background \"a meadow\" :layer \"Warm\")"))
+                                  :error)))))
+         :paint (lambda (w h init)
+                  (setf shown init)
+                  (let ((rgba (make-rgba w h)))
+                    (dotimes (i (* w h) rgba)
+                      (replace rgba '(0 200 0 255) :start1 (* 4 i))))))))))
+
 (defun prompt-with (doc forms)
   "A prompt on DOC whose model answers FORMS, text, and then nothing."
   (call-with-stub-model
@@ -3910,7 +3974,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

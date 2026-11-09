@@ -351,7 +351,12 @@ a generator repaints the whole of its mask, and its copy of the
 surroundings is never quite the picture's.  Nothing outside the
 selection can change, and the layer takes masks, blends and undo like
 any other.  `(generate-layer prompt)` makes a picture of
-the document's shape, and `(generate-picture prompt)` remakes the open
+the document's shape.  `(generate-background prompt)` paints one around
+a cut-out subject, which the generator is shown over gray (nothing of
+an old background is sent), with everything but the subject's inside
+as its mask and full strength; the layer goes just under the subject's,
+reaching a few pixels in under its edge so that no rim shows, and the
+ground it paints meets the subject's feet.  And `(generate-picture prompt)` remakes the open
 picture, shown to the model as a reference (`:reference nil :strength
 0.35` starts from it instead).  Not every model can be shown a picture,
 and one that cannot takes the request and answers from the words alone,

@@ -335,7 +335,7 @@ server; what it now runs on."
 (defun generator-state ()
   "What this server can do about pictures, for the model that plans."
   (cond ((null *generator*)
-         "has no image generator: generate-fill, generate-layer and generate-picture will fail")
+         "has no image generator: generate-fill, generate-layer, generate-background and generate-picture will fail")
         ((eq (generator-references *generator*) :no)
          "has an image generator whose model cannot be shown a picture: generate-picture starts from the picture, by :strength, and its prompt describes the result")
         (t "has an image generator")))
@@ -498,6 +498,90 @@ layer-info."
           (ask-generator generator (generator-body generator prompt seed sw sh))
         (whole-layer! doc pixels w h name)))))
 
+(defparameter *background-reach* 6
+  "How far, in the picture's pixels, a background made around a subject
+reaches in under the subject's edge: the generator's fade and the
+subject's own feather both fall there, under the subject, so no rim of
+anything else shows between them.")
+
+(defun around-coverage (pixels w h sw sh reach)
+  "The generator's mask, SW x SH bytes, for a background around the
+subject of PIXELS, RGBA W x H: 255 where the subject is not wholly
+opaque, or within REACH of the picture's pixels of such a place, 0
+deeper in.  Worked at the generator's size, a megapixel or so, and not
+the photograph's."
+  (let ((outside (make-gray w h)))
+    (dotimes (i (* w h))
+      (when (< (aref pixels (+ 3 (* 4 i))) 255)
+        (setf (aref outside i) 255)))
+    (let* ((small (resample-gray outside w h sw sh))
+           (sites (make-gray sw sh))
+           (reach (max 1d0 (/ (* reach sw) (float w 1d0))))
+           (limit (* reach reach))
+           (out (make-gray sw sh)))
+      ;; a generator's pixel touched by anything outside counts as outside
+      (dotimes (i (* sw sh))
+        (when (plusp (aref small i))
+          (setf (aref sites i) 255)))
+      (let ((grid (distances-to sites sw (list 0 0 sw sh) #'selected-byte?)))
+        (dotimes (i (* sw sh) out)
+          (when (<= (aref grid i) limit)
+            (setf (aref out i) 255)))))))
+
+(defun over-gray (pixels w h)
+  "PIXELS, RGBA W x H, over middle gray: what a generator is shown of a
+subject alone, with nothing of an old background for it to keep."
+  (let ((out (make-rgba w h)))
+    (dotimes (i (* w h) out)
+      (let* ((j (* 4 i))
+             (a (aref pixels (+ j 3))))
+        (dotimes (c 3)
+          (setf (aref out (+ j c))
+                (round (+ (* (aref pixels (+ j c)) a) (* 128 (- 255 a))) 255)))
+        (setf (aref out (+ j 3)) 255)))))
+
+(defun stratum-api:generate-background (prompt &key layer (name "New background") (seed -1))
+  "PROMPT painted around the subject on raster LAYER (the top layer by
+default) as a new raster layer NAME just under it.  The generator is
+shown the subject and paints everywhere else, so the ground meets the
+subject's feet and the light falls on the scene as on the subject;
+LAYER itself does not change.  Slow: a minute or so.  The new layer's
+layer-info."
+  (let ((generator (require-generator))
+        (doc (stratum-api::doc))
+        subject dw dh body)
+    (bt:with-lock-held (*lock*)
+      (setf subject (stratum-api::raster-layer-of
+                     (or layer (1- (length (the-object doc layer-list)))))
+            dw (the-object doc doc-width)
+            dh (the-object doc doc-height))
+      (multiple-value-bind (sw sh) (fitted-size dw dh (generator-size generator))
+        (let ((pixels (the-object subject pixels)))
+          (setf body (generator-body
+                      generator prompt seed sw sh
+                      :image (png-octets (resample-rgba (over-gray pixels dw dh) dw dh sw sh) sw sh)
+                      :mask (gray-png (around-coverage pixels dw dh sw sh *background-reach*)
+                                      sw sh (generator-invert-mask generator))
+                      ;; nothing outside the subject is worth keeping
+                      :strength 1d0)))))
+    (multiple-value-bind (pixels w h) (ask-generator generator body)
+      (let ((layer (generated-pixels doc pixels w h (list 0 0 dw dh) nil))
+            ;; as whole-layer!: the page stretches the picture itself
+            (png (and (the-object doc prompt-journal) (png-octets (doc-pixels doc pixels) w h))))
+        (bt:with-lock-held (*lock*)
+          (let ((below (position subject (the-object doc layer-list)))
+                (journal (the-object doc prompt-journal)))
+            (unless below
+              (error "The subject's layer went while its background was being made."))
+            (unless (= (length layer) (* 4 (the-object doc doc-width) (the-object doc doc-height)))
+              (error "The document changed size while the picture was being made."))
+            (let ((index (the-object doc (add-layer! (list :kind :raster :name name :pixels layer)
+                                                     (1- below)))))
+              (when (and journal png)
+                (push (list (the-object (the-object doc (layer index)) pixel-stamp) png w h)
+                      (prompt-journal-stretched journal)))
+              (stratum-api:layer-info index))))))))
+
 (defun stratum-api:generate-picture (prompt &key (name "Generated") (seed -1) (reference t) (strength 0.35))
   "The open picture made over by PROMPT, as a new raster layer NAME on
 top of it, the picture's shape.  With REFERENCE the model is shown the
@@ -530,7 +614,8 @@ The layer's layer-info, with a :note when REFERENCE did not go as asked."
       (let ((info (whole-layer! doc pixels w h name)))
         (if note (append info (list :note note)) info)))))
 
-(defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer stratum-api:generate-picture)
+(defparameter *long-operators* '(stratum-api:generate-fill stratum-api:generate-layer
+                                 stratum-api:generate-background stratum-api:generate-picture)
   "The operations run-forms calls without the lock, which they take for
 themselves: a generation would hold up the session's other requests
 for a minute.")

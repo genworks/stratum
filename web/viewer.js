@@ -5205,7 +5205,9 @@
     var keepRow = el('div', { 'class': 'st-row' }, [keep, el('span', { text: 'Keep the whole selection, not only what changed' })]);
     // The generator's model: the whole server's, so changing it is for
     // those the server lets (the menu is disabled for anyone else).
-    var model = el('select', { id: 'stratum-generate-model' });
+    // as wide as the row leaves it, not as its longest name: the open
+    // list still shows each name whole
+    var model = el('select', { id: 'stratum-generate-model', style: 'flex: 1 1 0; min-width: 0; max-width: 100%' });
     var modelNote = el('span', { 'class': 'st-lkind', text: '' });
     var modelRow = el('div', { 'class': 'st-row' }, [el('span', { text: 'model' }), model, modelNote]);
     modelRow.style.display = 'none';

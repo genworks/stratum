@@ -30,6 +30,7 @@
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
            #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:select-subject #:selection #:look #:generate-fill #:generate-layer #:generate-picture
+           #:generator-models #:use-generator-model
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste #:cut-out
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise

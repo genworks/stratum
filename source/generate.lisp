@@ -40,15 +40,18 @@
 
 (defstruct (generator (:constructor make-generator
                           (url steps cfg-scale strength size negative seconds invert-mask
-                           &optional (turn #'funcall))))
+                           &optional (turn #'funcall) recipe sampler scheduler)))
   "A generator's address and how to ask it.  URL is its base, with no
 trailing slash; STEPS, CFG-SCALE and STRENGTH (denoising, 0-1) suit its
 model; SIZE is the longer side, in pixels, of what it is sent; NEGATIVE
 a negative prompt; SECONDS how long to wait; INVERT-MASK true when its
 model wants the selection dark; TURN a function of one thunk that calls
 it when the generator may be used, for a card shared with something
-else.  It runs with no lock of ours held and must not wait on one."
-  url steps cfg-scale strength size negative seconds invert-mask turn)
+else.  It runs with no lock of ours held and must not wait on one.
+RECIPE is the id of the model the steps and the rest were taken from
+(nil when they were given), and STEPS, CFG-SCALE, SAMPLER and SCHEDULER
+are each left out of a request when nil, so the model's own apply."
+  url steps cfg-scale strength size negative seconds invert-mask turn recipe sampler scheduler)
 
 (defvar *generator* nil
   "The image generator, or nil: there is none by default.")
@@ -107,9 +110,19 @@ shown and works from."
                         "width" w
                         "height" h
                         "seed" seed
-                        "output_format" "png"
-                        "sample_params" (object "sample_steps" (generator-steps generator)
-                                                "guidance" (object "txt_cfg" (float (generator-cfg-scale generator) 1d0))))))
+                        "output_format" "png"))
+          (params (object)))
+      ;; what is not given is left to the model loaded, whose recipe says
+      (when (generator-steps generator)
+        (setf (gethash "sample_steps" params) (generator-steps generator)))
+      (when (generator-cfg-scale generator)
+        (setf (gethash "guidance" params) (object "txt_cfg" (float (generator-cfg-scale generator) 1d0))))
+      (when (generator-sampler generator)
+        (setf (gethash "sample_method" params) (generator-sampler generator)))
+      (when (generator-scheduler generator)
+        (setf (gethash "scheduler" params) (generator-scheduler generator)))
+      (when (plusp (hash-table-count params))
+        (setf (gethash "sample_params" body) params))
       (when image
         (setf (gethash "init_image" body) (data-url image)
               (gethash "strength" body) (float (or strength (generator-strength generator)) 1d0)))
@@ -177,7 +190,10 @@ w h), whatever the turn itself answers."
     (values-list picture)))
 
 (defun require-generator ()
-  (or *generator* (error "This server has no image generator.")))
+  "The generator, its settings brought to the model it has loaded."
+  (let ((generator (or *generator* (error "This server has no image generator."))))
+    (ignore-errors (generator-in-step! generator))
+    generator))
 
 (defun generator-references (generator)
   "Whether GENERATOR's loaded model can be shown a picture: :yes, :no, or
@@ -191,6 +207,130 @@ name comes first."
          (name (and (hash-table-p model) (gethash "name" model))))
     (when (and (hash-table-p features) (stringp name) (plusp (length name)))
       (if (gethash "ref_images" features) :yes :no))))
+
+;;; Which model the generator has loaded.  sd-server holds one model for
+;;; everything it serves and changes it by recipe (POST
+;;; /sdcpp/v1/models/load {"recipe": id}); each recipe carries the steps,
+;;; guidance, sampler and scheduler its model wants, and a request that
+;;; leaves them out gets those.  So Stratum takes them from the recipe
+;;; when it switches, and before each generation it asks what is loaded:
+;;; a restart of the server, or a switch made by hand, would otherwise
+;;; leave it asking one model for another's settings.
+
+(defparameter *generator-recipe-sources* '("user")
+  "Where a recipe must come from to be offered: the server's own
+builtins name files nobody has put there, so by default only the
+recipes its owner wrote.  Nil offers every one.")
+
+(defvar *generator-choosers* nil
+  "The invite names that may change the generator's model from the page,
+or nil for anyone admitted.  The model is the whole server's: a change is
+everyone's.  Lisp callers always may.")
+
+(defun json-table (&rest keys-and-values)
+  (let ((table (make-hash-table :test 'equal)))
+    (loop for (key value) on keys-and-values by #'cddr
+          do (setf (gethash key table) value))
+    table))
+
+(defun generator-post (generator path value &key (seconds 600))
+  "VALUE, a JSON object, posted to PATH of the generator, waiting up to
+SECONDS: (values reply status)."
+  (multiple-value-bind (status text)
+      (handler-case (sexp-agent:post-json (format nil "~a~a" (generator-url generator) path)
+                                          (yason:with-output-to-string* () (yason:encode value))
+                                          :seconds seconds)
+        (error (e) (error "The image generator could not be reached: ~a" e)))
+    (values (ignore-errors (yason:parse text)) status)))
+
+(defun generator-recipes (generator)
+  "The models GENERATOR offers: ((id name defaults) ...), DEFAULTS the
+recipe's hash table of them, or nil when the listing has none."
+  (multiple-value-bind (reply status) (generator-get generator "/sdcpp/v1/recipes")
+    (unless (and (eql status 200) (hash-table-p reply))
+      (error "The image generator did not list its models (it answered ~a)." status))
+    (loop for recipe in (gethash "recipes" reply)
+          when (and (hash-table-p recipe) (stringp (gethash "id" recipe))
+                    (or (null *generator-recipe-sources*)
+                        (member (gethash "source" recipe) *generator-recipe-sources* :test #'equal)))
+            collect (list (gethash "id" recipe)
+                          (let ((name (gethash "name" recipe)))
+                            (if (and (stringp name) (plusp (length name))) name (gethash "id" recipe)))
+                          (let ((defaults (gethash "defaults" recipe)))
+                            (and (hash-table-p defaults) defaults))))))
+
+(defun generator-loaded (generator)
+  "The id of the recipe GENERATOR has loaded and ready, or nil: nothing
+loaded, a model named on its command line, or no answer."
+  (let ((status (ignore-errors (generator-get generator "/sdcpp/v1/models/status"))))
+    (and (hash-table-p status)
+         (equal (gethash "state" status) "ready")
+         (let ((recipe (gethash "recipe" status)))
+           (and (stringp recipe) (plusp (length recipe)) recipe)))))
+
+(defun adopt-recipe! (generator id defaults)
+  "GENERATOR's settings those of recipe ID: each of DEFAULTS (a hash
+table or nil) the recipe gives, and the others left to the server."
+  (flet ((default (key) (and (hash-table-p defaults) (gethash key defaults))))
+    (setf (generator-recipe generator) id
+          (generator-steps generator) (default "steps")
+          (generator-cfg-scale generator) (default "cfg_scale")
+          (generator-sampler generator) (default "sampling_method")
+          (generator-scheduler generator) (default "scheduler"))
+    generator))
+
+(defun generator-in-step! (generator)
+  "GENERATOR's settings brought to the model the server has loaded, when
+that is a recipe other than the one they came from."
+  (let ((loaded (generator-loaded generator)))
+    (when (and loaded (not (equal loaded (generator-recipe generator))))
+      (let ((recipe (find loaded (let ((*generator-recipe-sources* nil)) (generator-recipes generator))
+                          :key #'first :test #'equal)))
+        (adopt-recipe! generator loaded (third recipe))))
+    generator))
+
+(defun generator-model-info (generator)
+  "What GENERATOR runs on, as a plist: :recipe and the settings sent."
+  (list :recipe (generator-recipe generator)
+        :steps (generator-steps generator) :cfg-scale (generator-cfg-scale generator)
+        :sampler (generator-sampler generator) :scheduler (generator-scheduler generator)))
+
+(defun use-generator-model! (id)
+  "The generator's model changed to recipe ID, and Stratum's settings with
+it: the generator's model-info.  Slow when the model is not in memory: a
+minute or so for a large one.  Refused while the server is busy with a
+picture."
+  (let* ((generator (require-generator))
+         (recipes (generator-recipes generator))
+         (recipe (or (find id recipes :key #'first :test #'equal)
+                     (error "The image generator offers no model ~s; it offers ~{~a~^, ~}."
+                            id (mapcar #'first recipes))))
+         (reply nil) (status nil))
+    (funcall (generator-turn generator)
+             (lambda ()
+               (multiple-value-setq (reply status)
+                 (generator-post generator "/sdcpp/v1/models/load" (json-table "recipe" id)))))
+    (cond ((eql status 200))
+          ((null status) (error "The image generator's turn never came."))
+          ((eql status 409) (error "The image generator is busy with a picture; change the model when it is done."))
+          (t (error "The image generator could not load ~a (it answered ~a~@[: ~a~])."
+                    id status (and (hash-table-p reply)
+                                   (let ((why (or (gethash "error" reply) (gethash "message" reply))))
+                                     (if (hash-table-p why) (gethash "message" why) why))))))
+    (adopt-recipe! generator id (third recipe))
+    (generator-model-info generator)))
+
+(defun stratum-api:generator-models ()
+  "The image generator's models, ((id name) ...), and the one loaded:
+(:models ... :loaded id)."
+  (let ((generator (require-generator)))
+    (list :models (mapcar (lambda (r) (list (first r) (second r))) (generator-recipes generator))
+          :loaded (generator-loaded generator))))
+
+(defun stratum-api:use-generator-model (id)
+  "The image generator's model changed to ID, for everyone using this
+server; what it now runs on."
+  (use-generator-model! id))
 
 (defun generator-state ()
   "What this server can do about pictures, for the model that plans."

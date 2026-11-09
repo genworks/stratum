@@ -3439,20 +3439,24 @@ leaving an empty turn to break the next request."
                (and (getf answer :ok) (not (getf answer :declined))) answer)))))
 
 (defun call-with-stub-generator (fn &key (status 202) (job-state "completed") (color '(0 255 0 255)) paint
-                                         capabilities)
+                                         capabilities recipes busy)
   "FN called with a generator on a server of its own, a stand-in for
 sd-server's job API: a job is accepted with STATUS and is then JOB-STATE
 at its second asking, with a picture of COLOR at the size asked -- or
 of PAINT, a function of (w h init), INIT the picture it was sent or nil,
 answering RGBA.  CAPABILITIES, a string, is the answer to asking what
-it can do; with none it has no such door.  And with a function answering
-what it has seen: (body lock-free?) each, oldest first."
+it can do; with none it has no such door.  RECIPES, a string, is its
+list of models, with a door to load one (refused 409 while BUSY) and
+another saying which is loaded; with none, no such doors.  And with a
+function answering what it has seen: (body lock-free?) each, oldest
+first."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
          (seen '())
          (asked 0)
          (size nil)
-         (init nil))
+         (init nil)
+         (loaded nil))
     (flet ((json (req ent code value)
              (net.aserve:with-http-response (req ent :content-type "application/json" :response code)
                (net.aserve:with-http-body (req ent)
@@ -3488,6 +3492,26 @@ what it has seen: (body lock-free?) each, oldest first."
                      (net.aserve:with-http-response (req ent :content-type "application/json")
                        (net.aserve:with-http-body (req ent)
                          (write-string capabilities (net.aserve:request-reply-stream req)))))))
+      (when recipes
+        (net.aserve:publish
+         :path "/sdcpp/v1/recipes" :server server :content-type "application/json"
+         :function (lambda (req ent)
+                     (net.aserve:with-http-response (req ent :content-type "application/json")
+                       (net.aserve:with-http-body (req ent)
+                         (write-string recipes (net.aserve:request-reply-stream req))))))
+        (flet ((state () (object "state" (if loaded "ready" "empty") "recipe" (or loaded 'yason:false))))
+          (net.aserve:publish
+           :path "/sdcpp/v1/models/status" :server server :content-type "application/json"
+           :function (lambda (req ent) (json req ent net.aserve:*response-ok* (state))))
+          (net.aserve:publish
+           :path "/sdcpp/v1/models/load" :server server :content-type "application/json"
+           :function (lambda (req ent)
+                       (let ((body (yason:parse (gwl:request-body-text req))))
+                         (if busy
+                             (json req ent (net.aserve::make-resp 409 "Conflict")
+                                   (object "error" "A job is pending" "code" "model_busy"))
+                             (progn (setf loaded (gethash "recipe" body))
+                                    (json req ent net.aserve:*response-ok* (state)))))))))
       (net.aserve:publish
        :path "/sdcpp/v1/jobs/j1" :server server :content-type "application/json"
        :function (lambda (req ent)
@@ -3513,6 +3537,123 @@ what it has seen: (body lock-free?) each, oldest first."
                       (make-generator (format nil "http://127.0.0.1:~d" port) 4 1 0.9d0 256 "" 20 nil)
                       (lambda () (reverse seen))))
         (net.aserve:shutdown :server server)))))
+
+(defparameter *stub-recipes*
+  "{\"recipes\": [
+    {\"id\": \"klein\", \"name\": \"Klein\", \"source\": \"user\",
+     \"defaults\": {\"steps\": 4, \"cfg_scale\": 1.0}},
+    {\"id\": \"jugg\", \"name\": \"Juggernaut\", \"source\": \"user\",
+     \"defaults\": {\"steps\": 30, \"cfg_scale\": 5.0, \"sampling_method\": \"dpm++2m\", \"scheduler\": \"karras\"}},
+    {\"id\": \"plain\", \"name\": \"\", \"source\": \"user\"},
+    {\"id\": \"builtin-x\", \"name\": \"A builtin\", \"source\": \"builtin\"}],
+   \"errors\": []}"
+  "A stand-in generator's models: two with settings, one without, and one
+of the server's own.")
+
+(defun test-generator-models ()
+  "The generator's model changed from Stratum: the server's list (its
+owner's recipes only), a load, the recipe's settings in what is sent
+after, the server's own where the recipe gives none, refusals in words,
+and the settings brought back in step when the model changes behind us."
+  (flet ((sent (generator)
+           (yason:parse (generator-body generator "a test" 1 64 64))))
+    (call-with-stub-generator
+     (lambda (generator seen)
+       (declare (ignore seen))
+       (let ((*generator* generator))
+         (let ((listed (stratum-api:generator-models)))
+           (check "the models listed are the owner's, named, and none loaded yet"
+                  (and (equal (mapcar #'first (getf listed :models)) '("klein" "jugg" "plain"))
+                       (equal (second (assoc "plain" (getf listed :models) :test #'equal)) "plain")
+                       (null (getf listed :loaded)))
+                  listed))
+         (let* ((info (use-generator-model! "jugg"))
+                (params (gethash "sample_params" (sent generator))))
+           (check "a model loaded by name, and its recipe's settings sent after"
+                  (and (equal (getf info :recipe) "jugg")
+                       (equal (generator-loaded generator) "jugg")
+                       (= 30 (gethash "sample_steps" params))
+                       (= 5 (gethash "txt_cfg" (gethash "guidance" params)))
+                       (equal "dpm++2m" (gethash "sample_method" params))
+                       (equal "karras" (gethash "scheduler" params)))
+                  (list info params)))
+         (use-generator-model! "plain")
+         (check "a recipe that gives no settings leaves them to the server"
+                (null (gethash "sample_params" (sent generator))))
+         (check "a model the server does not offer is refused in words, naming those it does"
+                (search "klein, jugg, plain"
+                        (handler-case (progn (use-generator-model! "builtin-x") "no error")
+                          (error (e) (princ-to-string e)))))
+         ;; changed behind Stratum's back, as a restart or a hand would
+         (generator-post generator "/sdcpp/v1/models/load" (json-table "recipe" "klein"))
+         (require-generator)
+         (check "a model changed behind us is found before the next generation"
+                (and (equal (generator-recipe generator) "klein")
+                     (= 4 (generator-steps generator))
+                     (= 4 (gethash "sample_steps" (gethash "sample_params" (sent generator))))))))
+     :recipes *stub-recipes*)
+    (call-with-stub-generator
+     (lambda (generator seen)
+       (declare (ignore seen))
+       (let ((*generator* generator))
+         (check "a load while the server is busy is refused in words, and nothing changes"
+                (and (search "busy"
+                             (handler-case (progn (use-generator-model! "jugg") "no error")
+                               (error (e) (princ-to-string e))))
+                     (= 4 (generator-steps generator))))))
+     :recipes *stub-recipes* :busy t))
+  (let ((*generator* nil))
+    (check "with no generator, the models are refused in words"
+           (search "no image generator"
+                   (handler-case (progn (stratum-api:generator-models) "no error")
+                     (error (e) (princ-to-string e)))))))
+
+(defun test-generator-door ()
+  "The model door over a real connection, behind a gate with two invites:
+both may see the models, only the one on *generator-choosers* may change
+them, and the other is told who may."
+  (call-with-stub-generator
+   (lambda (generator seen)
+     (declare (ignore seen))
+     (let* ((port (free-port))
+            (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+            (old-gate *gate*) (old-generator *generator*) (old-choosers *generator-choosers*)
+            (file (format nil "/tmp/stratum-generator-test-~d.sexp" (get-universal-time))))
+       (flet ((ask (method token &optional body)
+                (multiple-value-bind (text code)
+                    (net.aserve.client:do-http-request
+                        (format nil "http://127.0.0.1:~d/stratum/api/generator?invite=~a" port token)
+                      :method method :content-type "application/json" :content body)
+                  (list code (if (stringp text) text (map 'string #'code-char text))))))
+         (unwind-protect
+              (progn
+                (with-open-file (out file :direction :output :if-exists :supersede)
+                  (format out "~s~%~s~%" '("alicetoken" "Alice" "2026-11-09") '("bobtoken" "Bob" "2026-11-09")))
+                (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
+                      *generator* generator
+                      *generator-choosers* '("Alice"))
+                (configure-gate! :invites-file file)
+                (publish-prompt! server nil)
+                (let ((bob (ask :get "bobtoken")))
+                  (check "anyone admitted sees the models, and is told they may not choose"
+                         (and (eql (first bob) 200) (search "\"choose\":false" (second bob))
+                              (search "\"klein\"" (second bob)))
+                         bob))
+                (let ((bob (ask :post "bobtoken" "{\"recipe\": \"jugg\"}")))
+                  (check "one not on the list is refused in words, and the model stays"
+                         (and (eql (first bob) 500) (search "Only Alice" (second bob))
+                              (null (generator-loaded generator)))
+                         bob))
+                (let ((alice (ask :post "alicetoken" "{\"recipe\": \"jugg\"}")))
+                  (check "one on the list changes it, and the answer says so"
+                         (and (eql (first alice) 200) (search "\"loaded\":\"jugg\"" (second alice))
+                              (search "\"choose\":true" (second alice))
+                              (equal (generator-loaded generator) "jugg"))
+                         alice)))
+           (setf *gate* old-gate *generator* old-generator *generator-choosers* old-choosers)
+           (when (probe-file file) (delete-file file))
+           (net.aserve:shutdown :server server)))))
+   :recipes *stub-recipes*))
 
 (defun test-generate ()
   "New pixels from a generator, against a stand-in: a crop and a mask go
@@ -3769,7 +3910,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

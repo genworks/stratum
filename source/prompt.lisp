@@ -663,14 +663,59 @@ wrong, as the other doors answer."
           (net.aserve:with-http-body (req ent)
             (write-string result (net.aserve:request-reply-stream req)))))))
 
+(defun may-choose-model? (req)
+  "Whether REQ's person may change the image generator's model: anyone
+when *generator-choosers* is nil or the gate is open, else a name on it."
+  (or (null *generator-choosers*)
+      (not (invite-gate?))
+      (and (member (invitee req) *generator-choosers* :test #'equal) t)))
+
+(defun handle-generator (req ent)
+  "GET /stratum/api/generator?s=: {models: [{id, name}], loaded, choose},
+the image generator's models, the one loaded, and whether this person may
+change it; POST with {recipe} changes it first and answers the same.  No
+lock of ours is held: a model takes as long to load as it takes."
+  (let ((result nil) (failure nil))
+    (handler-case
+        (progn
+          (when (eq (net.aserve:request-method req) :post)
+            (let* ((body (yason:parse (gwl:request-body-text req)))
+                   (recipe (and (hash-table-p body) (gethash "recipe" body))))
+              (unless (may-choose-model? req)
+                (error "Only ~{~a~^, ~} may change the image generator's model: it is everyone's."
+                       *generator-choosers*))
+              (unless (stringp recipe)
+                (error "Say which model: {\"recipe\": id}."))
+              (use-generator-model! recipe)))
+          (let ((models (stratum-api:generator-models)))
+            (setf result
+                  (json-string
+                   (json-object "models" (or (mapcar (lambda (m) (json-object "id" (first m) "name" (second m)))
+                                                     (getf models :models))
+                                             (vector))
+                                "loaded" (or (getf models :loaded) 'yason:false)
+                                "choose" (json-bool (may-choose-model? req)))))))
+      (serious-condition (e) (setf failure (princ-to-string e))))
+    (if failure
+        (reply-text req ent net.aserve:*response-internal-server-error* failure)
+        (net.aserve:with-http-response (req ent :content-type "application/json")
+          (no-store! req)
+          (net.aserve:with-http-body (req ent)
+            (write-string result (net.aserve:request-reply-stream req)))))))
+
 (defun publish-prompt! (server host)
-  "The prompt door and the reference, behind the invite gate like
-every door under /stratum."
+  "The prompt door, the generator's model door and the reference, behind
+the invite gate like every door under /stratum."
   (net.aserve:publish :path "/stratum/api/prompt" :server server :host host
                       :content-type "application/json"
                       :function (lambda (req ent)
                                   (when (door-admits? req ent *max-request-bytes*)
                                     (handle-prompt req ent))))
+  (net.aserve:publish :path "/stratum/api/generator" :server server :host host
+                      :content-type "application/json"
+                      :function (lambda (req ent)
+                                  (when (door-admits? req ent *max-request-bytes*)
+                                    (handle-generator req ent))))
   (publish-door server host "/stratum/api/reference" "text/markdown; charset=utf-8"
                 (lambda (req) (declare (ignore req)) (api-reference))))
 

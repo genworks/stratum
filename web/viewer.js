@@ -5118,6 +5118,34 @@
     keep.addEventListener('change', function () { state.keepAll = keep.checked; });
     var howRow = el('div', { 'class': 'st-row' }, [el('span', { text: 'use it' }), how]);
     var keepRow = el('div', { 'class': 'st-row' }, [keep, el('span', { text: 'Keep the whole selection, not only what changed' })]);
+    // The generator's model: the whole server's, so changing it is for
+    // those the server lets (the menu is disabled for anyone else).
+    var model = el('select', { id: 'stratum-generate-model' });
+    var modelNote = el('span', { 'class': 'st-lkind', text: '' });
+    var modelRow = el('div', { 'class': 'st-row' }, [el('span', { text: 'model' }), model, modelNote]);
+    modelRow.style.display = 'none';
+    function showModels(r) {
+      model.innerHTML = '';
+      (r.models || []).forEach(function (m) {
+        model.appendChild(el('option', { value: m.id, text: m.name }));
+      });
+      if (!r.loaded) model.insertBefore(el('option', { value: '', text: 'as the server started' }), model.firstChild);
+      model.value = r.loaded || '';
+      model.disabled = !r.choose;
+      modelNote.textContent = r.choose ? '' : 'the server owner chooses';
+      modelRow.style.display = (r.models || []).length ? '' : 'none';
+      return r;
+    }
+    var models = fetchJSON(api('generator')).then(showModels, function () { return null; });
+    function chooseModel(id) {
+      model.disabled = true;
+      modelNote.textContent = 'loading...';
+      return postJSON('generator', JSON.stringify({ recipe: id })).then(showModels, function (e) {
+        modelNote.textContent = 'not changed: ' + String(e && e.message ? e.message : e).replace(/^\S+: \d+ /, '');
+        return fetchJSON(api('generator')).then(function (r) { var note = modelNote.textContent; showModels(r); modelNote.textContent = note; return r; });
+      });
+    }
+    model.addEventListener('change', function () { if (model.value) chooseModel(model.value); });
     function shown() {
       words.placeholder = state.source === 'picture' && state.reference
         ? 'Say what to change, for example: turn this into an oil painting, keeping the same composition'
@@ -5130,7 +5158,7 @@
     how.addEventListener('change', function () { state.reference = how.value === 'reference'; shown(); });
     var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: 'Generate Image' }), words,
       el('div', { 'class': 'st-row' }, [el('span', { text: 'start from' }), source]),
-      howRow, strength, keepRow]);
+      howRow, strength, keepRow, modelRow]);
     var cancel = el('button', { type: 'button', text: 'Cancel' });
     var ok = el('button', { type: 'button', text: 'Generate' });
     box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
@@ -5138,6 +5166,8 @@
     shown();
     var dialog = S.generateDialog = {
       state: state,
+      models: models,
+      chooseModel: chooseModel,
       set: function (changes) {
         Object.assign(state, changes);
         words.value = state.prompt;

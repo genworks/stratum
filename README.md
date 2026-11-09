@@ -359,6 +359,20 @@ so Stratum asks the generator what the loaded model can do at each
 generation, starts from the picture with such a model, and says so.
 All run outside the server's lock.
 
+The generator's model can be changed from Stratum: `(stratum:use-generator-model!
+"juggernaut-xl")`, `(stratum-api:generator-models)` for the list (the
+server's own recipes, `/sdcpp/v1/recipes`, by default only those its
+owner wrote), or the model menu in Layer > Generate Image.  A switch
+loads the recipe on the server and takes its steps, guidance, sampler and
+scheduler; whatever a recipe does not give is left out of each request,
+so the server's own defaults for that model apply.  Before every
+generation Stratum asks which recipe is loaded, so a server restarted on
+another model, or switched by hand, is followed.  One model serves the
+whole server, so a switch is everyone's: `stratum:*generator-choosers*`,
+a list of invite names, says who may switch from the page (nil, the
+default, is anyone admitted; Lisp callers always may).  The planner
+cannot switch.
+
 Layer > Generate Image does these with no model planning them: the
 words go to the generator as they are, through the prompt door and its
 one undo, from nothing, from the open picture or into the selection.

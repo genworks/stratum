@@ -70,7 +70,9 @@ To change one thing in a photograph (recolor the horns, brighten the
 eyes, blur a sign):
 
 1. `look` at it closely.
-2. Select it.  `select-polygon` with a point every 10 to 25 document
+2. Select it.  A person or a whole object: `select-subject` with a box
+   around it, when the server can (see Putting a subject on a new
+   background).  Anything else: `select-polygon` with a point every 10 to 25 document
    pixels along its edge, on the edge and not inside or outside it:
    thirty points and more for a curved shape, each a document pixel
    worked out from the caption's mapping.  Or, when its color differs
@@ -115,7 +117,21 @@ pixels):
    through an arm or a shoulder.  Leave such a subject where it is, and
    move the others toward it if they must move.  If it must move too,
    crop at the end so that its cut lies on the new edge.
-2. Cut it out.  Outline it with `select-polygon` as above, leaving out
+2. Select it.  When this server can select a subject by model (the
+   message says whether it can), `select-subject` with a box around
+   each subject and a little margin all round, the second and later
+   with `:mode :add`.  The box may be rough: one cut into a head or
+   short of an arm still gives the whole person, and it costs nothing
+   to be generous, but keep other people out of it as far as you can.
+   `look` at the selection, all the way round each subject.  If it
+   missed a part of one (a bag, a hand), or took something that is not
+   the subject, select them all again, giving that subject's
+   `select-subject` `:points ((x y))` on the missed part or `:exclude
+   ((x y))` on the wrong one.  Then go on with step 3; the polygon below
+   is only for a server without a subject model, or a thing the model
+   will not take.
+
+   Without one, outline it with `select-polygon` as above, leaving out
    any pocket of the old background between an arm and the body; the
    points need only come near the edge, but keep them a few pixels
    OUTSIDE it, never inside: refining takes background off far better
@@ -139,15 +155,16 @@ pixels):
    `select-polygon` over it with `:mode :add`, reaching a few pixels
    into the background, then `refine-selection` again: it trims the
    background and keeps the part.  To take off a patch of background,
-   `select-wand` on it or a polygon, with `:mode :subtract`.  Then `(feather 1)` and `(cut-out layer :name
-   "Subject")`, which puts the subject on a layer of its own without
-   the old background's tint at its edge.  A selection made without
-   `refine-selection`, on the outline by eye, needs
+   `select-wand` on it or a polygon, with `:mode :subtract`.
+3. Cut it out: `(feather 1)` and `(cut-out layer :name "Subject")`,
+   which puts the subject on a layer of its own without the old
+   background's tint at its edge.  A selection made by neither
+   `select-subject` nor `refine-selection`, on the outline by eye, needs
    `(contract-selection 2.5)` before the feather, or it brings a rim of
    the old background.  Subjects that stay together can share one
    selection and one layer.  To move it, `(select-none)` and then
    `(move-pixels layer dx dy)`.
-3. Make the background a layer of its own, never a fill around the
+4. Make the background a layer of its own, never a fill around the
    subject: `(generate-layer prompt :name "New background")`, then
    `move-layer` it down past the subject's layers (with one,
    `(move-layer "New background" -1)`), and `(set-layer 0 :visible nil)`
@@ -155,18 +172,18 @@ pixels):
    already.  `generate-fill` fades out at the selection's
    edge, so a fill through `invert-selection` leaves the old picture
    showing around the subject in a band about six pixels wide.
-4. Blur the background, with nothing selected so that the blur reaches
+5. Blur the background, with nothing selected so that the blur reaches
    all of it: `(select-none)`, then `(gaussian-blur "New background" 2)`,
    about 2 for each thousand pixels of the picture's width.  A sharp
    background behind a sharp subject reads as a sticker; this step does
    more than any other here.
-5. Leave the subject's colors alone unless the new light is plainly
+6. Leave the subject's colors alone unless the new light is plainly
    colored; then move them a quarter of the way at most, with `levels`
    or `hue-saturation` on the subject's layer, since a strong match
    makes skin look dead.  Add no drop shadow to a subject in front of a
    distant view.  Run no generator over the subject, neither a fill nor
    `generate-picture`: over a person it paints someone else.
-6. `look` closely along the whole of the subject's outline, a part at
+7. `look` closely along the whole of the subject's outline, a part at
    a time at full resolution, and at the corners of the frame.  Where
    the outline ran outside the subject's edge, a strip of the old
    background came with it: whole pixels, which `cut-out` cannot clean,
@@ -207,7 +224,7 @@ body, and each repaint puts the neck somewhere new.
    generate again with another seed, rather than patching it.
 4. The new picture redraws the whole frame, the room too, from a
    megapixel or so.  To keep the room sharp, cut the new body out of
-   it as well (step 2 of the recipe above, on "New body") and hide
+   it as well (steps 2 and 3 of the recipe above, on "New body") and hide
    that layer: that works only where the new body covers the old one,
    so `look` along its edges for the old shoulders showing.
 5. No generator over the face, ever: the head layer is the person.
@@ -354,6 +371,13 @@ cover).
   subject outlined by eye and not refined, `(contract-selection 2.5)`
   then `(feather 1)`: on the outline itself, a rim of what was behind it
   comes too.
+- `(select-subject x y w h &key points exclude mode)` — the person or
+  thing in the w x h box at x, y selected by a model that knows what
+  things are, its edge on the subject's own; the box may be rough.
+  `points` ((x y) ...) lie on the subject and `exclude` points off it,
+  to steer the model when it misses a part or takes too much.  The
+  first on a picture takes a few seconds, later ones well under one.
+  Fails on a server without the model, which the message says.
 - `(refine-selection &key (radius 8) (passes 5) layer)` — the edge moved
   onto the subject's own outline by color, within RADIUS pixels (1 to
   100) either side of it, judged again around the new edge for each of

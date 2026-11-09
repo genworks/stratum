@@ -1041,16 +1041,25 @@ comes out hard."
     (error "A refine radius is a number of pixels from 1 to 100, not ~s." radius))
   (unless (and (integerp passes) (<= 1 passes 10))
     (error "Refine passes are a whole number from 1 to 10, not ~s." passes))
-  (let* ((selection (or (the-object doc selection)
-                        (error "Nothing is selected: draw the subject's outline roughly first, then refine it.")))
-         (w (the-object doc doc-width))
-         (h (the-object doc doc-height))
-         (r (float radius 1d0))
-         (mask (copy-seq (getf selection :mask)))
-         (pixels (if (and layer (eql (the-object layer kind) :raster))
-                     (the-object layer pixels)
-                     (the-object doc (render-cpu))))
-         (region (region-around (getf selection :rect) (ceiling (* (+ passes 2) r)) w h)))
+  (let ((selection (or (the-object doc selection)
+                       (error "Nothing is selected: draw the subject's outline roughly first, then refine it.")))
+        (w (the-object doc doc-width))
+        (h (the-object doc doc-height)))
+    (the-object doc (set-slot! :selection
+                               (make-selection
+                                (refined-mask (copy-seq (getf selection :mask)) (getf selection :rect) w h
+                                              (if (and layer (eql (the-object layer kind) :raster))
+                                                  (the-object layer pixels)
+                                                  (the-object doc (render-cpu)))
+                                              radius passes)
+                                w h)))))
+
+(defun refined-mask (mask rect w h pixels radius passes)
+  "MASK, W x H bytes whose nonzero ones RECT holds, with its edge moved
+onto the outline in PIXELS by color, as refine-selection! does: MASK
+itself, changed."
+  (let* ((r (float radius 1d0))
+         (region (region-around rect (ceiling (* (+ passes 2) r)) w h)))
     (declare (type (simple-array (unsigned-byte 8) (*)) mask pixels))
     (destructuring-bind (x0 y0 pw ph) region
       (let ((colors (make-array (* 4 pw ph) :element-type '(unsigned-byte 8))))
@@ -1073,4 +1082,4 @@ comes out hard."
                            (incf moved)
                            (setf (aref mask i) byte)))))
                    (when (zerop moved) (loop-finish))))
-        (the-object doc (set-slot! :selection (make-selection mask w h)))))))
+        mask))))

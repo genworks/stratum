@@ -29,7 +29,7 @@
            #:add-layer #:delete-layer #:duplicate-layer #:move-layer #:merge-down #:flatten
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
-           #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:selection #:look #:generate-fill #:generate-layer #:generate-picture
+           #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:select-subject #:selection #:look #:generate-fill #:generate-layer #:generate-picture
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste #:cut-out
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
@@ -47,7 +47,7 @@
   '(documents describe-document document-info layers layer-info look generate-fill generate-layer generate-picture
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
     select-rect select-polygon select-wand select-all select-none invert-selection feather
-    contract-selection expand-selection refine-selection selection
+    contract-selection expand-selection refine-selection select-subject selection
     fill-selection clear-selection paint gradient move-pixels transform copy cut paste cut-out
     levels curves hue-saturation gaussian-blur unsharp-mask add-noise
     crop image-size canvas-size rotate color-mode undo redo set-history-source
@@ -351,6 +351,14 @@ The edge comes out hard: feather after."
   (selecting (lambda ()
                (stratum::refine-selection! (doc) :radius radius :passes passes
                                            :layer (and layer (layer-of layer))))))
+
+(defun select-subject (x y w h &key points exclude (mode :new))
+  "The person or thing in the W x H box at X, Y selected by model, its
+edge on the subject's own; POINTS ((x y) ...) on it and EXCLUDE points
+off it steer the model.  The box may be rough."
+  (selecting (lambda ()
+               (stratum::select-subject! (doc) x y w h :points points :exclude exclude
+                                                         :mode (mode-key mode)))))
 
 (defun select-all ()
   "Everything selected."

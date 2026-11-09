@@ -1114,7 +1114,7 @@ nothing beyond the band touched; the same on one thread and many."
                (< after (/ before 7))
                (list before after)))
       (multiple-value-bind (before one) (refined 8 :wobble 20 :passes 1)
-        (multiple-value-bind (before five) (refined 8 :wobble 20)
+        (let ((five (nth-value 1 (refined 8 :wobble 20))))
           (check "a polygon off by 20 pixels, past one pass's reach, comes on over five"
                  (and (> one (* 5 five)) (< five (/ before 30)))
                  (list before one five))))
@@ -1143,6 +1143,55 @@ nothing beyond the band touched; the same on one thread and many."
                         (not (getf (second results) :ok))
                         (search "1 to 100" (getf (second results) :error)))
                    results)))))))
+
+(defun test-select-subject ()
+  "Select Subject: the mask's specks and holes, the decoder's square
+stretched to the picture, refusals in words; and, on a server with the
+model, a subject found from a rough box."
+  (let ((mask (make-gray 40 30)))
+    (flet ((block! (x0 y0 x1 y1 value)
+             (loop for y from y0 below y1
+                   do (loop for x from x0 below x1 do (setf (aref mask (+ x (* y 40))) value)))))
+      (block! 0 5 30 25 255)              ; the subject, against the left edge
+      (block! 10 10 13 13 0)              ; a small hole in it
+      (block! 0 14 2 16 0)                ; a notch at the picture's edge
+      (block! 35 2 37 4 255)              ; a speck away from it
+      (without-specks! mask 40 30 0.02d0)
+      (check "specks go, small holes fill, a notch at the picture's edge stays"
+             (and (= 255 (aref mask (+ 11 (* 11 40))))
+                  (zerop (aref mask (+ 35 (* 2 40))))
+                  (zerop (aref mask (* 15 40)))
+                  (= 255 (aref mask (+ 20 (* 20 40))))))))
+  (let ((logits (make-array (* 256 256) :element-type 'single-float :initial-element -1f0)))
+    (dotimes (y 256)
+      (dotimes (x 128) (setf (aref logits (+ x (* y 256))) 1f0)))
+    (let ((mask (stretched-logits logits 100 50)))
+      (check "the decoder's square is stretched over the picture"
+             (and (= 255 (aref mask (+ 48 (* 10 100))))
+                  (zerop (aref mask (+ 52 (* 10 100))))
+                  (= 50 (count 255 mask :start 0 :end 100))))))
+  (let ((doc (refine-card 240 180)))
+    (let ((*subject-model* nil))
+      (check "with no model, an error in words, and the planner is told"
+             (and (search "no subject model"
+                          (handler-case (progn (select-subject! doc 10 10 100 100) "no error")
+                            (error (e) (princ-to-string e))))
+                  (search "has no subject model" (subject-state)))))
+    (let ((*subject-model* '(:not-a-session)))
+      (check "a box off the picture and points that are no points are refused in words"
+             (and (search "inside the picture"
+                          (handler-case (progn (select-subject! doc 500 10 20 20) "no error")
+                            (error (e) (princ-to-string e))))
+                  (search "Points are"
+                          (handler-case (progn (select-subject! doc 10 10 50 50 :points '(1 2)) "no error")
+                            (error (e) (princ-to-string e))))))))
+  (when (subject-model?)
+    (multiple-value-bind (doc truth) (refine-card 240 180)
+      (select-subject! doc 40 10 165 165)
+      (let ((misses (selection-misses doc truth)))
+        (check "with the model, a rough box gives the subject: under 2% of the picture off"
+               (< misses (* 0.02 240 180))
+               misses)))))
 
 (defun test-floating ()
   (let* ((image (let ((p (make-rgba 4 3)))
@@ -3688,7 +3737,7 @@ and comes back again on redo; the undo list before it stays good."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-floating test-transform test-resize test-rotate
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))

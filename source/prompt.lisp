@@ -470,8 +470,9 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                                  :rounds 0
                                  :assistant forms)))
                        (sexp-agent:ask *agent* prompt
-                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~a."
-                                                           state (picture-note picture) (generator-state))
+                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~a, and ~a."
+                                                           state (picture-note picture) (generator-state)
+                                                           (subject-state))
                                        :image-png (picture-png picture)
                                        :session-id (and session (format nil "stratum-~a" session))
                                        :history history

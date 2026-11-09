@@ -120,13 +120,17 @@ pixels):
    points need only come near the edge.  Then `(refine-selection
    :radius 10)` moves the selection's edge onto the subject's own
    outline, judging by color within that many pixels either side of
-   where you drew it.  Make the radius a little more than your points
-   could be off: 8 to 12 on a picture under a thousand pixels wide,
-   about one for each hundred pixels of width on a larger one.  Past
-   the radius it cannot reach, and a strip of background the polygon
-   took in deeper than the radius stays.  `look` at the selection: where
-   the subject and the background share a color the edge may follow
-   the wrong one; put that part right with a polygon and `:add` or
+   it, five passes over, so the edge can travel about five times the
+   radius from where you drew it, out of a face the polygon cut into or
+   in past a strip of wall it took in.  Radius 8 to 12 on a picture
+   under a thousand pixels wide, about one for each hundred pixels of
+   width on a larger one.  What lies away from the polygon's edge it
+   never touches: a patch of background deep inside the polygon, and
+   above all one against the picture's own edge, which is no edge of a
+   selection, stays selected; take it away with `select-wand` and
+   `:mode :subtract`, or a polygon.  `look` at the selection: where the
+   subject and the background share a color the edge may follow the
+   wrong one; put that part right with a polygon and `:add` or
    `:subtract`.  Then `(feather 1)` and `(cut-out layer :name
    "Subject")`, which puts the subject on a layer of its own without
    the old background's tint at its edge.  A selection made without
@@ -342,10 +346,11 @@ cover).
   subject outlined by eye and not refined, `(contract-selection 2.5)`
   then `(feather 1)`: on the outline itself, a rim of what was behind it
   comes too.
-- `(refine-selection &key (radius 8) layer)` — the edge moved onto the
-  subject's own outline by color, within RADIUS pixels (1 to 100) either
-  side of where it is, on a layer or the composite; nothing farther from
-  the edge changes.  For a polygon drawn near a subject, before cutting
+- `(refine-selection &key (radius 8) (passes 5) layer)` — the edge moved
+  onto the subject's own outline by color, within RADIUS pixels (1 to
+  100) either side of it, judged again around the new edge for each of
+  PASSES (1 to 10), on a layer or the composite; nothing farther than
+  RADIUS times PASSES from the edge changes.  For a polygon drawn near a subject, before cutting
   it out.  The edge comes out hard: feather after, and contract none.
 - `(select-all)`, `(select-none)`, `(invert-selection)`.
 

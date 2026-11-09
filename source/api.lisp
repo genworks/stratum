@@ -343,12 +343,13 @@ picture's edge."
   (stratum::expand-selection! (doc) pixels)
   (selection-result))
 
-(defun refine-selection (&key (radius 8) layer)
+(defun refine-selection (&key (radius 8) (passes 5) layer)
   "The selection's edge moved onto the subject's own outline, judged by
-color within RADIUS pixels either side of where it is now, on LAYER (the
-composite when nil).  The edge comes out hard: feather after."
+color within RADIUS pixels either side of where it is, again around
+where it went for each of PASSES, on LAYER (the composite when nil).
+The edge comes out hard: feather after."
   (selecting (lambda ()
-               (stratum::refine-selection! (doc) :radius radius
+               (stratum::refine-selection! (doc) :radius radius :passes passes
                                            :layer (and layer (layer-of layer))))))
 
 (defun select-all ()

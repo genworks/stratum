@@ -1097,23 +1097,27 @@ and many."
 nothing beyond the band touched; the same on one thread and many."
   (let ((w 240) (h 180))
     (flet ((refined (radius &rest card)
-             (multiple-value-bind (doc truth) (apply #'refine-card w h card)
-               (let ((before (selection-misses doc truth))
-                     (mask (copy-seq (getf (the-object doc selection) :mask))))
-                 (refine-selection! doc :radius radius)
-                 (values before (selection-misses doc truth) doc mask)))))
+             (let ((passes (getf card :passes 5))
+                   (card (loop for (key value) on card by #'cddr
+                               unless (eq key :passes) append (list key value))))
+               (multiple-value-bind (doc truth) (apply #'refine-card w h card)
+                 (let ((before (selection-misses doc truth))
+                       (mask (copy-seq (getf (the-object doc selection) :mask))))
+                   (refine-selection! doc :radius radius :passes passes)
+                   (values before (selection-misses doc truth) doc mask))))))
       (multiple-value-bind (before after) (refined 8)
-        (check "a polygon off by up to 7 pixels comes onto the outline: a tenth of the misses"
-               (and (> before 1000) (< after (/ before 10)))
+        (check "a polygon off by up to 7 pixels comes onto the outline: a fifteenth of the misses"
+               (and (> before 1000) (< after (/ before 15)))
                (list before after)))
       (multiple-value-bind (before after) (refined 8 :right '(175 190 200))
-        (check "with a background near the subject's color, a fifth of the misses"
-               (< after (/ before 5))
+        (check "with a background near the subject's color, a seventh of the misses"
+               (< after (/ before 7))
                (list before after)))
-      (multiple-value-bind (before after) (refined 12 :wobble 10)
-        (check "a wider band for a rougher polygon"
-               (< after (/ before 10))
-               (list before after)))
+      (multiple-value-bind (before one) (refined 8 :wobble 20 :passes 1)
+        (multiple-value-bind (before five) (refined 8 :wobble 20)
+          (check "a polygon off by 20 pixels, past one pass's reach, comes on over five"
+                 (and (> one (/ before 4)) (< five (/ before 30)))
+                 (list before one five))))
       (multiple-value-bind (before after doc mask) (refined 8)
         (declare (ignore before after))
         (let ((now (getf (the-object doc selection) :mask)))

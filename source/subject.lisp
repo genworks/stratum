@@ -281,6 +281,30 @@ points off it steer the model.  Nil when the model finds nothing."
         (refined-mask mask rect w h pixels (max 3 (round (max w h) 340)) 2)))))
 
 
+(defun joined-masks (old new w h reach)
+  "OLD and NEW (W x H bytes) together, with what lies within REACH
+pixels of both filled: the seam where one person stands in front of
+another.  Each model answer stops at its own subject's edge, and a pixel
+or two between them belongs to neither; feathered and cut out, that
+seam showed the new background as a bright line over a boy's hair where
+it met his father's jacket.  A gap wider than twice REACH stays.  Fresh
+bytes."
+  (let ((out (map '(simple-array (unsigned-byte 8) (*)) #'max old new))
+        (rect (mask-bounds new w h)))
+    (when rect
+      (let* ((region (region-around rect (1+ (ceiling reach)) w h))
+             (from-old (distances-to old w region #'selected-byte?))
+             (from-new (distances-to new w region #'selected-byte?))
+             (limit (* reach reach)))
+        (declare (type (simple-array double-float (*)) from-old from-new))
+        (destructuring-bind (x0 y0 pw ph) region
+          (dotimes (y ph)
+            (dotimes (x pw)
+              (let ((k (+ x (* y pw))))
+                (when (and (<= (aref from-old k) limit) (<= (aref from-new k) limit))
+                  (setf (aref out (+ x0 x (* w (+ y0 y)))) 255))))))))
+    out))
+
 (defun select-subject! (doc x y w h &key points exclude (mode :new) layer)
   "The subject in the W x H box at X, Y selected by model, combined with
 the selection by MODE: judged on raster LAYER's pixels, or on the
@@ -303,7 +327,11 @@ composited picture (nil, or any other layer)."
                               :points points :exclude exclude)))
       (unless mask
         (error "The model found no subject in that box: draw it around the subject, with a little margin."))
-      (set-selection-mask! doc mask mode))))
+      (let ((old (and (eql mode :add) (the-object doc selection))))
+        (if old
+            (set-selection-mask! doc (joined-masks (getf old :mask) mask dw dh (max 2 (round (max dw dh) 400)))
+                                 :new)
+            (set-selection-mask! doc mask mode))))))
 
 (defun subject-state ()
   "Whether this server selects subjects by model, for the model that plans."

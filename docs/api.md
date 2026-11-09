@@ -380,7 +380,9 @@ cover).
   things are, its edge on the subject's own; the box may be rough.
   `points` ((x y) ...) lie on the subject and `exclude` points off it,
   to steer the model when it misses a part (a toy, a shoe, a bag) or
-  takes too much.  It reads the picture as it now shows, so once the
+  takes too much.  With `:mode :add`, where the new subject stands
+  against one already selected (a child in front of a parent), the
+  hairline between them is joined.  It reads the picture as it now shows, so once the
   original is hidden or covered, give `:layer` its layer ("Background"
   or 0), or it looks for people in the new background.  The first on a
   picture takes a few seconds, later ones well under one.  Fails on a

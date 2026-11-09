@@ -1185,6 +1185,16 @@ model, a subject found from a rough box."
                   (search "Points are"
                           (handler-case (progn (select-subject! doc 10 10 50 50 :points '(1 2)) "no error")
                             (error (e) (princ-to-string e))))))))
+  (flet ((columns (x0 x1)
+           (let ((m (make-gray 40 10)))
+             (dotimes (y 10 m)
+               (loop for x from x0 below x1 do (setf (aref m (+ x (* y 40))) 255))))))
+    (let ((near (joined-masks (columns 0 10) (columns 12 20) 40 10 2))
+          (far (joined-masks (columns 0 10) (columns 20 30) 40 10 2)))
+      (check "two subjects a seam apart are joined; a real gap between them stays"
+             (and (every (lambda (x) (= 255 (aref near (+ x (* 5 40))))) '(10 11))
+                  (zerop (aref near (+ 25 (* 5 40))))
+                  (every (lambda (x) (zerop (aref far (+ x (* 5 40))))) '(10 13 16 19))))))
   (flet ((mask (n) (let ((m (make-gray 10 10))) (fill m 255 :end n) m)))
     (let ((part (mask 30)) (whole (mask 80)) (wild (mask 100)) (box '(0 0 9 7)))
       (check "of the candidates scored near the best, the largest; one far below is passed over"

@@ -142,8 +142,16 @@ pixels):
    makes skin look dead.  Add no drop shadow to a subject in front of a
    distant view.  Run no generator over the subject, neither a fill nor
    `generate-picture`: over a person it paints someone else.
-6. `look` closely at the subject's edges and at the corners of the
-   frame, and put right what is wrong.  `crop` only now, after
+6. `look` closely along the whole of the subject's outline, a part at
+   a time at full resolution, and at the corners of the frame.  Where
+   the outline ran outside the subject's edge, a strip of the old
+   background came with it: whole pixels, which `cut-out` cannot clean,
+   and against the new background they show plainly.  Take such a
+   strip off the subject's layer: `select-wand` on a pixel of it with
+   `:layer` the subject's layer and a moderate tolerance, then
+   `(expand-selection 1)`, `(feather 1)` and `(clear-selection layer)`
+   on that layer, and `(select-none)`.  If the wand reaches into the
+   subject, undo and use a lower tolerance.  `crop` only now, after
    everything else, and only when step 1 needs it or the person asked:
    a prompt that crops has no undo.
 

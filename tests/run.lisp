@@ -1116,7 +1116,7 @@ nothing beyond the band touched; the same on one thread and many."
       (multiple-value-bind (before one) (refined 8 :wobble 20 :passes 1)
         (multiple-value-bind (before five) (refined 8 :wobble 20)
           (check "a polygon off by 20 pixels, past one pass's reach, comes on over five"
-                 (and (> one (/ before 4)) (< five (/ before 30)))
+                 (and (> one (* 5 five)) (< five (/ before 30)))
                  (list before one five))))
       (multiple-value-bind (before after doc mask) (refined 8)
         (declare (ignore before after))

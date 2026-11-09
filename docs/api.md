@@ -117,7 +117,11 @@ pixels):
    crop at the end so that its cut lies on the new edge.
 2. Cut it out.  Outline it with `select-polygon` as above, leaving out
    any pocket of the old background between an arm and the body; the
-   points need only come near the edge.  Then `(refine-selection
+   points need only come near the edge, but keep them a few pixels
+   OUTSIDE it, never inside: refining takes background off far better
+   than it brings back subject, and hair or a dark coat that the
+   polygon left out may be judged background, since its colors are
+   found outside too.  Then `(refine-selection
    :radius 10)` moves the selection's edge onto the subject's own
    outline, judging by color within that many pixels either side of
    it, five passes over, so the edge can travel about five times the
@@ -128,10 +132,14 @@ pixels):
    never touches: a patch of background deep inside the polygon, and
    above all one against the picture's own edge, which is no edge of a
    selection, stays selected; take it away with `select-wand` and
-   `:mode :subtract`, or a polygon.  `look` at the selection: where the
-   subject and the background share a color the edge may follow the
-   wrong one; put that part right with a polygon and `:add` or
-   `:subtract`.  Then `(feather 1)` and `(cut-out layer :name
+   `:mode :subtract`, or a polygon.  `look` at the selection, all the
+   way round each subject, both sides of every head included: where
+   the subject and the background share a color the edge may follow the
+   wrong one.  To take back a part of the subject that was left out,
+   `select-polygon` over it with `:mode :add`, reaching a few pixels
+   into the background, then `refine-selection` again: it trims the
+   background and keeps the part.  To take off a patch of background,
+   `select-wand` on it or a polygon, with `:mode :subtract`.  Then `(feather 1)` and `(cut-out layer :name
    "Subject")`, which puts the subject on a layer of its own without
    the old background's tint at its edge.  A selection made without
    `refine-selection`, on the outline by eye, needs

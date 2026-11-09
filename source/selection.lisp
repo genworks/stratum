@@ -803,7 +803,13 @@ unchanged.  The new layer's index."
 ;;; color vote, so a side wins by having more of that color nearby, not
 ;;; by having it at all.  A polygon that took in a strip of the
 ;;; background puts some of it among the sure inside's samples, and a
-;;; nearest-color test then ties; a vote does not.  A slight lean toward
+;;; nearest-color test then ties; a vote does not.  Half the judgment
+;;; goes by how common the color is in the whole sure inside against the
+;;; whole sure outside, as GrabCut's color models do, which settles a
+;;; patch whose neighbors happen to be mostly the wrong side's.  What
+;;; color cannot settle is a part of the subject whose colors the
+;;; background has too (dark hair against dark things) left outside the
+;;; polygon: it stays out, so outlines are best drawn generous.  A slight lean toward
 ;;; the rough edge settles what color cannot.  Then the judgment is
 ;;; smoothed, pieces cut off from the sure inside are dropped and small
 ;;; holes in it filled, and the whole is done again around the new edge,
@@ -822,6 +828,55 @@ every so many pixels.")
   "How far the judgment leans toward the rough edge: the share of the
 way to certain at the band's border.")
 
+(defparameter *refine-whole* 0.5d0
+  "The share of the judgment that goes by the colors of the whole sure
+inside and sure outside; the rest goes by the vote of the samples near
+the pixel.")
+
+(declaim (inline color-bin))
+(defun color-bin (colors o)
+  "The cell of a 16 x 16 x 16 color cube that the pixel at byte O of
+COLORS falls in."
+  (declare (type (simple-array (unsigned-byte 8) (*)) colors) (type fixnum o))
+  (+ (ash (aref colors o) -4)
+     (* 16 (ash (aref colors (+ o 1)) -4))
+     (* 256 (ash (aref colors (+ o 2)) -4))))
+
+(defun side-odds (colors depth radius)
+  "For each cell of the color cube, the chance that a pixel of that color
+is inside, from how often it comes in the whole sure inside and the
+whole sure outside (each as a share of its own side, so that a large
+side does not win by size), counted over the cell and its neighbors: an
+array of 4096 doubles, a half where neither side has the color."
+  (declare (type (simple-array (unsigned-byte 8) (*)) colors)
+           (type (simple-array double-float (*)) depth)
+           (type double-float radius))
+  (let ((in (make-array 4096 :element-type 'double-float :initial-element 0d0))
+        (out (make-array 4096 :element-type 'double-float :initial-element 0d0))
+        (odds (make-array 4096 :element-type 'double-float :initial-element 0.5d0))
+        (n-in 0) (n-out 0))
+    (declare (type fixnum n-in n-out))
+    (dotimes (k (length depth))
+      (let ((s (aref depth k)))
+        (cond ((> s radius) (incf (aref in (color-bin colors (* 4 k)))) (incf n-in))
+              ((< s (- radius)) (incf (aref out (color-bin colors (* 4 k)))) (incf n-out)))))
+    (when (and (plusp n-in) (plusp n-out))
+      (flet ((near (counts r g b)
+               (let ((sum 0d0))
+                 (loop for bb from (max 0 (1- b)) to (min 15 (1+ b))
+                       do (loop for gg from (max 0 (1- g)) to (min 15 (1+ g))
+                                do (loop for rr from (max 0 (1- r)) to (min 15 (1+ r))
+                                         do (incf sum (aref counts (+ rr (* 16 gg) (* 256 bb)))))))
+                 sum)))
+        (dotimes (b 16)
+          (dotimes (g 16)
+            (dotimes (r 16)
+              (let ((pin (/ (near in r g b) n-in))
+                    (pout (/ (near out r g b) n-out)))
+                (when (plusp (+ pin pout))
+                  (setf (aref odds (+ r (* 16 g) (* 256 b))) (/ pin (+ pin pout))))))))))
+    odds))
+
 (defun edge-depths (mask width region)
   "Over REGION of MASK (WIDTH wide), each pixel's distance across the
 selection's edge, positive inside and negative outside: a plane of
@@ -835,7 +890,8 @@ doubles."
 (defun refine-judgment (colors depth pw ph radius)
   "Each pixel's side over a PW x PH region, a byte plane, 1 inside and 0
 outside: the sure pixels' by their DEPTH, the band's by their COLORS
-(four bytes a pixel) against the sure ones within twice RADIUS."
+(four bytes a pixel), against the sure ones within twice RADIUS and
+against the whole of each side (side-odds)."
   (declare (type (simple-array (unsigned-byte 8) (*)) colors)
            (type (simple-array double-float (*)) depth)
            (type fixnum pw ph)
@@ -843,8 +899,11 @@ outside: the sure pixels' by their DEPTH, the band's by their COLORS
   (let* ((side (make-array (* pw ph) :element-type '(unsigned-byte 8)))
          (reach (ceiling (* 2 radius)))
          (step (max 1 (ceiling (1+ (* 2 reach)) *refine-samples*)))
-         (lean *refine-lean*))
-    (declare (type fixnum reach step) (type double-float lean))
+         (lean *refine-lean*)
+         (whole *refine-whole*)
+         (odds (side-odds colors depth radius)))
+    (declare (type fixnum reach step) (type double-float lean whole)
+             (type (simple-array double-float (*)) odds))
     (parallel-ranges
      ph
      (lambda (start end)
@@ -888,8 +947,12 @@ outside: the sure pixels' by their DEPTH, the band's by their COLORS
                                  (setf (aref side k)
                                        (if (and seen-in seen-out)
                                            (let* ((n (count-if (lambda (d) (< d 1d30)) near))
-                                                  (ins (count 1 inside :end n)))
-                                             (if (> (+ (/ ins (float n 1d0)) (* lean (/ s radius))) 0.5d0) 1 0))
+                                                  (ins (count 1 inside :end n))
+                                                  (vote (/ ins (float n 1d0)))
+                                                  (overall (aref odds (color-bin colors o))))
+                                             (if (> (+ (* whole overall) (* (- 1 whole) vote) (* lean (/ s radius)))
+                                                    0.5d0)
+                                                 1 0))
                                            (if (plusp s) 1 0)))))))))))))
     side))
 

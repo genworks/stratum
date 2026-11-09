@@ -3098,10 +3098,12 @@ stand-in for the model."
       (let ((shown (read-png (picture-png (stratum-api:look))))
             (hidden (read-png (picture-png (stratum-api:look :selection nil)))))
         (flet ((px (pixels x y) (subseq pixels (* 4 (+ x (* 320 y))) (+ 3 (* 4 (+ x (* 320 y)))))))
-          (check "look shows the selection: magenta on its edge, the inside as it is, the outside dimmer"
+          (check "look shows the selection: magenta on its edge, the inside as it is, the outside washed magenta"
                  (and (equalp (px shown 100 90) #(255 0 255))
                       (equalp (px shown 150 90) (px plain 150 90))
-                      (every #'<= (px shown 20 20) (px plain 20 20))
+                      (equalp (px shown 20 20)
+                              (map 'vector (lambda (v wash) (round (* 255 (+ (* 0.45d0 v) (* 0.55d0 wash))) 255))
+                                   (px plain 20 20) '(255 0 255)))
                       (not (equalp shown plain)))
                  (list (px shown 100 90) (px shown 150 90) (px plain 150 90)))
           (check "and leaves it out when asked" (equalp hidden plain)))))

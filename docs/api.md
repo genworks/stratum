@@ -48,9 +48,10 @@ document, which belong to the page.
   and one under 400 pixels enlarged by one.  The picture's caption
   gives the mapping, for example "picture pixel (px, py) is document
   pixel (3300 + px, 1400 + py)".  When something is selected the
-  picture is dimmed outside the selection and the selection's edge is
-  drawn in magenta; `:selection nil` after the other arguments leaves
-  that out.
+  picture is washed with magenta outside the selection and the
+  selection's edge is drawn in solid magenta, so anything washed is not
+  selected: look for a part of a subject under the wash.  `:selection
+  nil` after the other arguments leaves that out.
 
 ## Seeing what you are doing
 
@@ -124,7 +125,11 @@ pixels):
    short of an arm still gives the whole person, and it costs nothing
    to be generous, but keep other people out of it as far as you can.
    A child held in someone's arms goes in that person's box.  `look` at
-   the selection, all the way round each subject.  If it missed a part
+   the selection, all the way round each subject, and inside the group
+   too: where people overlap, the one behind shows again on the far
+   side of the one in front (legs beside a child, an arm behind a
+   shoulder), and a box alone may leave such a piece out, as it may a
+   held toy.  Anything of a person under the magenta wash is missing.  If it missed a part
    of one (a held toy, a shoe, a bag), or took something that is not
    the subject, select them all again, giving that subject's
    `select-subject` `:points ((x y) ...)` on each missed part or

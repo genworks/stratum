@@ -212,9 +212,11 @@ octets picture-width picture-height)."
     (values out pw ph)))
 
 (defun show-selection! (rgba mask pw ph)
-  "RGBA (PW x PH) dimmed where MASK, the selection at the same size,
-does not cover, and the selection's edge drawn in magenta: how a
-picture shows the model what is selected."
+  "RGBA (PW x PH) washed with magenta where MASK, the selection at the
+same size, does not cover, and the selection's edge drawn in magenta:
+how a picture shows the model what is selected.  A wash and not a
+dimming: a part of a person left out of the selection, dimmed, read as
+shadow on a dark photograph, and the planner went on without it."
   (declare (type (simple-array (unsigned-byte 8) (*)) rgba mask) (type fixnum pw ph))
   (flet ((in? (px py) (and (<= 0 px) (< px pw) (<= 0 py) (< py ph)
                            (>= (aref mask (+ px (* py pw))) 128))))
@@ -228,9 +230,14 @@ picture shows the model what is selected."
                    ;; the picture's own border is no edge of the selection
                    (< 1 px (- pw 2)) (< 1 py (- ph 2)))
               (setf (aref rgba o) 255 (aref rgba (+ o 1)) 0 (aref rgba (+ o 2)) 255 (aref rgba (+ o 3)) 255)
-              (let ((keep (+ 140 (floor (* 115 (aref mask (+ px (* py pw)))) 255))))
-                (dotimes (c 3)
-                  (setf (aref rgba (+ o c)) (floor (* keep (aref rgba (+ o c))) 255))))))))))
+              (let ((outside (- 255 (aref mask (+ px (* py pw))))))
+                (loop for c below 3 for wash in '(255 0 255)
+                      do (let ((v (aref rgba (+ o c))))
+                           ;; outside, 45% the picture and 55% magenta
+                           (setf (aref rgba (+ o c))
+                                 (round (+ (* (- 255 outside) v)
+                                           (* outside (+ (* 0.45d0 v) (* 0.55d0 wash))))
+                                        255)))))))))))
 
 (defun small-png (rgba pw ph)
   "RGBA, a picture PW x PH, as PNG octets at the log's size, when there
@@ -272,7 +279,7 @@ SELECTION and something selected, the selection shows."
                        (t ", one picture pixel a document pixel"))
                  (picture-axis x0 "px" k m) (picture-axis y0 "py" k m)
                  (cond ((not selection) "")
-                       (mask "  The selection is shown: the picture is dimmed outside it and its edge is drawn in magenta.")
+                       (mask "  The selection is shown: the picture is washed with magenta outside it, and its edge is drawn in solid magenta; anything washed is not selected.")
                        (t "  Nothing is selected.")))
          pw ph
          (small-png rgba pw ph))))))

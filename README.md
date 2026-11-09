@@ -267,6 +267,38 @@ Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
 
+### On a phone
+
+The same page lays itself out as an app in a window up to 760 pixels
+wide, and on a touch screen up to 500 pixels tall (a phone on its side).
+Nothing is a separate build: the viewer sets `body.st-phone` and the
+style sheet does the rest.
+
+- A bar across the top holds a menu button, the document's name and
+  zoom, and Undo and Redo. The nine menus open from the button as one
+  full-width list; a tap on a menu or a submenu opens it in place.
+- The picture fills everything between the bar and three tabs: Prompt,
+  Tools and Layers. A tab raises its panel as a sheet over the lower
+  part of the picture, and a second tap (or the sheet's Close) lowers
+  it. The Tools sheet holds the palette and the options of the tool in
+  hand alone; picking a tool with no options lowers the sheet.
+- Dialogs rise from the bottom edge at full width. On its side the tabs
+  become a rail down the left edge, and sheets and dialogs come in from
+  the right.
+- One finger uses the tool in hand. Two fingers pan and zoom whatever
+  the tool is, and a stroke the first finger had begun paints nothing.
+- After the first touch, at any width, a row of buttons over the
+  picture stands in for the keys a touch screen lacks: New, Add,
+  Subtract and Deselect for the selection tools (Shift and Alt), Set
+  source for the Clone Stamp and Healing Brush (Alt-click), Cancel and
+  Apply for Free Transform and Cancel and Crop for the Crop tool
+  (Escape and Enter), and Zoom in and Zoom out for the Zoom tool.
+- The status line, which lives in the Layers panel on a desk, shows as
+  a short note over the picture.
+
+`STRATUM.setPhone(true)` and `STRATUM.setSheet("tools")` do from the
+console what the width and the tabs do.
+
 ### The Lisp API and the prompt box
 
 Everything the editor does from its menus and tools is a function in
@@ -855,7 +887,14 @@ The self-test checks:
   curves layer added then flattened leaves one Background;
 - the native file: Save brings a Stratum file of the document, and
   loaded back as a new document it has the same stack and renders
-  byte for byte the same on the server.
+  byte for byte the same on the server;
+- the phone layout, switched on as a narrow window would switch it: a
+  bar and three tabs with the panel behind them, the Layers tab raising
+  and lowering the layers alone, the Tools sheet holding the palette
+  and the options of the tool in hand, the menus as a drawer that the
+  item run shuts; then two touch pointers spread to twice as far apart
+  zoom the view to twice the scale while the stroke the first had begun
+  paints nothing; and the desk layout comes back as it was.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

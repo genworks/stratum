@@ -491,8 +491,24 @@
     gl.uniform1i(uni.u_exact, exact ? 1 : 0);
   }
 
+  // What stays on the overlay between gestures -- a transform's frame,
+  // the crop box -- is in canvas pixels, so it is drawn again when the
+  // view has moved under it (a pinch, the wheel, a window resized).
+  var overlayView = '';
+  function overlayFollows() {
+    if (!S.transforming && !S.cropBox) { overlayView = ''; return; }
+    var now = [view.scale, view.ox, view.oy, canvas.width, canvas.height].join(' ');
+    if (now === overlayView) return;
+    var first = !overlayView, cb = S.cropBox;
+    overlayView = now;
+    if (first) return;
+    if (S.transforming) S.transforming.redraw();
+    else drawGesture({ tool: 'crop', points: [[cb.x, cb.y], [cb.x + cb.w, cb.y + cb.h]] });
+  }
+
   function draw() {
     pending = false;
+    overlayFollows();
     if (!prog || !doc || !texLuts) return;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -516,6 +532,7 @@
     }
     if (extra) lines.push(extra);
     statusEl.textContent = lines.join('\n');
+    phoneStatus(extra);
   }
 
   function fitView() {
@@ -581,8 +598,11 @@
                   gradient: 'crosshair' };
   function selects(tool) { return tool === 'marquee' || tool === 'lasso' || tool === 'crop'; }
 
-  // Shift adds to the selection, Alt takes from it, as in other editors.
-  function selectionMode(e) { return e.shiftKey ? 'add' : (e.altKey ? 'subtract' : 'new'); }
+  // Shift adds to the selection, Alt takes from it, as in other editors;
+  // under a finger it is the mode picked over the picture (refreshAssist).
+  function selectionMode(e) {
+    return e.shiftKey ? 'add' : (e.altKey ? 'subtract' : (S.touch ? S.selectMode : 'new'));
+  }
 
   // The Magic Wand's options.
   S.wand = { tolerance: 32, contiguous: true };
@@ -614,6 +634,8 @@
   S.setCloneSource = function (x, y) {
     S.cloneSource = { x: x, y: y };
     S.cloneOffset = null;
+    armSource = false;
+    refreshAssist();
     status('clone source set at ' + Math.round(x) + ', ' + Math.round(y));
   };
 
@@ -673,6 +695,7 @@
       b.classList.toggle('st-on', b.getAttribute('data-tool') === S.tool);
     });
     setCursor(false);
+    toolChanged();
     return true;
   };
 
@@ -689,7 +712,8 @@
     status('picked ' + hexColor(S.brush.color));
   }
 
-  // The zoom tool: in about the pointer; out with Alt held.
+  // The zoom tool: in about the pointer; out with Alt held, or under a
+  // finger with Zoom out picked over the picture.
   function zoomAt(e, factor) {
     var dpr = window.devicePixelRatio || 1;
     var r = canvas.getBoundingClientRect();
@@ -788,18 +812,25 @@
     if (!r) return Promise.resolve(null);
     S.cropBox = null;
     drawGesture(null);
+    refreshAssist();
     return S.resize({ op: 'crop-rect', x: r.x, y: r.y, w: r.w, h: r.h });
   };
 
   S.cancelCrop = function () {
     S.cropBox = null;
     drawGesture(null);
+    refreshAssist();
   };
 
   function finishGesture(g) {
     if (g.tool === 'crop') {
       var r = cropRect(g);
-      if (r.w > 0 && r.h > 0) { S.cropBox = r; drawGesture(g); status('crop: Enter or double-click commits, Escape cancels'); }
+      if (r.w > 0 && r.h > 0) {
+        S.cropBox = r;
+        drawGesture(g);
+        refreshAssist();
+        status(S.touch ? 'crop: Crop commits, Cancel drops it' : 'crop: Enter or double-click commits, Escape cancels');
+      }
       else S.cancelCrop();
       return Promise.resolve(S.cropBox);
     }
@@ -836,15 +867,67 @@
       if (sel) sel.removeAllRanges();
     });
     var drag = null, stroke = null, gesture = null, mover = null, grad = null;
+    // Under fingers: one works the tool, as a mouse does; a second makes
+    // it a pinch that pans and zooms the view, and what the first had
+    // begun is dropped, not committed.  What a tool does at the press
+    // itself (the wand, the eyedropper, the zoom, a clone source) waits
+    // for the finger to lift where it came down, so that two fingers on
+    // their way to a pinch pick nothing.  Only a pointer that says it is
+    // a touch is one: a mouse, a pen and a test's events go as before.
+    var touches = {}, pinch = null, tap = null;
+    function touchPair() {
+      var ids = Object.keys(touches);
+      return ids.length >= 2 ? [touches[ids[0]], touches[ids[1]]] : null;
+    }
+    // The pair's middle in canvas pixels, and the distance between them.
+    function pinchNow() {
+      var p = touchPair(), dpr = window.devicePixelRatio || 1, r = canvas.getBoundingClientRect();
+      return { x: ((p[0].x + p[1].x) / 2 - r.left) * dpr, y: ((p[0].y + p[1].y) / 2 - r.top) * dpr,
+               d: Math.max(1, Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y)) };
+    }
+    function pinchStart() {
+      var m = pinchNow();
+      pinch = { d: m.d, scale: view.scale, x: view.ox + m.x / view.scale, y: view.oy + m.y / view.scale };
+    }
+    // The document point that was between the fingers stays between them.
+    function pinchMove() {
+      var m = pinchNow();
+      view.scale = Math.min(64, Math.max(0.02, pinch.scale * m.d / pinch.d));
+      view.ox = pinch.x - m.x / view.scale;
+      view.oy = pinch.y - m.y / view.scale;
+      status();
+      requestDraw();
+    }
+    function tapAction(tool, e) {
+      if (samples(tool)) { var sp = docPoint(e); S.setCloneSource(sp[0], sp[1]); }
+      else if (tool === 'wand') wandAt(e);
+      else if (tool === 'eyedropper') pickColor(e);
+      else if (tool === 'zoom') zoomAt(e, e.altKey || (S.touch && S.zoomDirection < 0) ? 1 / 1.5 : 1.5);
+    }
+    function press(tool, e) {
+      if (e.pointerType !== 'touch') { tapAction(tool, e); return; }
+      tap = { tool: tool, pointerId: e.pointerId, pointerType: 'touch', clientX: e.clientX, clientY: e.clientY,
+              shiftKey: e.shiftKey, altKey: e.altKey };
+    }
     canvas.addEventListener('pointerdown', function (e) {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      if (e.pointerType === 'touch') {
+        // the first finger of a gesture: nothing older is still down
+        if (e.isPrimary) { touches = {}; pinch = null; }
+        touches[e.pointerId] = { x: e.clientX, y: e.clientY };
+        var down = Object.keys(touches).length;
+        if (down > 1) {
+          if (down === 2) { finish({ type: 'pointercancel' }); pinchStart(); }
+          tap = null;
+          return;
+        }
+      }
       if (S.transforming) { S.transforming.down(e); return; }
       var tool = effectiveTool();
-      if (samples(tool) && e.altKey) {
-        var sp = docPoint(e);
-        S.setCloneSource(sp[0], sp[1]);
+      if (samples(tool) && (e.altKey || armSource)) {
+        press(tool, e);
       } else if (samples(tool) && !S.cloneSource) {
-        status('Alt-click to set the clone source');
+        status(S.touch ? 'tap Set source, then the spot to copy from' : 'Alt-click to set the clone source');
       } else if (paints(tool)) {
         stroke = { layer: S.activeLayer, pointerType: e.pointerType, tool: tool,
                    samples: [strokeSample(e)] };
@@ -859,23 +942,25 @@
         gesture = { tool: tool, points: [docPoint(e)], mode: selectionMode(e) };
         drawGesture(gesture);
       } else if (tool === 'wand') {
-        wandAt(e);
+        press(tool, e);
       } else if (tool === 'move') {
         var L = activeL();
         if (!L || L.kind !== 'raster') { status('pick a raster layer to move'); return; }
         mover = { start: docPoint(e), layer: L.index, texIndex: L.texIndex, dx: 0, dy: 0 };
         floating.layer = L.texIndex;
         setFloatTranslation(0, 0);
-      } else if (tool === 'eyedropper') {
-        pickColor(e);
-      } else if (tool === 'zoom') {
-        zoomAt(e, e.altKey ? 1 / 1.5 : 1.5);
+      } else if (tool === 'eyedropper' || tool === 'zoom') {
+        press(tool, e);
       } else {
         drag = { x: e.clientX, y: e.clientY };
         setCursor(true);
       }
     });
     canvas.addEventListener('pointermove', function (e) {
+      if (e.pointerType === 'touch' && touches[e.pointerId]) {
+        touches[e.pointerId] = { x: e.clientX, y: e.clientY };
+        if (pinch) { pinchMove(); return; }
+      }
       if (S.transforming) { S.transforming.move(e); return; }
       if (stroke) {
         var fresh = coalesced(e).map(strokeSample);
@@ -914,7 +999,9 @@
       drag = { x: e.clientX, y: e.clientY };
       requestDraw();
     });
-    function end(e) {
+    // What the pointer had begun is committed when it lifts, and dropped
+    // when it is cancelled (by the system, or by a second finger).
+    function finish(e) {
       if (S.transforming) { S.transforming.up(e); return; }
       if (stroke) {
         var done = stroke;
@@ -924,6 +1011,7 @@
           drawGesture(cb ? { tool: 'crop', points: [[cb.x, cb.y], [cb.x + cb.w, cb.y + cb.h]] } : null);
         }
         if (e.type === 'pointerup') S.onStroke(done);
+        else if (done.texIndex >= 0) strokeChain = strokeChain.then(clearPreview);
       }
       if (gesture) {
         var g = gesture;
@@ -946,6 +1034,22 @@
       }
       drag = null;
       setCursor(false);
+    }
+    function end(e) {
+      if (e.pointerType === 'touch' && touches[e.pointerId]) {
+        delete touches[e.pointerId];
+        if (pinch) {
+          // the pinch goes on with the two that are left, and is over
+          // with fewer: the last finger down does nothing as it lifts
+          if (touchPair()) pinchStart(); else pinch = null;
+          return;
+        }
+      }
+      var t = tap;
+      tap = null;
+      if (t && e.type === 'pointerup' && t.pointerId === e.pointerId &&
+          Math.hypot(e.clientX - t.clientX, e.clientY - t.clientY) <= 12) tapAction(t.tool, t);
+      finish(e);
     }
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
@@ -1031,6 +1135,9 @@
     canvas.addEventListener('dblclick', function () {
       if (S.transforming) { S.transforming.commit(); return; }
       if (S.cropBox) { S.commitCrop(); return; }
+      // under a finger only the hand's double tap fits the view: with
+      // any other tool it is two taps of that tool
+      if (lastPointer === 'touch' && S.tool !== 'pan') return;
       fitView(); status(); requestDraw();
     });
   }
@@ -1357,7 +1464,8 @@
   S.onStroke = function (stroke) {
     S.lastStroke = stroke;
     if (!(stroke.texIndex >= 0)) {
-      status(samples(stroke.tool) ? 'this tool paints a raster layer\'s pixels, from an Alt-clicked source'
+      status(samples(stroke.tool) ? 'this tool paints a raster layer\'s pixels, from ' +
+                                    (S.touch ? 'a source set first' : 'an Alt-clicked source')
                                   : 'pick a raster layer, or a mask, to paint on');
       return;
     }
@@ -1733,7 +1841,11 @@
       var b = el('div', { 'class': 'st-tool-btn' + (t.built ? '' : ' st-disabled'), 'data-tool': t.id,
                           title: t.label + ' (' + t.key + ')' });
       b.innerHTML = '<svg viewBox="0 0 20 20">' + ICONS[t.id] + '</svg>';
-      b.addEventListener('click', function () { S.setTool(t.id); });
+      // on a phone a tool with no options of its own has nothing more
+      // to show in the sheet: back to the picture
+      b.addEventListener('click', function () {
+        if (S.setTool(t.id) && S.phone && !TOOL_OPTIONS[t.id]) S.setSheet(null);
+      });
       bar.appendChild(b);
     });
     var fg = el('div', { 'class': 'st-swatch st-fg', title: 'Foreground color (X swaps, D resets)' });
@@ -1765,8 +1877,10 @@
   var BRUSH_RANGES = { radius: ['size', 1, 300, 1], hardness: ['hardness', 0, 1, 0.01],
                        flow: ['flow', 0.01, 1, 0.01], opacity: ['opacity', 0, 1, 0.01] };
 
+  // Each box says which tools it is the options of (st-opt-*): a
+  // phone's Tools sheet shows only those of the tool in hand.
   function installToolbar() {
-    var box = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Brush Settings' })])]);
+    var box = el('div', { 'class': 'st-brush st-opt-paint' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Brush Settings' })])]);
     var inputs = {};
     Object.keys(BRUSH_RANGES).forEach(function (key) {
       var r = BRUSH_RANGES[key];
@@ -1785,7 +1899,7 @@
       S.brush.color = [1, 3, 5].map(function (i) { return parseInt(color.value.substr(i, 2), 16); });
       if (S.swatches) S.swatches.refresh();
     });
-    var undo = el('button', { type: 'button', text: 'Undo (Ctrl+Z)' });
+    var undo = el('button', { type: 'button', 'class': 'st-brush-undo', text: 'Undo (Ctrl+Z)' });
     undo.addEventListener('click', function () { S.undo(); });
     box.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'color' }), color, undo]));
     S.brushInputs = {
@@ -1799,14 +1913,14 @@
       }
     };
     // The Magic Wand's tolerance and contiguity, under the brush.
-    var wand = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Magic Wand' })])]);
+    var wand = el('div', { 'class': 'st-brush st-opt-wand' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Magic Wand' })])]);
     wand.appendChild(settingSlider(S.wand, 'tolerance', function () {}));
     var contiguous = el('input', { type: 'checkbox' });
     contiguous.checked = true;
     contiguous.addEventListener('change', function () { S.wand.contiguous = contiguous.checked; });
     wand.appendChild(el('div', { 'class': 'st-row' }, [contiguous, el('span', { text: 'Contiguous' })]));
     // The Gradient tool's preset, shape, opacity and direction, under it.
-    var grad = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Gradient' })])]);
+    var grad = el('div', { 'class': 'st-brush st-opt-gradient' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Gradient' })])]);
     var preset = el('select');
     Object.keys(GRADIENT_PRESETS).forEach(function (k) { preset.appendChild(el('option', { value: k, text: k })); });
     preset.addEventListener('change', function () { S.gradient.preset = preset.value; });
@@ -1820,17 +1934,17 @@
     reverse.addEventListener('change', function () { S.gradient.reverse = reverse.checked; });
     grad.appendChild(el('div', { 'class': 'st-row' }, [reverse, el('span', { text: 'Reverse' })]));
     // The Clone Stamp's alignment, under that.
-    var stamp = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Clone Stamp, Healing Brush' })])]);
+    var stamp = el('div', { 'class': 'st-brush st-opt-clone' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'Clone Stamp, Healing Brush' })])]);
     var aligned = el('input', { type: 'checkbox' });
     aligned.checked = S.clone.aligned;
     aligned.addEventListener('change', function () { S.clone.aligned = aligned.checked; S.cloneOffset = null; });
     stamp.appendChild(el('div', { 'class': 'st-row' }, [aligned, el('span', { text: 'Aligned' })]));
-    stamp.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'Alt-click sets the source' })]));
+    stamp.appendChild(el('div', { 'class': 'st-row st-desk-hint' }, [el('span', { 'class': 'st-label', text: 'Alt-click sets the source' })]));
     statusEl.parentNode.insertBefore(box, statusEl.nextSibling);
     statusEl.parentNode.insertBefore(wand, box.nextSibling);
     statusEl.parentNode.insertBefore(grad, wand.nextSibling);
     // The History Brush's source, under that.
-    var history = el('div', { 'class': 'st-brush' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'History Brush' })])]);
+    var history = el('div', { 'class': 'st-brush st-opt-history' }, [el('div', { 'class': 'st-layers-head' }, [el('span', { text: 'History Brush' })])]);
     var setSource = el('button', { type: 'button', text: 'Set source to current state' });
     setSource.addEventListener('click', function () { S.setHistorySource(); });
     history.appendChild(el('div', { 'class': 'st-row' }, [el('span', { 'class': 'st-label', text: 'paints the document as opened' })]));
@@ -1883,12 +1997,13 @@
   var selectionAsked = 0;
   function loadSelection(rect) {
     var asked = ++selectionAsked;
-    if (!rect) { S.selection = null; selectionMask = null; requestDraw(); return Promise.resolve(null); }
+    if (!rect) { S.selection = null; selectionMask = null; requestDraw(); refreshAssist(); return Promise.resolve(null); }
     return fetchPixels(api('selection')).then(function (bytes) {
       if (asked !== selectionAsked) return rect;
       if (bytes.length !== doc.width * doc.height) throw new Error('selection: ' + bytes.length + ' bytes');
       S.selection = rect;
       selectionMask = bytes;
+      refreshAssist();
       if (!texSelection || texSelection.docWidth !== doc.width || texSelection.docHeight !== doc.height) {
         selectionTexture(doc.width, doc.height);
         texSelection.docWidth = doc.width;
@@ -2283,11 +2398,13 @@
       ctx.setLineDash([4, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
+      // the handles keep their size on a dense screen
+      var half = 4 * (window.devicePixelRatio || 1);
       handles().map(toCanvas).forEach(function (p) {
         ctx.fillStyle = '#fff';
-        ctx.fillRect(p[0] - 4, p[1] - 4, 8, 8);
+        ctx.fillRect(p[0] - half, p[1] - half, 2 * half, 2 * half);
         ctx.strokeStyle = '#000';
-        ctx.strokeRect(p[0] - 4.5, p[1] - 4.5, 9, 9);
+        ctx.strokeRect(p[0] - half - 0.5, p[1] - half - 0.5, 2 * half + 1, 2 * half + 1);
       });
     }
     function apply() {
@@ -2308,14 +2425,17 @@
       floating.inv = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
       drawGesture(null);
       requestDraw();
+      refreshAssist();
     }
     var t = S.transforming = {
-      layer: L.index, params: params, box: box, matrix: matrix,
+      layer: L.index, params: params, box: box, matrix: matrix, redraw: draw,
       set: function (changes) { Object.assign(params, changes); apply(); },
       down: function (e) {
         var p = docPoint(e), pc = toCanvas(p), hs = handles().map(toCanvas), hit = -1;
+        // a finger needs more room around a handle than a mouse does
+        var reach = (S.touch ? 20 : 10) * (window.devicePixelRatio || 1);
         for (var k = 0; k < hs.length; k++) {
-          if (Math.abs(hs[k][0] - pc[0]) <= 10 && Math.abs(hs[k][1] - pc[1]) <= 10) { hit = k; break; }
+          if (Math.abs(hs[k][0] - pc[0]) <= reach && Math.abs(hs[k][1] - pc[1]) <= reach) { hit = k; break; }
         }
         var l = local(p), inside = Math.abs(l[0]) <= Math.abs(params.sx) * box.w / 2 && Math.abs(l[1]) <= Math.abs(params.sy) * box.h / 2;
         drag = { mode: hit >= 0 ? 'scale' : (inside ? 'move' : 'rotate'), handle: hit, start: p,
@@ -2341,7 +2461,11 @@
         }
         apply();
       },
-      up: function () { drag = null; },
+      up: function (e) {
+        // a drag that was dropped (a second finger came down) is taken back
+        if (drag && e && e.type === 'pointercancel') { Object.assign(params, drag.from); apply(); }
+        drag = null;
+      },
       commit: function () {
         var m = matrix();
         finish();
@@ -2355,7 +2479,9 @@
       cancel: finish
     };
     apply();
-    status('Free Transform: drag to move, handles to scale, outside to turn; Enter commits, Escape cancels');
+    refreshAssist();
+    status('Free Transform: drag to move, handles to scale, outside to turn; ' +
+           (S.touch ? 'Apply commits, Cancel drops it' : 'Enter commits, Escape cancels'));
     return t;
   };
 
@@ -2998,14 +3124,18 @@
         { label: 'Zoom In', key: 'Ctrl++', run: S.zoomIn },
         { label: 'Zoom Out', key: 'Ctrl+-', run: S.zoomOut },
         { label: 'Fit on Screen', key: 'Ctrl+0', run: S.fitOnScreen },
-        { label: 'Actual Pixels', key: 'Ctrl+1', run: S.actualPixels },
+        { label: 'Actual Pixels', key: 'Ctrl+1', run: S.actualPixels }].concat(S.phone ? [] : [
+        // its result goes to the status lines, which a phone keeps in a sheet
         '-',
-        { label: 'Benchmark', run: function () { document.querySelector('#stratum-panel .st-bench-btn').click(); } }] },
-      { title: 'Window', items: [
+        { label: 'Benchmark', run: function () { document.querySelector('#stratum-panel .st-bench-btn').click(); } }]) },
+      // on a phone the two panels are sheets, and these raise them
+      { title: 'Window', items: (S.phone ? [
+        { label: 'Layers', check: S.sheet === 'layers', run: function () { S.setSheet('layers'); } },
+        { label: 'Brush Settings', check: S.sheet === 'tools', run: function () { S.setSheet('tools'); } }] : [
         { label: 'Layers', check: panelShown('#stratum-panel'), run: function () { togglePanel('#stratum-panel'); } },
         { label: 'Brush Settings', check: panelShown('#stratum-panel .st-brush'),
-          run: function () { togglePanel('#stratum-panel .st-brush'); } },
-        '-'].concat((S.documents || [docName]).map(function (n) {
+          run: function () { togglePanel('#stratum-panel .st-brush'); } }]).concat([
+        '-'], (S.documents || [docName]).map(function (n) {
           // this session's open documents, the current one checked
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + encodeURIComponent(n); } };
         })) },
@@ -3016,10 +3146,14 @@
     ];
   }
 
-  function closeMenus() {
+  // On a phone the menus are a drawer under the bar's button, one
+  // section a menu; the drawer shuts with them unless KEEP-DRAWER is
+  // true, which is one section making way for another.
+  function closeMenus(keepDrawer) {
     document.querySelectorAll('#stratum-menubar .st-menu.st-open').forEach(function (m) {
       m.classList.remove('st-open');
     });
+    if (keepDrawer !== true) document.body.classList.remove('st-menus-open');
   }
 
   function menuList(items) {
@@ -3031,7 +3165,18 @@
       if (it.check) row.appendChild(el('span', { 'class': 'st-check', text: '✓' }));
       row.appendChild(el('span', { text: it.label }));
       row.appendChild(el('span', { 'class': 'st-key', text: it.sub ? '▸' : (it.key || '') }));
-      if (it.sub) row.appendChild(menuList(it.sub));
+      if (it.sub) {
+        row.appendChild(menuList(it.sub));
+        // a submenu opens under the mouse; with no hover (a finger, a
+        // phone) a tap on its row opens it and shuts its neighbors
+        row.addEventListener('click', function (e) {
+          if (!(S.phone || lastPointer === 'touch') || e.target.closest('.st-menu-list') !== list) return;
+          e.stopPropagation();
+          var open = !row.classList.contains('st-open');
+          list.querySelectorAll(':scope > .st-sub.st-open').forEach(function (r) { r.classList.remove('st-open'); });
+          row.classList.toggle('st-open', open);
+        });
+      }
       else if (on) row.addEventListener('click', function (e) { e.stopPropagation(); closeMenus(); it.run(); });
       else row.addEventListener('click', function (e) { e.stopPropagation(); });
       list.appendChild(row);
@@ -3040,14 +3185,15 @@
   }
 
   function installMenubar() {
-    var bar = document.getElementById('stratum-menubar');
+    // the menus' own box in the bar (installPhone), beside the phone's bar
+    var bar = document.querySelector('#stratum-menubar .st-menus') || document.getElementById('stratum-menubar');
     if (!bar) return;
     bar.textContent = '';
     menuSpec().forEach(function (m, k) {
       var menu = el('div', { 'class': 'st-menu', 'data-menu': m.title },
                     [el('div', { 'class': 'st-menu-title', text: m.title })]);
       function open() {
-        closeMenus();
+        closeMenus(true);
         var old = menu.querySelector(':scope > .st-menu-list');
         if (old) menu.removeChild(old);
         menu.appendChild(menuList(menuSpec()[k].items));
@@ -3055,9 +3201,11 @@
       }
       menu.firstChild.addEventListener('click', function (e) {
         e.stopPropagation();
-        if (menu.classList.contains('st-open')) closeMenus(); else open();
+        if (menu.classList.contains('st-open')) closeMenus(S.phone); else open();
       });
+      // a finger's tap brings a mouseenter of its own before the click
       menu.firstChild.addEventListener('mouseenter', function () {
+        if (S.phone || lastPointer === 'touch') return;
         if (document.querySelector('#stratum-menubar .st-menu.st-open')) open();
       });
       bar.appendChild(menu);
@@ -5002,6 +5150,78 @@
               { layers: doc.layers.length, fetched: fetched() - f });
       });
     }).then(function () {
+      // The phone: the same page as an app (S.setPhone, as the width
+      // would set it): a bar, three tabs, one sheet at a time holding
+      // the options of the tool in hand alone, the menus in a drawer;
+      // and two fingers pan and zoom whatever the tool, painting nothing.
+      var wasPhone = S.phone, wasTouch = S.touch, wasTool = S.tool;
+      var wasView = { scale: view.scale, ox: view.ox, oy: view.oy };
+      var body = document.body, panel = document.getElementById('stratum-panel');
+      function shown(sel) { var e = document.querySelector(sel); return e ? getComputedStyle(e).display : 'missing'; }
+      S.setPhone(true);
+      var tabs = document.querySelectorAll('#stratum-tabs .st-tab');
+      check('a phone gets a bar and three tabs, the panel behind them',
+            tabs.length === 3 && shown('.st-phone-bar') === 'flex' && shown('#stratum-tabs') === 'flex' &&
+            shown('#stratum-panel') === 'none',
+            { tabs: tabs.length, bar: shown('.st-phone-bar'), tabBar: shown('#stratum-tabs'), panel: shown('#stratum-panel') });
+      tabs[2].click();
+      check('the Layers tab raises the layers alone',
+            body.getAttribute('data-sheet') === 'layers' && shown('#stratum-panel') === 'block' &&
+            shown('#stratum-layers') === 'block' && shown('#stratum-prompt') === 'none',
+            { sheet: body.getAttribute('data-sheet'), panel: shown('#stratum-panel'),
+              layers: shown('#stratum-layers'), prompt: shown('#stratum-prompt') });
+      tabs[2].click();
+      check('and lowers them', !body.hasAttribute('data-sheet') && shown('#stratum-panel') === 'none',
+            { sheet: body.getAttribute('data-sheet'), panel: shown('#stratum-panel') });
+      S.setTool('brush');
+      S.setSheet('tools');
+      check('the Tools sheet holds the palette and the options of the tool in hand',
+            document.getElementById('stratum-tools').parentNode === panel && shown('#stratum-tools') === 'flex' &&
+            shown('#stratum-panel > .st-opt-paint') === 'block' && shown('#stratum-panel > .st-opt-wand') === 'none',
+            { palette: shown('#stratum-tools'), paint: shown('#stratum-panel > .st-opt-paint'),
+              wand: shown('#stratum-panel > .st-opt-wand') });
+      document.querySelector('.st-bar-menu').click();
+      var drawer = body.classList.contains('st-menus-open') && shown('#stratum-menubar .st-menus') === 'block';
+      var ran = S.menuRun('View', 'Fit on Screen');
+      check('the menus are a drawer under the bar, shut by the item that runs',
+            drawer && !S.sheet && ran && !body.classList.contains('st-menus-open'),
+            { drawer: drawer, sheet: S.sheet, ran: ran, open: body.classList.contains('st-menus-open') });
+      // one finger begins a brush stroke; the second makes it a pinch
+      var r = canvas.getBoundingClientRect(), depth = S.undoDepth, last = S.lastStroke, scale = view.scale;
+      function finger(type, id, x) {
+        canvas.dispatchEvent(new PointerEvent(type, {
+          pointerType: 'touch', pointerId: id, isPrimary: id === 61, bubbles: true,
+          clientX: r.left + x * r.width, clientY: r.top + 0.5 * r.height }));
+      }
+      finger('pointerdown', 61, 0.40);
+      finger('pointermove', 61, 0.41);
+      finger('pointerdown', 62, 0.61);
+      finger('pointermove', 61, 0.31);
+      finger('pointermove', 62, 0.71);
+      finger('pointerup', 61, 0.31);
+      finger('pointerup', 62, 0.71);
+      return S.strokesSettled().then(function () {
+        check('two fingers spread to twice as far zoom the view to twice the scale',
+              Math.abs(view.scale / scale - 2) < 0.02, { before: scale, after: view.scale });
+        check('and the stroke the first had begun paints nothing',
+              S.undoDepth === depth && S.lastStroke === last, { undoDepth: S.undoDepth, was: depth });
+        check('a finger on the page says it is a touch page', S.touch && body.classList.contains('st-touch'), S.touch);
+        S.setSheet(null);
+        S.setTool(wasTool);
+        S.setPhone(wasPhone);
+        S.setTouch(wasTouch);
+        lastPointer = '';
+        view.scale = wasView.scale;
+        view.ox = wasView.ox;
+        view.oy = wasView.oy;
+        status();
+        draw();
+        check('the desk comes back as it was',
+              !body.classList.contains('st-phone') === !wasPhone &&
+              (wasPhone || document.getElementById('stratum-tools').parentNode === document.getElementById('stratum-app')),
+              { phone: S.phone });
+      });
+    }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
     }, function (e) {
       check('no exception', false, String(e && e.message || e));
@@ -5299,13 +5519,253 @@
       go.disabled = true;
       busy.textContent = 'working...';
       S.promptNote = function (note) { busy.textContent = 'working... ' + note; };
-      S.prompt(text).then(function () { box.value = ''; }, function () {})
-        .then(function () { go.disabled = false; busy.textContent = ''; });
+      // On a phone the sheet steps aside so the picture shows the edit
+      // as it lands; the reply comes as a toast, and the sheet comes
+      // back when there is nothing to see but words (or an error).
+      var aside = S.phone && S.sheet === 'prompt';
+      if (aside) { box.blur(); S.setSheet(null); }
+      S.prompt(text).then(function (res) { box.value = ''; return res; }, function () { return null; })
+        .then(function (res) {
+          go.disabled = false;
+          busy.textContent = '';
+          if (!aside || !S.phone) return;
+          if (res && res.results && res.results.length) {
+            if (res.reply) S.toast(res.reply.length > 160 ? res.reply.slice(0, 157) + '...' : res.reply);
+          }
+          else if (!S.sheet) S.setSheet('prompt');
+        });
     }
     go.addEventListener('click', run);
     box.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
     });
+  }
+
+  // ---- the phone -----------------------------------------------------------
+
+  // At a phone's width (or on a short touch screen: a phone on its side)
+  // the page is an app, not a desk: a bar across the top (the menus
+  // behind its button, the document's name and zoom, Undo and Redo), the
+  // picture, and three tabs whose sheets rise over it: the prompt, the
+  // tool in hand with its options, the layers.  S.phone says so here and
+  // body.st-phone to the style sheet; the elements are made once, at any
+  // width, and the style sheet shows them or not.
+  //
+  // Touch is its own matter (S.touch, body.st-touch: the first finger
+  // sets it, or a coarse pointer at the start), since a tablet has the
+  // desk's width and no keys.  Two fingers pan and zoom whatever the
+  // tool (installNavigation), and the buttons over the picture
+  // (#stratum-assist) stand in for the keys: Enter and Escape for a crop
+  // or a transform, Shift and Alt for a selection's mode, Alt-click for
+  // a clone source, Alt for zooming out.
+  S.phone = false;
+  S.touch = false;
+  S.sheet = null;
+  S.selectMode = 'new';
+  S.zoomDirection = 1;
+
+  var armSource = false, lastPointer = '', phoneUi = null, assistKey = null, toastTimer = null;
+
+  // The option boxes (st-opt-*, installToolbar) each tool's sheet shows.
+  var TOOL_OPTIONS = { brush: 'paint', eraser: 'paint', history: 'paint history', stamp: 'paint clone',
+                       healing: 'paint clone', wand: 'wand', gradient: 'gradient' };
+  var SHEETS = { prompt: 'Prompt', tools: 'Tools', layers: 'Layers' };
+  var BAR_ICONS = {
+    menu: '<path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13"/>',
+    undo: '<path d="M7.5 4.5L4 8l3.5 3.5M4 8h7.5a4.5 4.5 0 0 1 0 9H8"/>',
+    redo: '<path d="M12.5 4.5L16 8l-3.5 3.5M16 8H8.5a4.5 4.5 0 0 0 0 9H12"/>',
+    close: '<path d="M5 5l10 10M15 5L5 15"/>',
+    prompt: '<path d="M4 4.5h12v8.5H9l-3.5 3v-3H4z"/>',
+    layers: '<path d="M10 3.5l7 3.5-7 3.5-7-3.5zM3 10.5l7 3.5 7-3.5M3 13.5l7 3.5 7-3.5"/>'
+  };
+
+  function icon(markup) {
+    var holder = document.createElement('div');
+    holder.innerHTML = '<svg viewBox="0 0 20 20">' + markup + '</svg>';
+    return holder.firstChild;
+  }
+
+  function sheetTitle(name) {
+    return name === 'tools' ? (toolSpec(S.tool) || { label: 'Tools' }).label : SHEETS[name];
+  }
+
+  // Raise the sheet NAMED (prompt, tools, layers), or lower whichever
+  // is up with null.
+  S.setSheet = function (name) {
+    S.sheet = SHEETS[name] ? name : null;
+    if (S.sheet) document.body.setAttribute('data-sheet', S.sheet);
+    else document.body.removeAttribute('data-sheet');
+    closeMenus();
+    if (!phoneUi) return;
+    Object.keys(phoneUi.tabs).forEach(function (k) { phoneUi.tabs[k].classList.toggle('st-on', k === S.sheet); });
+    phoneUi.sheetTitle.textContent = S.sheet ? sheetTitle(S.sheet) : '';
+  };
+
+  // The tool in hand, told to the style sheet (which options a sheet
+  // shows) and to the Tools tab, which wears its icon.
+  function toolChanged() {
+    document.body.setAttribute('data-tool', S.tool);
+    document.body.setAttribute('data-options', TOOL_OPTIONS[S.tool] || '');
+    armSource = false;
+    if (phoneUi) {
+      phoneUi.tabs.tools.querySelector('svg').innerHTML = ICONS[S.tool] || ICONS.pan;
+      if (S.sheet === 'tools') phoneUi.sheetTitle.textContent = sheetTitle('tools');
+    }
+    refreshAssist();
+  }
+
+  // The palette lives beside the picture on a desk and in the Tools
+  // sheet on a phone: one element, moved.
+  S.setPhone = function (on) {
+    var app = document.getElementById('stratum-app'), panel = document.getElementById('stratum-panel');
+    var tools = document.getElementById('stratum-tools');
+    S.phone = !!on;
+    document.body.classList.toggle('st-phone', S.phone);
+    if (phoneUi && tools) {
+      if (S.phone) panel.insertBefore(tools, phoneUi.sheetHead.nextSibling);
+      else if (tools.parentNode !== app) app.insertBefore(tools, app.firstChild);
+    }
+    // what Window > Layers and Brush Settings hid on the desk
+    if (panel) {
+      panel.style.display = '';
+      panel.querySelectorAll('.st-brush').forEach(function (b) { b.style.display = ''; });
+    }
+    if (S.phone) closeMenus(); else S.setSheet(null);
+    setViewportHeight();
+    if (canvas) resize();
+    refreshAssist();
+  };
+
+  S.setTouch = function (on) {
+    S.touch = !!on;
+    document.body.classList.toggle('st-touch', S.touch);
+    refreshAssist();
+  };
+
+  // The height the style sheet lays the phone out in: what is left
+  // above the keyboard, which 100vh and 100dvh both ignore.  A page
+  // pinched larger keeps the layout it had.
+  function setViewportHeight() {
+    var root = document.documentElement, vv = window.visualViewport;
+    if (!S.phone) { root.style.removeProperty('--st-vh'); return; }
+    if (vv && Math.abs(vv.scale - 1) > 0.01) return;
+    root.style.setProperty('--st-vh', Math.round(vv ? vv.height : window.innerHeight) + 'px');
+    if (vv && vv.offsetTop) window.scrollTo(0, 0);
+  }
+
+  // The bar's share of the status lines: the name and the zoom; a
+  // message goes over the picture for a few seconds, since the lines
+  // themselves are in the Layers sheet.
+  function phoneStatus(extra) {
+    if (!phoneUi) return;
+    phoneUi.name.nodeValue = doc ? doc.name : (extra || 'Stratum');
+    phoneUi.zoom.textContent = doc ? Math.round(view.scale * 100) + '%' : '';
+    if (extra && doc) S.toast(extra);
+  }
+
+  S.toast = function (text) {
+    if (!phoneUi || !S.phone) return;
+    phoneUi.toast.textContent = text;
+    phoneUi.toast.classList.add('st-on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { phoneUi.toast.classList.remove('st-on'); }, 4000);
+  };
+
+  // The buttons over the picture, for what is going on: each row is a
+  // label, a class (st-on: the one picked; st-go: the one that commits)
+  // and what a tap does.  Rebuilt only when the row changes.
+  function refreshAssist() {
+    if (!phoneUi) return;
+    var rows = [], tool = S.tool;
+    function mode(label, m) {
+      return [label, S.selectMode === m ? 'st-on' : '', function () { S.selectMode = m; }];
+    }
+    if (S.transforming) {
+      rows = [['Cancel', '', function () { S.transforming.cancel(); }],
+              ['Apply', 'st-go', function () { S.transforming.commit(); }]];
+    } else if (S.cropBox) {
+      rows = [['Cancel', '', function () { S.cancelCrop(); }],
+              ['Crop', 'st-go', function () { S.commitCrop(); }]];
+    } else if (tool === 'marquee' || tool === 'lasso' || tool === 'wand') {
+      rows = [mode('New', 'new'), mode('Add', 'add'), mode('Subtract', 'subtract')];
+      if (S.selection) rows.push(['Deselect', '', function () { S.select({ op: 'none' }); }]);
+    } else if (samples(tool)) {
+      rows = [[armSource ? 'Tap the source' : 'Set source', armSource ? 'st-on' : '',
+               function () { armSource = !armSource; }]];
+    } else if (tool === 'zoom') {
+      rows = [['Zoom in', S.zoomDirection > 0 ? 'st-on' : '', function () { S.zoomDirection = 1; }],
+              ['Zoom out', S.zoomDirection < 0 ? 'st-on' : '', function () { S.zoomDirection = -1; }]];
+    }
+    var key = rows.map(function (r) { return r[0] + ':' + r[1]; }).join('|');
+    if (key === assistKey) return;
+    assistKey = key;
+    phoneUi.assist.textContent = '';
+    rows.forEach(function (r) {
+      var b = el('button', { type: 'button', 'class': r[1], text: r[0] });
+      b.addEventListener('click', function (e) { e.stopPropagation(); r[2](); refreshAssist(); });
+      phoneUi.assist.appendChild(b);
+    });
+  }
+
+  function installPhone() {
+    var bar = document.getElementById('stratum-menubar'), app = document.getElementById('stratum-app');
+    var panel = document.getElementById('stratum-panel'), viewEl = document.getElementById('stratum-view');
+    if (!bar || !app || !panel || !viewEl) return;
+    function button(cls, label, markup, run) {
+      var b = el('button', { type: 'button', 'class': cls, title: label, 'aria-label': label }, [icon(markup)]);
+      b.addEventListener('click', run);
+      return b;
+    }
+    // the bar: the menus' button, the name and zoom, Undo and Redo; the
+    // menus themselves go in the box after it (installMenubar)
+    var name = document.createTextNode('Stratum'), zoom = el('span', { text: '' });
+    bar.textContent = '';
+    bar.appendChild(el('div', { 'class': 'st-phone-bar' }, [
+      button('st-bar-btn st-bar-menu', 'Menu', BAR_ICONS.menu, function (e) {
+        e.stopPropagation();
+        var open = !document.body.classList.contains('st-menus-open');
+        S.setSheet(null);
+        document.body.classList.toggle('st-menus-open', open);
+      }),
+      el('div', { 'class': 'st-bar-title' }, [name, zoom]),
+      button('st-bar-btn', 'Undo', BAR_ICONS.undo, function () { if (S.ready) S.undo(); }),
+      button('st-bar-btn', 'Redo', BAR_ICONS.redo, function () { if (S.ready) S.redo(); })]));
+    bar.appendChild(el('div', { 'class': 'st-menus' }));
+    // the tabs, under the picture
+    var tabs = {}, tabBar = el('div', { id: 'stratum-tabs' });
+    Object.keys(SHEETS).forEach(function (k) {
+      tabs[k] = el('button', { type: 'button', 'class': 'st-tab', 'data-sheet': k },
+                   [icon(k === 'tools' ? ICONS.pan : BAR_ICONS[k]), el('span', { text: SHEETS[k] })]);
+      tabs[k].addEventListener('click', function () { S.setSheet(S.sheet === k ? null : k); });
+      tabBar.appendChild(tabs[k]);
+    });
+    app.parentNode.insertBefore(tabBar, app.nextSibling);
+    // the sheet is the panel, with a head of its own
+    var sheetName = el('span', { text: '' });
+    var sheetHead = el('div', { 'class': 'st-sheet-head' }, [sheetName,
+      button('st-bar-btn', 'Close', BAR_ICONS.close, function () { S.setSheet(null); })]);
+    panel.insertBefore(sheetHead, panel.firstChild);
+    // over the picture: the stand-in buttons and the toast
+    var assist = el('div', { id: 'stratum-assist' }), toast = el('div', { id: 'stratum-toast' });
+    viewEl.appendChild(el('div', { id: 'stratum-hud' }, [assist, toast]));
+    phoneUi = { name: name, zoom: zoom, tabs: tabs, sheetTitle: sheetName, sheetHead: sheetHead,
+                assist: assist, toast: toast };
+    // which kind of pointer spoke last: a finger has no hover, and its
+    // double tap is not a double click
+    document.addEventListener('pointerdown', function (e) {
+      lastPointer = e.pointerType || '';
+      if (lastPointer === 'touch' && !S.touch) S.setTouch(true);
+    }, true);
+    var narrow = window.matchMedia('(max-width: 760px), (pointer: coarse) and (max-height: 500px)');
+    function fit() { S.setPhone(narrow.matches); }
+    if (narrow.addEventListener) narrow.addEventListener('change', fit); else narrow.addListener(fit);
+    if (window.matchMedia('(pointer: coarse)').matches) S.setTouch(true);
+    fit();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', setViewportHeight);
+      window.visualViewport.addEventListener('scroll', setViewportHeight);
+    }
+    window.addEventListener('resize', setViewportHeight);
   }
 
   // ---- start --------------------------------------------------------------
@@ -5315,6 +5775,7 @@
     overlay = document.getElementById('stratum-overlay');
     statusEl = document.getElementById('stratum-status');
     layersEl = document.getElementById('stratum-layers');
+    installPhone();
     gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
     if (!gl) { status('WebGL 2 is not available in this browser.'); S.error = 'no webgl2'; return; }
     vao = gl.createVertexArray();

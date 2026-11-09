@@ -1126,12 +1126,159 @@ body.st-loading #stratum-menubar, body.st-loading #stratum-tools, body.st-loadin
 body.st-loading #stratum-layers, body.st-loading #stratum-prompt { pointer-events: none; }
 body.st-loading #stratum-menubar, body.st-loading #stratum-tools,
 body.st-loading #stratum-layers, body.st-loading #stratum-prompt { opacity: .5; }
-@media (max-width: 700px) {
-  #stratum-app { flex-direction: column; }
-  #stratum-view { height: 60vh; flex: none; width: 100%; }
-  #stratum-panel { width: 100%; border-left: none; border-top: 1px solid #33363c; }
-}
+.st-menus { display: flex; align-items: stretch; }
+.st-item.st-sub.st-open > .st-menu-list { display: block; }
+.st-phone-bar, #stratum-tabs, .st-sheet-head { display: none; }
 ")
+
+(defparameter *phone-css* "
+#stratum-hud { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; flex-direction: column;
+  align-items: center; gap: 6px; pointer-events: none; z-index: 4; }
+#stratum-assist { display: none; gap: 4px; pointer-events: auto; background: rgba(34, 36, 41, .94);
+  border: 1px solid #3a3e45; border-radius: 8px; padding: 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, .4);
+  user-select: none; -webkit-user-select: none; }
+body.st-touch #stratum-assist:not(:empty) { display: flex; }
+#stratum-assist button { background: none; color: inherit; border: none; border-radius: 5px; font: inherit;
+  font-size: 14px; min-height: 36px; padding: 0 12px; }
+#stratum-assist button.st-on, #stratum-assist button.st-go { background: #3b5f93; color: #fff; }
+#stratum-toast { display: none; max-width: 100%; box-sizing: border-box; background: rgba(34, 36, 41, .94);
+  border: 1px solid #3a3e45; border-radius: 6px; padding: 6px 10px; text-align: center; }
+body.st-phone #stratum-toast.st-on { display: block; }
+body.st-touch .st-desk-hint { display: none; }
+body.st-touch #stratum-canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+body.st-phone { display: flex; flex-direction: column; height: var(--st-vh, 100vh); overflow: hidden;
+  touch-action: manipulation; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body.st-phone #stratum-menubar { height: 44px; flex: none; z-index: 30; }
+body.st-phone .st-phone-bar { display: flex; flex: 1; min-width: 0; align-items: center; }
+.st-bar-btn { width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center;
+  background: none; border: none; color: inherit; padding: 0; }
+.st-bar-btn svg, .st-tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round; }
+.st-bar-btn:active, .st-tab:active, body.st-menus-open .st-bar-menu { background: #3b5f93; }
+.st-bar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 15px; font-weight: 600; padding: 0 4px; }
+.st-bar-title span { color: #8a9099; font-weight: 400; font-size: 13px; margin-left: 8px; }
+body.st-phone .st-menus { display: none; position: fixed; top: 45px; left: 0; right: 0;
+  bottom: calc(49px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain;
+  background: #222429; z-index: 30; }
+body.st-phone.st-menus-open .st-menus { display: block; }
+body.st-phone .st-menu-title { line-height: 46px; padding: 0 16px; font-size: 16px;
+  border-bottom: 1px solid #33363c; }
+body.st-phone .st-menu-title::after { content: '\\25B8'; float: right; color: #8a9099; }
+body.st-phone .st-menu.st-open > .st-menu-title::after { content: '\\25BE'; }
+body.st-phone .st-menu-title:hover { background: none; }
+body.st-phone .st-menu.st-open > .st-menu-title { background: #2c2f35; }
+body.st-phone .st-menu-list { position: static; min-width: 0; border: none; box-shadow: none; padding: 0;
+  background: #1b1d21; }
+body.st-phone .st-item { flex-wrap: wrap; gap: 0; padding: 0 16px 0 40px; white-space: normal;
+  font-size: 15px; border-bottom: 1px solid #26282d; }
+body.st-phone .st-item > span { line-height: 44px; }
+body.st-phone .st-item:hover { background: none; }
+body.st-phone .st-item .st-key { display: none; }
+body.st-phone .st-item.st-sub > .st-key { display: inline; font-size: 15px; }
+body.st-phone .st-item.st-sub.st-open > .st-key { transform: rotate(90deg); }
+body.st-phone .st-item .st-check { left: 14px; top: 0; }
+body.st-phone .st-sep { margin: 0; border-top: 6px solid #222429; }
+body.st-phone .st-item.st-sub > .st-menu-list { flex: none; width: calc(100% + 56px); margin: 0 -16px 0 -40px;
+  background: #17181b; }
+body.st-phone .st-item.st-sub:hover > .st-menu-list { display: none; }
+body.st-phone .st-item.st-sub.st-open > .st-menu-list { display: block; }
+body.st-phone .st-menu-list .st-menu-list .st-item { padding-left: 58px; }
+body.st-phone .st-menu-list .st-menu-list .st-check { left: 32px; }
+body.st-phone #stratum-app { flex: 1; min-height: 0; height: auto; }
+body.st-phone #stratum-view { width: 100%; }
+body.st-phone #stratum-panel { display: none; position: absolute; left: 0; right: 0; bottom: 0; width: auto;
+  max-height: 62%; border-left: none; border-top: 1px solid #3a3e45; border-radius: 10px 10px 0 0;
+  padding: 0 14px 14px; z-index: 15; box-shadow: 0 -6px 18px rgba(0, 0, 0, .5);
+  overscroll-behavior: contain; }
+body.st-phone[data-sheet] #stratum-panel { display: block; }
+body.st-phone #stratum-app:has(> .st-dialog) #stratum-panel { display: none; }
+body.st-phone #stratum-panel > * { display: none; }
+body.st-phone #stratum-panel > .st-sheet-head { display: flex; align-items: center;
+  justify-content: space-between; position: sticky; top: 0; z-index: 1; background: #222429;
+  margin: 0 -14px 8px; padding: 0 0 0 14px; height: 44px; font-size: 15px; font-weight: 600;
+  border-bottom: 1px solid #33363c; border-radius: 10px 10px 0 0; }
+body.st-phone[data-sheet=prompt] #stratum-prompt, body.st-phone[data-sheet=layers] #stratum-status,
+body.st-phone[data-sheet=layers] #stratum-layers { display: block; }
+body.st-phone[data-sheet=tools] #stratum-tools { display: flex; }
+body.st-phone[data-sheet=tools][data-options~=paint] #stratum-panel > .st-opt-paint,
+body.st-phone[data-sheet=tools][data-options~=wand] #stratum-panel > .st-opt-wand,
+body.st-phone[data-sheet=tools][data-options~=gradient] #stratum-panel > .st-opt-gradient,
+body.st-phone[data-sheet=tools][data-options~=clone] #stratum-panel > .st-opt-clone,
+body.st-phone[data-sheet=tools][data-options~=history] #stratum-panel > .st-opt-history { display: block; }
+body.st-phone #stratum-prompt { border-top: none; margin-top: 0; padding-top: 0; }
+body.st-phone #stratum-status { margin: 0 0 6px; }
+body.st-phone #stratum-layers > .st-layers-head, body.st-phone #stratum-prompt > .st-layers-head { display: none; }
+body.st-phone .st-prompt-log { max-height: none; font-size: 14px; }
+body.st-phone #stratum-tools { width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px;
+  padding: 0 0 8px; border-right: none; background: none; overflow: visible; }
+body.st-phone .st-tool-btn { width: 46px; height: 44px; border-radius: 6px; }
+body.st-phone .st-tool-btn svg { width: 24px; height: 24px; }
+body.st-phone .st-tool-btn.st-disabled, body.st-phone .st-tool-gap,
+body.st-phone .st-brush-undo { display: none; }
+body.st-phone .st-swatches { width: 44px; height: 44px; margin: 0 0 0 8px; }
+body.st-phone .st-swatch { width: 27px; height: 27px; }
+body.st-phone input, body.st-phone select, body.st-phone textarea, body.st-phone button { font-size: 16px; }
+body.st-phone #stratum-panel button, body.st-phone .st-dialog button { min-height: 40px; padding: 0 14px;
+  background: #2c2f35; color: inherit; border: 1px solid #3a3e45; border-radius: 4px; }
+body.st-phone #stratum-panel .st-bar-btn { min-height: 0; padding: 0; background: none; border: none; }
+body.st-phone .st-row { min-height: 40px; margin-top: 2px; gap: 10px; }
+body.st-phone .st-row select, body.st-phone .st-dialog select { min-height: 40px; min-width: 0; }
+body.st-phone .st-dialog input[type=number], body.st-phone .st-dialog input[type=text] { min-height: 38px;
+  box-sizing: border-box; min-width: 0; }
+body.st-phone input[type=checkbox] { width: 22px; height: 22px; flex: none; }
+body.st-phone input[type=range] { height: 32px; min-width: 0; }
+body.st-phone .st-brush input[type=color] { width: 56px; height: 36px; }
+body.st-phone .st-label { font-size: 13px; width: 72px; }
+body.st-phone .st-lrow { min-height: 44px; padding: 0 4px; gap: 10px; font-size: 15px; }
+body.st-phone .st-eye { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+body.st-phone .st-eye svg { width: 22px; height: 22px; }
+body.st-phone .st-dialog { position: absolute; left: 0; right: 0; bottom: 0; top: auto; width: auto !important;
+  max-height: 78%; overflow-y: auto; box-sizing: border-box; border-width: 1px 0 0;
+  border-radius: 10px 10px 0 0; padding: 12px 14px 14px; overscroll-behavior: contain; }
+body.st-phone .st-dialog h2 { font-size: 15px; }
+body.st-phone #stratum-tabs { display: flex; flex: none; background: #2a2d33; border-top: 1px solid #3a3e45;
+  padding-bottom: env(safe-area-inset-bottom); }
+.st-tab { flex: 1; height: 48px; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: none; border: none; color: #c9cdd3; font: inherit; font-size: 14px; padding: 0; }
+.st-tab.st-on { color: #fff; background: #33373e; box-shadow: inset 0 2px 0 #6c9ce0; }
+body.st-phone #stratum-tabs, body.st-phone #stratum-tools, body.st-phone .st-sheet-head,
+body.st-phone .st-lrow { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+body.st-phone .st-busy { top: auto; bottom: calc(60px + env(safe-area-inset-bottom));
+  max-width: calc(100% - 32px); box-sizing: border-box; }
+body.st-loading #stratum-tabs { pointer-events: none; opacity: .5; }
+@media (orientation: landscape) {
+  body.st-phone { display: grid; grid-template-columns: calc(58px + env(safe-area-inset-left)) minmax(0, 1fr);
+    grid-template-rows: 40px minmax(0, 1fr); }
+  body.st-phone #stratum-menubar { grid-column: 1 / 3; grid-row: 1; height: 40px; }
+  body.st-phone .st-bar-btn { height: 40px; }
+  body.st-phone .st-menus { top: 41px; bottom: 0; left: calc(59px + env(safe-area-inset-left)); }
+  body.st-phone #stratum-app { grid-column: 2; grid-row: 2; min-width: 0; }
+  body.st-phone #stratum-tabs { grid-column: 1; grid-row: 2; flex-direction: column; border-top: none;
+    border-right: 1px solid #3a3e45; padding: 0 0 0 env(safe-area-inset-left); }
+  body.st-phone .st-tab { height: auto; flex-direction: column; gap: 3px; font-size: 11px; }
+  body.st-phone .st-tab.st-on { box-shadow: inset 2px 0 0 #6c9ce0; }
+  body.st-phone #stratum-panel, body.st-phone .st-dialog { left: auto; top: 0; width: 330px !important;
+    max-width: 72%; max-height: none; border-radius: 0; border-width: 0 0 0 1px; border-style: solid;
+    border-color: #3a3e45; }
+  body.st-phone #stratum-panel > .st-sheet-head { border-radius: 0; }
+  body.st-phone .st-busy { bottom: 12px; }
+}
+"
+  "The page on a phone, and under a finger anywhere.  The page becomes an
+app while the viewer keeps body.st-phone set (a narrow window, or a short
+touch screen): a bar across the top (the menus behind one button, in a
+drawer that leaves the tabs showing, the document's name, Undo and
+Redo), the picture filling everything between,
+and three tabs along the bottom -- Prompt, Tools, Layers -- each raising
+the same panel as a sheet over the picture, so the canvas never changes
+size as sheets come and go.  Dialogs rise from the bottom the same way.
+Held sideways, the tabs stand down the left edge and the sheets come in
+from the right.  Rows are a thumb high and fields are 16px, the size
+below which a phone zooms the page on focus.  body.st-touch, set at the
+first touch at any width, shows the buttons that stand in for a keyboard
+(#stratum-assist).  Nothing here applies without one of the two classes,
+so a desk sees the page as *page-css* draws it.")
 
 (define-object stratum-page (base-html-page)
   :input-slots
@@ -1142,7 +1289,7 @@ body.st-loading #stratum-layers, body.st-loading #stratum-prompt { opacity: .5; 
    (use-ajax? nil)
    (additional-header-content
     (string-append (call-next-method)
-                   (with-lhtml-string () (:style (str *page-css*))))))
+                   (with-lhtml-string () (:style (str *page-css*) (str *phone-css*))))))
 
   :computed-slots
   ((body (with-lhtml-string ()

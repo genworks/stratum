@@ -21,7 +21,7 @@ DOCS=("$@")
 status=0
 for doc in "${DOCS[@]}"; do
   echo "== $doc"
-  timeout 600 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc&s=$SESSION${INVITE:+&invite=$INVITE}" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
+  timeout 900 node "$DIR/probe.js" "$BASE/stratum/?doc=$doc&s=$SESSION${INVITE:+&invite=$INVITE}" "${SHOT_DIR:+$SHOT_DIR/selftest-$doc.png}"
   rc=$?
   echo "== $doc exit $rc"
   [ $rc -ne 0 ] && status=1

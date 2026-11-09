@@ -17,4 +17,5 @@
              #:place-dabs #:paint-dab #:apply-brush-stroke #:undo-stroke!
              #:gate #:configure-gate! #:mint-invite! #:revoke-invite! #:invites-report
              #:run-forms #:configure-agent! #:configure-prompt-log! #:configure-activity-log! #:activity-report #:forget-visitor!
-             #:configure-generator! #:use-generator-model! #:*generator-choosers* #:prompt-document))
+             #:configure-generator! #:use-generator-model! #:*generator-choosers* #:prompt-document
+             #:*admins*))

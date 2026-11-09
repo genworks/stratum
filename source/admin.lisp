@@ -1,0 +1,562 @@
+;; Copyright © 2026 Genworks International
+;;
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as
+;; published by the Free Software Foundation, either version 3 of the
+;; License, or (at your option) any later version.  Distributed WITHOUT
+;; ANY WARRANTY; see <https://www.gnu.org/licenses/agpl-3.0.html>.
+
+(in-package :stratum)
+
+;;
+;; The operator's page, /stratum/admin: who has visited, the sessions
+;; they worked in, what they did by hand and what they asked for, each
+;; prompt with its forms and how they went, and the sessions in memory
+;; with their documents' layers.  It reads what is already kept -- the
+;; gate's roster and counts (invite.lisp), the activity log
+;; (activity.lisp), the prompt log (prompt.lisp) -- and the sessions
+;; table; it keeps nothing of its own and changes nothing.  Only a name
+;; on *admins* gets any of it; anyone else, invited or not, is told there
+;; is no such page.  No invite token is in anything it answers.
+;;
+
+(defvar *admins* nil
+  "Who may see the admin page: a list of invite names; t for anyone the
+gate admits, for a development room with no gate; or nil for no one, the
+default.")
+
+(defparameter *admin-events* 300
+  "How many of a visitor's lines and prompts the admin page is sent
+unless it asks for more.")
+
+(defun admin? (req)
+  "Whether REQ's person may see the admin page."
+  (or (eq *admins* t)
+      (and (consp *admins*)
+           (member (invitee req) *admins* :test #'equal)
+           t)))
+
+(defun query-part (query name)
+  "The value of NAME in QUERY, a query string as the activity log keeps
+it, or nil."
+  (when query
+    (let ((prefix (format nil "~a=" name)))
+      (dolist (pair (uiop:split-string query :separator "&"))
+        (when (and (> (length pair) (length prefix))
+                   (string= prefix pair :end2 (length prefix)))
+          (let ((value (subseq pair (length prefix))))
+            (return (or (ignore-errors (net.aserve:uridecode-string value)) value))))))))
+
+(defun line-kind (line)
+  "What a line of the activity log was: :visit, the page asked for;
+:download; :upload, a picture opened or placed; :asked, a prompt sent;
+:change, anything else done by hand."
+  (let ((door (getf line :door)))
+    (cond ((getf line :upload) :upload)
+          ((member door '("/stratum" "/stratum/") :test #'equal) :visit)
+          ((eq (getf line :method) :get) :download)
+          ((equal door "/stratum/api/prompt") :asked)
+          (t :change))))
+
+;;; The prompt log, read back.
+
+(defun turn-name (turn)
+  "The name of TURN, a prompt's directory in the prompt log."
+  (car (last (pathname-directory turn))))
+
+(defun turn-time (turn)
+  "When the prompt of TURN ended, as the activity log writes times; nil
+for a directory not named as log-turn! names them."
+  (let ((name (turn-name turn)))
+    (and (stringp name) (> (length name) 15) (char= (char name 8) #\-)
+         (every #'digit-char-p (subseq name 0 8))
+         (every #'digit-char-p (subseq name 9 15))
+         (format nil "~a-~a-~aT~a:~a:~aZ" (subseq name 0 4) (subseq name 4 6) (subseq name 6 8)
+                 (subseq name 9 11) (subseq name 11 13) (subseq name 13 15)))))
+
+(defun turn-head (turn)
+  "(:who name :session id :document name) of the prompt in TURN, by the
+first words of its record alone (see turn-who)."
+  (ignore-errors
+   (with-open-file (in (merge-pathnames "turn.sexp" turn) :external-format :utf-8)
+     (with-standard-io-syntax
+       (let ((*read-eval* nil) (*package* (find-package :common-lisp)) (head '()))
+         (when (eql (peek-char t in) #\()
+           (read-char in)
+           (loop
+             (when (eql (peek-char t in) #\)) (return))
+             (let ((key (read in)))
+               (unless (member key '(:who :session :document)) (return))
+               (setf head (list* (read in) key head))))
+           (nreverse head)))))))
+
+(defun read-turn (turn)
+  "The whole record of the prompt in TURN, or nil when it will not
+read.  In the package log-turn! wrote it in, with nothing evaluated."
+  (ignore-errors
+   (with-open-file (in (merge-pathnames "turn.sexp" turn) :external-format :utf-8)
+     (with-standard-io-syntax
+       (let ((*read-eval* nil) (*package* (find-package :common-lisp)))
+         (let ((record (read in)))
+           (and (listp record) (evenp (length record)) record)))))))
+
+(defun logged-turns ()
+  "Every prompt in the prompt log, oldest first, each (:turn name :time
+time :who name :session id :document name)."
+  (when *prompt-log-directory*
+    (sort (loop for turn in (uiop:subdirectories *prompt-log-directory*)
+                when (probe-file (merge-pathnames "turn.sexp" turn))
+                  collect (list* :turn (turn-name turn) :time (turn-time turn) (turn-head turn)))
+          #'string< :key (lambda (turn) (getf turn :turn)))))
+
+(defun turn-directory-named (name)
+  "The directory of the prompt NAME, or nil: found among the log's own,
+so nothing else can be named."
+  (and (stringp name) *prompt-log-directory*
+       (find name (uiop:subdirectories *prompt-log-directory*) :key #'turn-name :test #'equal)))
+
+(defun turn-pictures (dir)
+  "The names of the pictures kept in DIR, a prompt's directory, in the
+order they were made: before, look-1 ..., after."
+  (let ((names (loop for file in (uiop:directory-files dir)
+                     when (equal (pathname-type file) "png") collect (pathname-name file))))
+    (append (and (member "before" names :test #'equal) (list "before"))
+            (sort (remove-if-not (lambda (name) (eql 0 (search "look-" name))) names)
+                  #'< :key (lambda (name) (or (parse-integer name :start 5 :junk-allowed t) 0)))
+            (and (member "after" names :test #'equal) (list "after")))))
+
+(defun read-octets-file (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let ((octets (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (read-sequence octets in)
+      octets)))
+
+(defun turn-picture (turn name)
+  "The PNG octets of picture NAME of the prompt TURN, both as the admin
+page was told them."
+  (let ((dir (turn-directory-named turn)))
+    (unless (and dir (member name (turn-pictures dir) :test #'equal))
+      (error "There is no such picture."))
+    (read-octets-file (merge-pathnames (format nil "~a.png" name) dir))))
+
+;;; What is kept, summed up.
+
+(defun plain-text (value)
+  "VALUE for the page: a string as it is, nil as nil, anything else
+printed."
+  (cond ((null value) nil)
+        ((stringp value) value)
+        (t (let ((*print-readably* nil) (*print-case* :downcase)) (princ-to-string value)))))
+
+(defun plain-number (value)
+  (and (realp value) (if (integerp value) value (float value 1d0))))
+
+(defun session-rollup (lines turns)
+  "The sessions that LINES, a visitor's activity, and TURNS, their
+prompts, name: each (id :first time :last time :requests n :prompts n
+:documents (name ...)), the most recent first."
+  (let ((sessions (make-hash-table :test 'equal)))
+    (flet ((note (id time document count)
+             (when (and (stringp id) (plusp (length id)))
+               (let ((entry (or (gethash id sessions)
+                                (setf (gethash id sessions)
+                                      (list :first time :last time :requests 0 :prompts 0 :documents '())))))
+                 (when (and time (or (null (getf entry :first)) (string< time (getf entry :first))))
+                   (setf (getf entry :first) time))
+                 (when (and time (or (null (getf entry :last)) (string> time (getf entry :last))))
+                   (setf (getf entry :last) time))
+                 (incf (getf entry count))
+                 (when (and (stringp document) (not (member document (getf entry :documents) :test #'equal)))
+                   (setf (getf entry :documents) (append (getf entry :documents) (list document))))
+                 (setf (gethash id sessions) entry)))))
+      (dolist (line lines)
+        (note (query-part (getf line :query) "s") (getf line :time)
+              (query-part (getf line :query) "doc") :requests))
+      (dolist (turn turns)
+        (note (getf turn :session) (getf turn :time) (getf turn :document) :prompts)))
+    (sort (loop for id being the hash-keys of sessions using (hash-value entry)
+                collect (cons id entry))
+          #'string> :key (lambda (entry) (or (getf (cdr entry) :last) "")))))
+
+(defun layer-summary (layer)
+  (let ((kind (the-object layer kind)))
+    (json-object "name" (the-object layer layer-name)
+                 "kind" (string-downcase kind)
+                 "blend" (when (eql kind :raster) (string-downcase (the-object layer blend-mode)))
+                 "opacity" (float (the-object layer opacity) 1d0)
+                 "visible" (json-bool (the-object layer visible?))
+                 "mask" (json-bool (the-object layer has-mask?)))))
+
+(defun document-summary (doc)
+  "DOC and its layers, the bottom one first, for the admin page."
+  (json-object "name" (the-object doc doc-name)
+               "width" (the-object doc doc-width)
+               "height" (the-object doc doc-height)
+               "mode" (string-downcase (the-object doc color-mode))
+               "undo" (length (the-object doc undo-entries))
+               "prompts" (length (the-object doc prompt-log))
+               "layers" (map 'vector #'layer-summary (the-object doc layer-list))))
+
+(defun live-sessions ()
+  "The sessions in memory, the shared one first under the id nil, then
+the most recently touched: each (id touched documents), documents a list
+of summaries, or :busy when a request has the session's lock just now.
+The lock is tried and never waited for, and looking touches no session,
+so none is kept alive by being looked at."
+  (let ((sessions (bt:with-lock-held (*sessions-lock*)
+                    (let ((all '()))
+                      (maphash (lambda (id session) (push (cons id session) all)) *sessions*)
+                      (cons (cons nil *shared-session*)
+                            (sort all #'> :key (lambda (entry) (sess-touched (cdr entry)))))))))
+    (loop for (id . session) in sessions
+          collect (list id (sess-touched session)
+                        (if (bt:acquire-lock (sess-lock session) nil)
+                            (unwind-protect
+                                 (with-session (session)
+                                   (let ((documents '()))
+                                     (maphash (lambda (name doc)
+                                                (push (cons name
+                                                            (handler-case (document-summary doc)
+                                                              (serious-condition (e)
+                                                                (json-object "name" name
+                                                                             "error" (princ-to-string e)))))
+                                                      documents))
+                                              (sess-table session))
+                                     (mapcar #'cdr (sort documents #'string< :key #'car))))
+                              (bt:release-lock (sess-lock session)))
+                            :busy)))))
+
+(defun admin-summary ()
+  "Everyone the roster, the activity log or the prompt log names, summed
+up, and the sessions in memory: a JSON object for the admin page."
+  (let* ((turns (logged-turns))
+         (visitors (make-hash-table :test 'equal))
+         (order '())
+         (whose (make-hash-table :test 'equal)))
+    (flet ((note (key indicator value &key unless-set)
+             (unless (nth-value 1 (gethash key visitors)) (push key order))
+             (unless (and unless-set (getf (gethash key visitors) indicator))
+               (setf (getf (gethash key visitors) indicator) value))))
+      (when (invite-gate?)
+        (dolist (invite (invites-report))
+          (let ((key (visitor-file-name (getf invite :name))))
+            (note key :name (getf invite :name))
+            (note key :invite invite))))
+      (when *activity-directory*
+        (dolist (file (directory (merge-pathnames "*.log" *activity-directory*)))
+          (let* ((key (pathname-name file))
+                 (lines (activity-lines key)))
+            (note key :lines lines)
+            (note key :name (getf (first lines) :who) :unless-set t))))
+      (dolist (turn turns)
+        (let ((key (visitor-file-name (getf turn :who))))
+          (note key :turns (cons turn (getf (gethash key visitors) :turns)))
+          (note key :name (getf turn :who) :unless-set t))))
+    (let ((rows
+            (loop for key in (reverse order)
+                  for entry = (gethash key visitors)
+                  for lines = (getf entry :lines)
+                  for mine = (reverse (getf entry :turns))
+                  for invite = (getf entry :invite)
+                  for sessions = (session-rollup lines mine)
+                  for times = (remove nil (append (mapcar (lambda (line) (getf line :time)) lines)
+                                                  (mapcar (lambda (turn) (getf turn :time)) mine)))
+                  do (dolist (session sessions)
+                       (setf (gethash (car session) whose) (or (getf entry :name) key)))
+                  collect (flet ((kind (kind) (count kind lines :key #'line-kind)))
+                            (json-object
+                             "key" key
+                             "name" (getf entry :name)
+                             "invited" (json-bool invite)
+                             "issued" (plain-text (getf invite :issued))
+                             "uses" (and invite (getf invite :uses))
+                             "seen" (and (integerp (getf invite :last)) (plusp (getf invite :last))
+                                         (utc-stamp (getf invite :last)))
+                             "visits" (kind :visit)
+                             "changes" (kind :change)
+                             "uploads" (kind :upload)
+                             "downloads" (kind :download)
+                             "asked" (kind :asked)
+                             "prompts" (length mine)
+                             "first" (and times (reduce (lambda (a b) (if (string< a b) a b)) times))
+                             "last" (and times (reduce (lambda (a b) (if (string> a b) a b)) times))
+                             "sessions" (map 'vector
+                                             (lambda (session)
+                                               (json-object "id" (car session)
+                                                            "first" (getf (cdr session) :first)
+                                                            "last" (getf (cdr session) :last)
+                                                            "requests" (getf (cdr session) :requests)
+                                                            "prompts" (getf (cdr session) :prompts)
+                                                            "documents" (coerce (getf (cdr session) :documents)
+                                                                                'vector)))
+                                             sessions))))))
+      (json-object
+       "now" (utc-stamp)
+       "server" (json-object "lisp" (format nil "~a ~a" (lisp-implementation-type)
+                                            (lisp-implementation-version))
+                             "heapUsed" (heap-used-fraction)
+                             "gate" (json-bool (invite-gate?))
+                             "activityLog" (json-bool *activity-directory*)
+                             "promptLog" (json-bool *prompt-log-directory*)
+                             "promptsKept" (length turns)
+                             "promptLimit" *prompt-log-turns*
+                             "idleSeconds" *session-idle-seconds*)
+       ;; the most recently active first; then those with nothing
+       ;; recorded, by when their link was last used (an admin who only
+       ;; looks is among these)
+       "visitors" (coerce (stable-sort rows #'string>
+                                       :key (lambda (row)
+                                              (format nil "~a ~a" (or (gethash "last" row) "")
+                                                      (or (gethash "seen" row) ""))))
+                          'vector)
+       "sessions" (map 'vector
+                       (lambda (session)
+                         (destructuring-bind (id touched documents) session
+                           (json-object "id" id
+                                        "who" (and id (gethash id whose))
+                                        "touched" (utc-stamp touched)
+                                        "busy" (json-bool (eq documents :busy))
+                                        "documents" (if (eq documents :busy)
+                                                        (vector)
+                                                        (coerce documents 'vector)))))
+                       (live-sessions))))))
+
+;;; One visitor, line by line.
+
+(defun line-json (line)
+  "A line of the activity log for the admin page."
+  (let ((door (or (getf line :door) ""))
+        (query (getf line :query)))
+    (json-object "time" (getf line :time)
+                 "kind" (string-downcase (line-kind line))
+                 "door" (subseq door (1+ (or (position #\/ door :from-end t) -1)))
+                 "session" (query-part query "s")
+                 "document" (query-part query "doc")
+                 "query" query
+                 "body" (plain-text (getf line :body))
+                 "file" (getf line :upload)
+                 "bytes" (plain-number (getf line :bytes)))))
+
+(defun turn-json (turn)
+  "The prompt of TURN, an entry of logged-turns, with the whole of its
+record: the words, who planned the forms (\"no planner\" for the Generate
+dialog's, which no model wrote), each form with how it went, the reply,
+and the names of its pictures."
+  (let* ((dir (turn-directory-named (getf turn :turn)))
+         (record (and dir (read-turn dir)))
+         (outcome (let ((outcome (getf record :outcome))) (and (listp outcome) outcome))))
+    (json-object "time" (getf turn :time)
+                 "kind" "prompt"
+                 "turn" (getf turn :turn)
+                 "session" (plain-text (getf turn :session))
+                 "document" (plain-text (getf turn :document))
+                 "prompt" (plain-text (getf record :prompt))
+                 "model" (plain-text (getf record :model))
+                 "byHand" (json-bool (equal (getf record :model) "no planner"))
+                 "effort" (plain-text (getf record :effort))
+                 "seconds" (plain-number (getf record :seconds))
+                 "rounds" (plain-number (getf record :rounds))
+                 "failure" (plain-text (getf record :failure))
+                 "reply" (plain-text (getf outcome :reply))
+                 "ok" (json-bool (getf outcome :ok))
+                 "declined" (json-bool (getf outcome :declined))
+                 "stopped" (json-bool (getf outcome :stopped))
+                 "results" (map 'vector
+                                (lambda (result)
+                                  (json-object "form" (plain-text (getf result :form))
+                                               "ok" (json-bool (getf result :ok))
+                                               "value" (plain-text (getf result :value))
+                                               "error" (plain-text (getf result :error))))
+                                (let ((results (getf outcome :results)))
+                                  (and (listp results) (remove-if-not #'listp results))))
+                 "state" (plain-text (getf record :state))
+                 "looks" (map 'vector #'plain-text (let ((looks (getf record :looks))) (and (listp looks) looks)))
+                 "pictures" (coerce (and dir (turn-pictures dir)) 'vector))))
+
+(defun visitor-events (key &optional (limit *admin-events*))
+  "The last LIMIT things kept of the visitor whose file is KEY, oldest
+first: the lines of their activity file and their prompts in the prompt
+log, by time.  (values events how-many-in-all)."
+  (let* ((lines (activity-lines key))
+         (turns (remove-if-not (lambda (turn) (equal key (visitor-file-name (getf turn :who))))
+                               (logged-turns)))
+         (events (stable-sort (append (mapcar (lambda (line) (cons (or (getf line :time) "") line)) lines)
+                                      (mapcar (lambda (turn) (cons (or (getf turn :time) "") turn)) turns))
+                              #'string< :key #'car)))
+    (values (mapcar (lambda (event)
+                      (if (getf (cdr event) :turn) (turn-json (cdr event)) (line-json (cdr event))))
+                    (last events (max 1 limit)))
+            (length events))))
+
+(defun kept-upload-path (key file)
+  "The path of FILE, a picture kept of the visitor whose file is KEY, by
+its listed name, or an error."
+  (unless (and (stringp key) (stringp file)
+               (find file (visitor-uploads key) :key (lambda (upload) (getf upload :file)) :test #'equal))
+    (error "There is no such picture."))
+  (merge-pathnames file *activity-directory*))
+
+;;; The doors.
+
+(defun handle-admin-summary (req)
+  "GET /stratum/api/admin: {now, server, visitors, sessions}."
+  (declare (ignore req))
+  (json-string (admin-summary)))
+
+(defun handle-admin-visitor (req)
+  "GET /stratum/api/admin/visitor?who=KEY&limit=N: {who, total, events},
+the last N things kept of one visitor, oldest first."
+  (let ((key (net.aserve:request-query-value "who" req :post nil))
+        (limit (or (ignore-errors
+                    (parse-integer (net.aserve:request-query-value "limit" req :post nil)))
+                   *admin-events*)))
+    (unless (and (stringp key) (plusp (length key)) (equal key (visitor-file-name key)))
+      (error "Say which visitor: ?who= as the summary names them."))
+    (multiple-value-bind (events total) (visitor-events key (max 1 (min limit 20000)))
+      (json-string (json-object "who" key "total" total "events" (coerce events 'vector))))))
+
+(defun handle-admin-picture (req)
+  "GET /stratum/api/admin/picture?turn=NAME&name=before: a picture kept
+with a prompt."
+  (turn-picture (net.aserve:request-query-value "turn" req :post nil)
+                (net.aserve:request-query-value "name" req :post nil)))
+
+(defun handle-admin-upload (req)
+  "GET /stratum/api/admin/upload?who=KEY&file=NAME&size=N: a PNG of a
+picture a visitor opened, N pixels on its longer side; an empty answer
+when it cannot be shown."
+  (let ((size (or (ignore-errors (parse-integer (net.aserve:request-query-value "size" req :post nil)))
+                  *upload-preview-size*)))
+    (or (let ((*upload-preview-size* (max 40 (min size 1280))))
+          (upload-preview (kept-upload-path (net.aserve:request-query-value "who" req :post nil)
+                                            (net.aserve:request-query-value "file" req :post nil))))
+        (make-array 0 :element-type '(unsigned-byte 8)))))
+
+(defparameter *admin-css* "
+html, body { margin: 0; background: #1b1d21; color: #d8dbe0;
+  font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+#admin { max-width: 1100px; margin: 0 auto; padding: 12px 16px 60px; }
+h1 { font-size: 18px; margin: 4px 0; }
+h2 { font-size: 14px; margin: 22px 0 8px; color: #c9cdd3; text-transform: uppercase; letter-spacing: .06em; }
+a { color: #8fb8f0; }
+button { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; border-radius: 4px;
+  padding: 5px 12px; font: inherit; cursor: pointer; }
+button:hover { background: #3b5f93; }
+.ad-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ad-head h1 { flex: 1; }
+.ad-dim { color: #8a9099; }
+.ad-mono { font: 12px/1.45 ui-monospace, Menlo, monospace; }
+.ad-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; color: #9aa0a8; font-size: 13px; }
+.ad-facts b { color: #d8dbe0; font-weight: 600; }
+.ad-warn { color: #e0b070; }
+.ad-bad { color: #e07a7a; }
+.ad-card { background: #222429; border: 1px solid #33363c; border-radius: 6px; margin: 8px 0; }
+.ad-card > summary { padding: 9px 12px; cursor: pointer; list-style: none; display: flex;
+  flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.ad-card > summary::-webkit-details-marker { display: none; }
+.ad-card > summary::before { content: '\\25b8'; color: #8a9099; }
+.ad-card[open] > summary::before { content: '\\25be'; }
+.ad-card[open] > summary { border-bottom: 1px solid #33363c; }
+.ad-name { font-weight: 600; font-size: 15px; }
+.ad-body { padding: 8px 12px 12px; }
+.ad-session { border-left: 3px solid #3b5f93; padding: 2px 0 2px 10px; margin: 12px 0 4px; }
+.ad-session.ad-none { border-color: #4a5058; }
+.ad-pill { display: inline-block; border-radius: 9px; padding: 0 8px; font-size: 11px; line-height: 18px;
+  background: #2c2f35; color: #c9cdd3; border: 1px solid #3a3e45; white-space: nowrap; }
+.ad-pill.ad-live { background: #1f3a2a; border-color: #2f6b45; color: #9fd8b0; }
+.ad-pill.ad-hand { background: #3a2f1f; border-color: #6b5530; color: #e0c088; }
+.ad-pill.ad-model { background: #1f2b3a; border-color: #3b5f93; color: #a8c8f0; }
+.ad-event { display: grid; grid-template-columns: 140px 78px 1fr; gap: 2px 10px; padding: 5px 0;
+  border-top: 1px solid #2c2f35; align-items: baseline; }
+.ad-event > .ad-time { color: #8a9099; font-size: 12px; white-space: nowrap; }
+.ad-what { min-width: 0; overflow-wrap: anywhere; }
+.ad-words { border-left: 3px solid #4a8fe0; background: #1f2b3a; color: #e8eaed; padding: 3px 8px;
+  margin: 3px 0; white-space: pre-wrap; }
+.ad-reply { border-left: 3px solid #8a9099; padding: 3px 8px; margin: 3px 0; white-space: pre-wrap; }
+.ad-forms { border-left: 3px solid #5aa469; background: #17181b; padding: 3px 8px; margin: 3px 0; }
+.ad-form { padding-left: 1.4em; text-indent: -1.4em; white-space: pre-wrap; }
+.ad-form::before { content: '\\2713\\a0'; color: #5aa469; }
+.ad-form.ad-failed::before { content: '\\2717\\a0'; color: #e07a7a; }
+.ad-form .ad-value { color: #8a9099; }
+.ad-form.ad-failed .ad-value { color: #e07a7a; }
+details.ad-more > summary { cursor: pointer; color: #8a9099; font-size: 12px; }
+details.ad-more > pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #c9cdd3;
+  background: #17181b; padding: 6px 8px; border-radius: 3px; max-height: 50vh; overflow: auto; }
+.ad-pictures { display: flex; flex-wrap: wrap; gap: 8px; margin: 5px 0; }
+.ad-pictures figure { margin: 0; }
+.ad-pictures img { display: block; max-width: 180px; max-height: 140px; border: 1px solid #3a3e45;
+  background: #17181b; border-radius: 3px; }
+.ad-pictures figcaption { font-size: 11px; color: #8a9099; text-align: center; }
+table.ad-layers { border-collapse: collapse; margin: 4px 0 10px; font-size: 13px; }
+table.ad-layers td, table.ad-layers th { padding: 2px 12px 2px 0; text-align: left; white-space: nowrap; }
+table.ad-layers th { color: #8a9099; font-weight: 400; font-size: 11px; }
+.ad-hidden { color: #6b7079; }
+.ad-scroll { overflow-x: auto; }
+@media (max-width: 640px) {
+  #admin { padding: 10px 12px 60px; }
+  .ad-event { grid-template-columns: 1fr auto; }
+  .ad-event > .ad-what { grid-column: 1 / -1; }
+  .ad-pictures img { max-width: 44vw; }
+}
+"
+  "The admin page: one column of cards, at a desk or on a phone.")
+
+(define-object stratum-admin-page (base-html-page)
+  :input-slots
+  ((title "Stratum admin")
+   (use-x3dom? nil)
+   (use-svgpanzoom? nil)
+   (use-tailwind? nil)
+   (use-ajax? nil)
+   (additional-header-content
+    (string-append (call-next-method)
+                   (with-lhtml-string () (:style (str *admin-css*))))))
+
+  :computed-slots
+  ((body (with-lhtml-string ()
+           (:div :id "admin" "Loading...")
+           (:script :src (format nil "/stratum/admin.js?v=~a"
+                                 (file-write-date (merge-pathnames "web/admin.js" *stratum-dir*)))
+                    "")))))
+
+(defun serve-admin (req ent content-type fn)
+  "FN, a function of REQ answering a string or octets, for someone on
+*admins*; anyone else is told what the prefix door tells them of a path
+nobody published.  No session's lock is taken, and no line is written in
+the activity log."
+  (if (not (admin? req))
+      (reply-text req ent net.aserve:*response-not-found* "Not found." :drain *refused-body-bytes*)
+      (let ((result nil) (failure nil))
+        (handler-case (setf result (funcall fn req))
+          (serious-condition (e) (setf failure (princ-to-string e))))
+        (if failure
+            (reply-text req ent net.aserve:*response-internal-server-error* failure)
+            (net.aserve:with-http-response (req ent :content-type content-type)
+              (no-store! req)
+              (net.aserve:with-http-body (req ent)
+                (let ((s (net.aserve:request-reply-stream req)))
+                  (if (stringp result)
+                      (write-string result s)
+                      (write-sequence result s)))))))))
+
+(defun publish-admin! (server host)
+  "The admin page and its doors: behind the invite gate like every door
+under /stratum, and then for *admins* alone."
+  (flet ((pub (path content-type fn)
+           (net.aserve:publish :path path :server server :host host
+                               :content-type content-type
+                               :function (lambda (req ent)
+                                           (when (door-admits? req ent *max-request-bytes*)
+                                             (serve-admin req ent content-type fn))))))
+    (pub "/stratum/admin" "text/html"
+         (lambda (req) (declare (ignore req))
+           (the-object (make-object 'stratum-admin-page) main-sheet)))
+    (pub "/stratum/admin.js" "application/javascript"
+         (lambda (req) (declare (ignore req))
+           (uiop:read-file-string (merge-pathnames "web/admin.js" *stratum-dir*))))
+    (pub "/stratum/api/admin" "application/json" #'handle-admin-summary)
+    (pub "/stratum/api/admin/visitor" "application/json" #'handle-admin-visitor)
+    (pub "/stratum/api/admin/picture" "image/png" #'handle-admin-picture)
+    (pub "/stratum/api/admin/upload" "image/png" #'handle-admin-upload)))
+
+(pushnew 'publish-admin! *stratum-publishers*)

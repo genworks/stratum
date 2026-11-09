@@ -2947,6 +2947,214 @@ open there is no one to delete for."
         (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
         (net.aserve:shutdown :server server)))))
 
+(defun test-admin ()
+  "The admin page over a real connection, behind a gate with two
+invites, one of them an admin's: the admin sees every visitor summed up;
+one visitor's lines and prompts, with the forms run by hand and the
+planned ones and how each went; the pictures kept with them; and the
+sessions in memory with their layers.  Anyone else is told there is no
+such page.  Nothing it answers has a token in it, and looking touches
+no session and writes no line."
+  (let* ((port (free-port))
+         ;; UTF-8 on the wire, as the server the rooms start has it: a
+         ;; visitor's words and the page's script are not all Latin-1
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"
+                                   :external-format :utf-8))
+         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (old-admins *admins*)
+         (stamp (get-universal-time))
+         (roster (format nil "/tmp/stratum-admin-roster-~d.sexp" stamp))
+         (dir (format nil "/tmp/stratum-admin-~d/" stamp))
+         (prompts (format nil "/tmp/stratum-admin-prompts-~d/" stamp))
+         (id "adm-s1")
+         (doors '("/stratum/admin" "/stratum/admin.js" "/stratum/api/admin"
+                  "/stratum/api/admin/visitor?who=Bob" "/stratum/api/admin/picture?turn=x&name=before"
+                  "/stratum/api/admin/upload?who=Bob&file=x"))
+         (picture (let* ((w 300) (h 200) (rgba (make-rgba w h)))
+                    (dotimes (i (* w h)) (replace rgba (list (mod i 256) 90 160 255) :start1 (* 4 i)))
+                    (png-octets rgba w h)))
+         (answered '()))
+    (labels ((fetch (token path)
+               ;; every answer kept, as text one char a byte
+               (let ((answer (raw-get port (format nil "~a~:[?~;&~]invite=~a" path (find #\? path) token))))
+                 (push (map 'string #'code-char (second answer)) answered)
+                 answer))
+             (json (token path)
+               (destructuring-bind (code body) (fetch token path)
+                 (list code (ignore-errors (yason:parse (octets-string body))))))
+             (codes (token) (mapcar (lambda (door) (first (fetch token door))) doors))
+             (named (name rows key)
+               (find name rows :key (lambda (row) (gethash key row)) :test #'equal))
+             (show (table)
+               (and (hash-table-p table)
+                    (loop for key being the hash-keys of table using (hash-value value)
+                          collect key collect value))))
+      (unwind-protect
+           (progn
+             (with-open-file (out roster :direction :output :if-exists :supersede)
+               (format out "~s~%~s~%" '("alicetoken" "Alice" "2026-11-09") '("bobtoken" "Bob" "2026-11-09")))
+             ;; set globally, since the doors run in the server's threads
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
+                   *admins* '("Alice"))
+             (configure-gate! :invites-file roster)
+             (configure-activity-log! :directory dir)
+             (configure-prompt-log! :directory prompts)
+             (publish-door server nil "/stratum/" "text/html" (lambda (req) (declare (ignore req)) "<p>page</p>"))
+             (publish-door server nil "/stratum/api/layers" "application/json"
+                           (lambda (req) (gwl:request-body-text req) "{}"))
+             (publish-door server nil "/stratum/api/open" "application/json"
+                           (lambda (req) (request-octets req) "{}") :upload? t)
+             (publish-admin! server nil)
+             ;; Bob visits, changes something by hand and opens a picture ...
+             (raw-get port "/stratum/?invite=bobtoken")
+             (raw-post port (format nil "/stratum/api/layers?invite=bobtoken&s=~a&doc=parity" id)
+                       (map '(vector (unsigned-byte 8)) #'char-code "{\"op\":\"add\"}") "application/json")
+             (raw-post port (format nil "/stratum/api/open?invite=bobtoken&s=~a" id) picture)
+             (lines-written "Bob" 3)
+             (let* ((session (session-for id))
+                    (doc (with-session (session)
+                           (let ((stratum-api:*document* nil))
+                             (stratum-api:use-document "parity")
+                             stratum-api:*document*)))
+                    (touched (- (get-universal-time) 100)))
+               ;; ... then runs a form by hand and asks for something
+               (with-session (session)
+                 (prompt-document doc "generate" :session id :who "Bob" :forms "(select-rect 10 10 20 20)")
+                 (call-with-stub-model
+                  (list (format nil "Looking.~%```lisp~%(look 0 0 1000 800)~%```")
+                        (format nil "Done.~%```lisp~%(select-rect 40 40 60 60)~%```"))
+                  (lambda (agent requests)
+                    (declare (ignore requests))
+                    (let ((*agent* agent))
+                      (prompt-document doc "make it blue — please" :session id :who "Bob")))))
+               (setf (sess-touched session) touched)
+               (check "anyone but an admin, invited or not, is told there is no such page"
+                      (and (equal (codes "bobtoken") (make-list 6 :initial-element 404))
+                           (equal (codes "nobody") (make-list 6 :initial-element 403))))
+               (let ((page (fetch "alicetoken" "/stratum/admin"))
+                     (script (fetch "alicetoken" "/stratum/admin.js")))
+                 (check "an admin gets the page and its script"
+                        (and (eql 200 (first page))
+                             (search "/stratum/admin.js?v=" (octets-string (second page)))
+                             (eql 200 (first script))
+                             (search "/stratum/api/admin" (octets-string (second script))))
+                        (list (first page) (first script))))
+               (let* ((summary (json "alicetoken" "/stratum/api/admin"))
+                      (visitors (and (second summary) (gethash "visitors" (second summary))))
+                      (bob (named "Bob" visitors "name"))
+                      (alice (named "Alice" visitors "name"))
+                      (worked (and bob (gethash "sessions" bob)))
+                      (live (and (second summary) (named id (gethash "sessions" (second summary)) "id")))
+                      (document (and live (first (gethash "documents" live)))))
+                 (check "the summary counts a visitor's visits, changes, uploads and prompts"
+                        (and (eql 200 (first summary)) bob (eq (gethash "invited" bob) t)
+                             (equal (mapcar (lambda (key) (gethash key bob))
+                                            '("visits" "changes" "uploads" "downloads" "asked" "prompts"))
+                                    '(1 1 1 0 0 2)))
+                        (list (first summary) (show bob)))
+                 (check "and the session they worked in, with its requests, prompts and documents"
+                        (and (= 1 (length worked))
+                             (equal (gethash "id" (first worked)) id)
+                             (eql 2 (gethash "requests" (first worked)))
+                             (eql 2 (gethash "prompts" (first worked)))
+                             (equal (gethash "documents" (first worked)) '("parity")))
+                        (mapcar #'show worked))
+                 (check "a session in memory is named for whose it is, with its documents' layers"
+                        (and live (equal (gethash "who" live) "Bob") (not (gethash "busy" live))
+                             document (equal (gethash "name" document) "parity")
+                             (eql 2 (gethash "prompts" document))
+                             (= (length (gethash "layers" document)) (length (the-object doc layer-list)))
+                             (every (lambda (layer)
+                                      (and (stringp (gethash "name" layer)) (stringp (gethash "kind" layer))))
+                                    (gethash "layers" document)))
+                        (list (show live) (show document)))
+                 (check "the admin's own looking is no visit and leaves no line"
+                        (and alice (eql 0 (gethash "visits" alice)) (null (activity-lines "Alice")))
+                        (show alice))
+                 (check "the visitor with something recorded is listed ahead of the admin who only looked"
+                        (and bob alice (< (position bob visitors) (position alice visitors)))
+                        (mapcar (lambda (row) (gethash "name" row)) visitors)))
+               (let* ((timeline (json "alicetoken" "/stratum/api/admin/visitor?who=Bob"))
+                      (events (and (second timeline) (gethash "events" (second timeline))))
+                      (kinds (mapcar (lambda (event) (gethash "kind" event)) events))
+                      (change (named "change" events "kind"))
+                      (upload (named "upload" events "kind"))
+                      (turns (remove "prompt" events :key (lambda (event) (gethash "kind" event))
+                                                     :test-not #'equal))
+                      (by-hand (first turns))
+                      (planned (second turns)))
+                 (check "a visitor's lines and prompts come oldest first"
+                        (and (eql 200 (first timeline)) (eql 5 (gethash "total" (second timeline)))
+                             (equal (remove "prompt" kinds :test #'equal) '("visit" "change" "upload"))
+                             (= 2 (length turns)))
+                        kinds)
+                 (check "a change by hand keeps its door, session, document and body"
+                        (and change (equal (gethash "door" change) "layers")
+                             (equal (gethash "session" change) id)
+                             (equal (gethash "document" change) "parity")
+                             (equal (gethash "body" change) "{\"op\":\"add\"}"))
+                        (show change))
+                 (check "forms run by hand are marked so, each with how it went"
+                        (and by-hand (eq (gethash "byHand" by-hand) t)
+                             (equal (gethash "prompt" by-hand) "generate")
+                             (equal (gethash "session" by-hand) id)
+                             (= 1 (length (gethash "results" by-hand)))
+                             (search "select-rect" (gethash "form" (first (gethash "results" by-hand))))
+                             (eq (gethash "ok" (first (gethash "results" by-hand))) t))
+                        (show by-hand))
+                 (check "a planned prompt has its words, its forms, the reply and its pictures"
+                        (and planned (not (gethash "byHand" planned))
+                             (equal (gethash "prompt" planned) "make it blue — please")
+                             (eql 2 (gethash "rounds" planned))
+                             (= 2 (length (gethash "results" planned)))
+                             (search "Done." (gethash "reply" planned))
+                             (equal (gethash "pictures" planned) '("before" "look-1" "after")))
+                        (show planned))
+                 (let ((shot (fetch "alicetoken" (format nil "/stratum/api/admin/picture?turn=~a&name=look-1"
+                                                         (gethash "turn" planned))))
+                       (small (fetch "alicetoken" (format nil "/stratum/api/admin/upload?who=Bob&file=~a&size=64"
+                                                          (net.aserve:uriencode-string (gethash "file" upload))))))
+                   (check "the pictures kept with a prompt, and a small one of an upload"
+                          (and (eql 200 (first shot)) (png-octets-p (second shot))
+                               (eql 200 (first small)) (png-octets-p (second small))
+                               (multiple-value-bind (rgba w h) (read-png (second small))
+                                 (declare (ignore rgba))
+                                 (and (= w 64) (<= h 64))))
+                          (list (first shot) (first small))))
+                 (let ((asked (mapcar (lambda (path) (first (fetch "alicetoken" path)))
+                                      (list "/stratum/api/admin/picture?turn=..&name=before"
+                                            (format nil "/stratum/api/admin/picture?turn=~a&name=turn"
+                                                    (gethash "turn" planned))
+                                            "/stratum/api/admin/upload?who=Bob&file=Bob.log"
+                                            (format nil "/stratum/api/admin/upload?who=Alice&file=~a"
+                                                    (net.aserve:uriencode-string (gethash "file" upload)))
+                                            "/stratum/api/admin/visitor?who=..%2FBob"))))
+                   (check "nothing outside the logs can be named, nor one visitor's picture as another's"
+                          (equal asked (make-list 5 :initial-element 500)) asked)))
+               (check "no token is in anything the doors answered"
+                      (and (> (length answered) 20)
+                           (notany (lambda (text) (or (search "alicetoken" text) (search "bobtoken" text)))
+                                   answered)))
+               (check "looking touched no session" (= (sess-touched session) touched)
+                      (- (sess-touched session) touched)))
+             (setf *admins* nil)
+             (check "with no admin named, there is no page for anyone"
+                    (equal (codes "alicetoken") (make-list 6 :initial-element 404)))
+             (setf *admins* '("Alice")
+                   *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (check "with the gate open, a list of names admits no one"
+                    (equal (codes "x") (make-list 6 :initial-element 404)))
+             (setf *admins* t)
+             (check "and t admits whoever the gate does"
+                    (eql 200 (first (fetch "x" "/stratum/api/admin")))))
+        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts
+              *admins* old-admins)
+        (bt:with-lock-held (*sessions-lock*) (remhash id *sessions*))
+        (when (probe-file roster) (delete-file roster))
+        (dolist (tree (list dir prompts))
+          (when (probe-file tree) (uiop:delete-directory-tree (uiop:ensure-directory-pathname tree) :validate t)))
+        (net.aserve:shutdown :server server)))))
+
 (defun test-uploads ()
   "The doors over a real connection, on a server of their own: a body
 comes through byte for byte as octets and no string; an upload over the
@@ -4169,7 +4377,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

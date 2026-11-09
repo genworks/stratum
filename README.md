@@ -465,6 +465,37 @@ per application; `(stratum:gate)` hands it to that package's own
 functions, so several applications on one server are run the same way:
 `(invite-gate:mint-invite! (stratum:gate) "Name")`.
 
+### The admin page
+
+`(setf stratum:*admins* '("Name"))` gives the people invited under
+those names a page at `/stratum/admin` that sums up the two records
+above with the invites and the sessions in memory. It lists every
+visitor, the most recently active first, with their visits, prompts,
+changes made by hand, uploads and sessions; an open visitor shows
+what they did in order, session by session: each request made by hand
+with its door, document and body, each picture they opened, and each
+prompt with its words, the forms that ran and how each went (a form
+that failed is marked with its error), the reply, and the pictures
+kept with it. A prompt a model planned names the model; forms sent
+from the Generate dialog, which no model plans, are marked "by hand".
+Below the visitors, each session in memory shows whose it is, when it
+was last touched, and its documents with their size, mode, undo depth
+and layers (name, kind, blend mode, opacity, mask, hidden or not).
+
+The page only reads. It takes no session's lock, so it never waits on
+or holds up someone's request; a session that is busy says so. Looking
+writes no line in the activity log and keeps no session alive. No
+invite token is in anything it answers. What it can show is what the
+logs hold: with the prompt log or the activity log off, the page says
+which, and that half is empty.
+
+`*admins*` is `nil` by default, and then there is no such page: to a
+visitor who is not an admin, `/stratum/admin` and its doors under
+`/stratum/api/admin` answer 404 like any path never published (someone
+with no invite gets the gate's refusal, as everywhere else). A list of
+names needs the invite gate, since the names are the invites'; `t`
+admits whoever the gate does, for a room on one's own machine.
+
 The menu bar is the one a classic image editor has, in its usual order
 with its usual items and keys: File, Edit, Image, Layer, Select,
 Filter, View, Window and Help. What is not built yet shows disabled,

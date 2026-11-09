@@ -23,4 +23,5 @@
   (:file "source/ora-document") (:file "source/invite")
   (:file "source/activity") (:file "source/web") (:file "source/api")
   (:file "source/generate") (:file "source/prompt")
-  (:file "source/visitor") (:file "source/stubs")))
+  (:file "source/visitor") (:file "source/admin")
+  (:file "source/stubs")))

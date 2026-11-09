@@ -29,7 +29,7 @@
            #:add-layer #:delete-layer #:duplicate-layer #:move-layer #:merge-down #:flatten
            #:set-layer #:set-mask
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
-           #:invert-selection #:feather #:contract-selection #:expand-selection #:selection #:look #:generate-fill #:generate-layer #:generate-picture
+           #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:selection #:look #:generate-fill #:generate-layer #:generate-picture
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste #:cut-out
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
@@ -47,7 +47,7 @@
   '(documents describe-document document-info layers layer-info look generate-fill generate-layer generate-picture
     add-layer delete-layer duplicate-layer move-layer merge-down flatten set-layer set-mask
     select-rect select-polygon select-wand select-all select-none invert-selection feather
-    contract-selection expand-selection selection
+    contract-selection expand-selection refine-selection selection
     fill-selection clear-selection paint gradient move-pixels transform copy cut paste cut-out
     levels curves hue-saturation gaussian-blur unsharp-mask add-noise
     crop image-size canvas-size rotate color-mode undo redo set-history-source
@@ -342,6 +342,14 @@ picture's edge."
   "The selection's edge moved PIXELS out."
   (stratum::expand-selection! (doc) pixels)
   (selection-result))
+
+(defun refine-selection (&key (radius 8) layer)
+  "The selection's edge moved onto the subject's own outline, judged by
+color within RADIUS pixels either side of where it is now, on LAYER (the
+composite when nil).  The edge comes out hard: feather after."
+  (selecting (lambda ()
+               (stratum::refine-selection! (doc) :radius radius
+                                           :layer (and layer (layer-of layer))))))
 
 (defun select-all ()
   "Everything selected."

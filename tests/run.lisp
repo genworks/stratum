@@ -971,6 +971,53 @@ mean square, weighted by coverage."
                                    2))))
             (incf weight a)))))))
 
+(defun refine-card (w h &key (wobble 7) (points 24) (seed 5) (noise 20)
+                          (above '(170 200 215)) (below '(230 120 40))
+                          (left '(180 150 150)) (right '(150 170 155)))
+  "A subject for Refine Edge: a blob whose radius swings with the angle,
+ABOVE's color in its top half and BELOW's in the bottom, on a background
+LEFT's on the left and RIGHT's on the right, all on NOISE levels of
+noise, the edge pixels mixed in linear light by their coverage.  It is
+selected by a polygon of POINTS points, each off the outline by up to
+WOBBLE pixels, as one drawn by eye.  The document and the true mask, 255
+where the subject covers half a pixel or more."
+  (let* ((pixels (make-rgba w h))
+         (truth (make-array (* w h) :element-type '(unsigned-byte 8)))
+         (jitter (test-noise (* 3 w h) seed))
+         (cx (/ w 2d0)) (cy (/ h 2d0)) (scale (/ (min w h) 180d0)))
+    (flet ((reach (angle) (* scale (+ 60 (* 15 (sin (* 3 angle))) (* 8 (cos (* 5 angle))))))
+           (linear (level) (srgb->linear (max 0d0 (min 1d0 (/ level 255d0))))))
+      (dotimes (y h)
+        (dotimes (x w)
+          (let ((inside 0) (i (+ x (* y w))))
+            (dotimes (sy 4)
+              (dotimes (sx 4)
+                (let ((dx (- (+ x (/ (+ sx 0.5d0) 4)) cx)) (dy (- (+ y (/ (+ sy 0.5d0) 4)) cy)))
+                  (when (< (sqrt (+ (* dx dx) (* dy dy))) (reach (atan dy dx))) (incf inside)))))
+            (let ((a (/ inside 16d0)))
+              (setf (aref truth i) (if (>= a 0.5d0) 255 0))
+              (loop for c from 0
+                    for s in (if (< y cy) above below)
+                    for b in (if (< x cx) left right)
+                    do (let ((n (* noise (- (/ (aref jitter (+ c (* 3 i))) 255d0) 0.5d0))))
+                         (setf (aref pixels (+ c (* 4 i)))
+                               (unit->byte (linear->srgb (+ (* a (linear (+ s n))) (* (- 1 a) (linear (+ b n)))))))))
+              (setf (aref pixels (+ 3 (* 4 i))) 255)))))
+      (let ((doc (make-file-document "refine" w h pixels))
+            (offsets (test-noise points (1+ seed))))
+        (select-polygon! doc (loop for k below points
+                                   collect (let* ((angle (* 2 +pi+ (/ k points)))
+                                                  (r (+ (reach angle) (* wobble (- (/ (aref offsets k) 127.5d0) 1)))))
+                                             (list (+ cx (* r (cos angle))) (+ cy (* r (sin angle)))))))
+        (values doc truth)))))
+
+(defun selection-misses (doc truth)
+  "How many pixels the selection, taken at half, puts on the other side
+from TRUTH."
+  (let ((mask (getf (the-object doc selection) :mask)))
+    (loop for i below (length truth)
+          count (not (eql (>= (aref mask i) 128) (>= (aref truth i) 128))))))
+
 (defun test-cut-out ()
   "Cut Out: the edge's colors the subject's own, against cards whose
 truth is known; the interior LAYER's own bytes; the same on one thread
@@ -1043,6 +1090,54 @@ and many."
                         (= 1 (getf (getf (first results) :value) :index))
                         (not (getf (second results) :ok))
                         (search "0 to 20" (getf (second results) :error)))
+                   results)))))))
+
+(defun test-refine-selection ()
+  "Refine Edge: a polygon drawn by eye moved onto the outline by color;
+nothing beyond the band touched; the same on one thread and many."
+  (let ((w 240) (h 180))
+    (flet ((refined (radius &rest card)
+             (multiple-value-bind (doc truth) (apply #'refine-card w h card)
+               (let ((before (selection-misses doc truth))
+                     (mask (copy-seq (getf (the-object doc selection) :mask))))
+                 (refine-selection! doc :radius radius)
+                 (values before (selection-misses doc truth) doc mask)))))
+      (multiple-value-bind (before after) (refined 8)
+        (check "a polygon off by up to 7 pixels comes onto the outline: a tenth of the misses"
+               (and (> before 1000) (< after (/ before 10)))
+               (list before after)))
+      (multiple-value-bind (before after) (refined 8 :right '(175 190 200))
+        (check "with a background near the subject's color, a fifth of the misses"
+               (< after (/ before 5))
+               (list before after)))
+      (multiple-value-bind (before after) (refined 12 :wobble 10)
+        (check "a wider band for a rougher polygon"
+               (< after (/ before 10))
+               (list before after)))
+      (multiple-value-bind (before after doc mask) (refined 8)
+        (declare (ignore before after))
+        (let ((now (getf (the-object doc selection) :mask)))
+          (check "deep inside and far outside, the selection stays"
+                 (and (= 255 (aref now (+ 120 (* 90 w))) (aref mask (+ 120 (* 90 w))))
+                      (= 0 (aref now 0) (aref mask 0))
+                      (every (lambda (byte) (or (= byte 0) (= byte 255))) now)))))
+      (let ((many (nth-value 2 (refined 8)))
+            (one (let ((*render-threads* 1)) (nth-value 2 (refined 8)))))
+        (check "one thread and many refine the same"
+               (equalp (getf (the-object many selection) :mask) (getf (the-object one selection) :mask))))
+      (let ((doc (make-file-document "none" w h (make-rgba w h))))
+        (check "with nothing selected, an error in words"
+               (search "outline roughly"
+                       (handler-case (progn (refine-selection! doc) "no error")
+                         (error (e) (princ-to-string e))))))
+      (let ((doc (refine-card w h)))
+        (let ((stratum-api:*document* doc))
+          (let ((results (stratum:run-forms "(refine-selection :radius 6) (refine-selection :radius 500)")))
+            (check "the prompt may refine, and a wild radius is refused in words"
+                   (and (getf (first results) :ok)
+                        (getf (getf (first results) :value) :selection)
+                        (not (getf (second results) :ok))
+                        (search "1 to 100" (getf (second results) :error)))
                    results)))))))
 
 (defun test-floating ()
@@ -3589,7 +3684,7 @@ and comes back again on redo; the undo list before it stays good."
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
-                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-floating test-transform test-resize test-rotate
+                  test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions test-session-locks test-invite test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))

@@ -794,3 +794,199 @@ unchanged.  The new layer's index."
             (let ((spec (the-object doc (new-layer-spec :raster))))
               (when name (setf (getf spec :name) name))
               (the-object doc (add-layer! (plist-merge (list :pixels (doc-pixels doc pixels)) spec))))))))))
+
+;;; Refine Edge (the API's, no menu's): a selection drawn roughly, as a
+;;; polygon by eye, moved onto the subject's own outline.  Within RADIUS
+;;; pixels either side of its edge every pixel is judged by its color,
+;;; against the colors near it that lie surely inside (deeper in than
+;;; RADIUS) and surely outside (farther out): the nearer side wins, by
+;;; the mean of its three closest samples, so that a few of the other
+;;; side's pixels among the samples do not decide it.  A slight lean
+;;; toward the rough edge settles what color cannot.  Then the judgment
+;;; is smoothed, pieces cut off from the sure inside are dropped and
+;;; small holes in it filled.  The edge comes out hard: feather after.
+
+(defparameter *refine-samples* 25
+  "Sample places across a window's side at most: a wider window takes
+every so many pixels.")
+
+(defparameter *refine-lean* 0.15d0
+  "How far the judgment leans toward the rough edge: the share of the
+way to certain at the band's border.")
+
+(defun edge-depths (mask width region)
+  "Over REGION of MASK (WIDTH wide), each pixel's distance across the
+selection's edge, positive inside and negative outside: a plane of
+doubles."
+  (let ((inside (distances-to mask width region (lambda (byte) (not (selected-byte? byte)))))
+        (outside (distances-to mask width region #'selected-byte?)))
+    (declare (type (simple-array double-float (*)) inside outside))
+    (dotimes (k (length inside) inside)
+      (setf (aref inside k) (- (sqrt (aref inside k)) (sqrt (aref outside k)))))))
+
+(defun refine-judgment (colors depth pw ph radius)
+  "Each pixel's side over a PW x PH region, a byte plane, 1 inside and 0
+outside: the sure pixels' by their DEPTH, the band's by their COLORS
+(four bytes a pixel) against the sure ones within twice RADIUS."
+  (declare (type (simple-array (unsigned-byte 8) (*)) colors)
+           (type (simple-array double-float (*)) depth)
+           (type fixnum pw ph)
+           (type double-float radius))
+  (let* ((side (make-array (* pw ph) :element-type '(unsigned-byte 8)))
+         (reach (ceiling (* 2 radius)))
+         (step (max 1 (ceiling (1+ (* 2 reach)) *refine-samples*)))
+         (lean *refine-lean*))
+    (declare (type fixnum reach step) (type double-float lean))
+    (parallel-ranges
+     ph
+     (lambda (start end)
+       (let ((near-in (make-array 3 :element-type 'double-float))
+             (near-out (make-array 3 :element-type 'double-float)))
+         (flet ((keep! (best d)
+                  (declare (type (simple-array double-float (3)) best) (type double-float d))
+                  (cond ((< d (aref best 0))
+                         (setf (aref best 2) (aref best 1) (aref best 1) (aref best 0) (aref best 0) d))
+                        ((< d (aref best 1)) (setf (aref best 2) (aref best 1) (aref best 1) d))
+                        ((< d (aref best 2)) (setf (aref best 2) d))))
+                (mean (best)
+                  (declare (type (simple-array double-float (3)) best))
+                  (let ((sum 0d0) (count 0))
+                    (declare (type double-float sum) (type fixnum count))
+                    (dotimes (j 3)
+                      (when (< (aref best j) 1d30) (incf sum (aref best j)) (incf count)))
+                    (and (plusp count) (sqrt (/ sum count))))))
+           (loop for y of-type fixnum from start below end
+                 do (dotimes (x pw)
+                      (let* ((k (+ x (* y pw))) (s (aref depth k)))
+                        (declare (type fixnum k) (type double-float s))
+                        (cond ((> s radius) (setf (aref side k) 1))
+                              ((< s (- radius)) (setf (aref side k) 0))
+                              (t
+                               (fill near-in 1d31)
+                               (fill near-out 1d31)
+                               (let ((o (* 4 k)))
+                                 (declare (type fixnum o))
+                                 (loop for sy of-type fixnum from (max 0 (- y reach)) to (min (1- ph) (+ y reach)) by step
+                                       do (loop for sx of-type fixnum from (max 0 (- x reach)) to (min (1- pw) (+ x reach)) by step
+                                                do (let* ((j (+ sx (* sy pw))) (there (aref depth j)))
+                                                     (declare (type fixnum j) (type double-float there))
+                                                     (when (> (abs there) radius)
+                                                       (let ((d 0d0) (p (* 4 j)))
+                                                         (declare (type double-float d) (type fixnum p))
+                                                         (dotimes (c 4)
+                                                           (let ((e (float (- (aref colors (+ o c)) (aref colors (+ p c))) 1d0)))
+                                                             (incf d (* e e))))
+                                                         (keep! (if (plusp there) near-in near-out) d)))))))
+                               (let ((in (mean near-in)) (out (mean near-out)))
+                                 (setf (aref side k)
+                                       (if (and in out)
+                                           (if (> (+ (/ (+ out 1d-6) (+ in out 2d-6)) (* lean (/ s radius))) 0.5d0) 1 0)
+                                           (if (plusp s) 1 0)))))))))))))
+    side))
+
+(defun smooth-sides (side depth pw ph radius)
+  "SIDE with each band pixel (DEPTH within RADIUS) the majority of the
+three by three around it: fresh bytes."
+  (declare (type (simple-array (unsigned-byte 8) (*)) side)
+           (type (simple-array double-float (*)) depth)
+           (type fixnum pw ph) (type double-float radius))
+  (let ((out (copy-seq side)))
+    (dotimes (y ph out)
+      (dotimes (x pw)
+        (let ((k (+ x (* y pw))))
+          (when (<= (abs (aref depth k)) radius)
+            (let ((count 0) (total 0))
+              (declare (type fixnum count total))
+              (loop for sy from (max 0 (1- y)) to (min (1- ph) (1+ y))
+                    do (loop for sx from (max 0 (1- x)) to (min (1- pw) (1+ x))
+                             do (incf total)
+                                (incf count (aref side (+ sx (* sy pw))))))
+              (setf (aref out k) (if (> (* 2 count) total) 1 0)))))))))
+
+(defun connected-pieces (side pw ph value)
+  "The 4-connected pieces of the pixels of SIDE equal to VALUE: a label
+plane (-1 for the others) and the count of pieces."
+  (declare (type (simple-array (unsigned-byte 8) (*)) side) (type fixnum pw ph))
+  (let ((labels (make-array (* pw ph) :element-type 'fixnum :initial-element -1))
+        (stack (make-array 1024 :element-type 'fixnum :adjustable t :fill-pointer 0))
+        (count 0))
+    (declare (type fixnum count))
+    (dotimes (seed (* pw ph))
+      (when (and (= (aref side seed) value) (minusp (aref labels seed)))
+        (setf (aref labels seed) count)
+        (vector-push-extend seed stack)
+        (loop while (plusp (fill-pointer stack))
+              do (let* ((i (vector-pop stack)) (x (mod i pw)) (y (floor i pw)))
+                   (flet ((visit (j)
+                            (when (and (= (aref side j) value) (minusp (aref labels j)))
+                              (setf (aref labels j) count)
+                              (vector-push-extend j stack))))
+                     (when (> x 0) (visit (1- i)))
+                     (when (< x (1- pw)) (visit (1+ i)))
+                     (when (> y 0) (visit (- i pw)))
+                     (when (< y (1- ph)) (visit (+ i pw))))))
+        (incf count)))
+    (values labels count)))
+
+(defun tidy-sides! (side depth pw ph radius)
+  "SIDE with every inside piece that holds no sure inside pixel put
+outside, and every outside piece put inside that holds no sure outside
+pixel, does not reach the region's border and is smaller than RADIUS
+squared (at least 16 pixels): a speck the colors misjudged."
+  (declare (type (simple-array (unsigned-byte 8) (*)) side)
+           (type (simple-array double-float (*)) depth)
+           (type fixnum pw ph) (type double-float radius))
+  (flet ((settle (value keep?)
+           (multiple-value-bind (labels count) (connected-pieces side pw ph value)
+             (declare (type (simple-array fixnum (*)) labels))
+             (let ((sizes (make-array count :element-type 'fixnum :initial-element 0))
+                   (anchored (make-array count :initial-element nil)))
+               (dotimes (y ph)
+                 (dotimes (x pw)
+                   (let* ((k (+ x (* y pw))) (piece (aref labels k)))
+                     (unless (minusp piece)
+                       (incf (aref sizes piece))
+                       (when (funcall keep? (aref depth k) x y)
+                         (setf (aref anchored piece) t))))))
+               (dotimes (k (* pw ph))
+                 (let ((piece (aref labels k)))
+                   (unless (or (minusp piece) (aref anchored piece))
+                     (when (or (= value 1) (< (aref sizes piece) (max 16 (* radius radius))))
+                       (setf (aref side k) (- 1 value))))))))))
+    (settle 1 (lambda (s x y) (declare (ignore x y)) (> s radius)))
+    (settle 0 (lambda (s x y) (or (< s (- radius)) (= x 0) (= y 0) (= x (1- pw)) (= y (1- ph)))))
+    side))
+
+(defun refine-selection! (doc &key (radius 8) layer)
+  "The selection's edge moved onto the subject's outline by color,
+within RADIUS pixels either side of where it is, judged on raster
+LAYER's pixels or on the composited picture (nil, or any other layer).
+The selection comes out hard."
+  (unless (and (realp radius) (<= 1 radius 100))
+    (error "A refine radius is a number of pixels from 1 to 100, not ~s." radius))
+  (let* ((selection (or (the-object doc selection)
+                        (error "Nothing is selected: draw the subject's outline roughly first, then refine it.")))
+         (w (the-object doc doc-width))
+         (h (the-object doc doc-height))
+         (r (float radius 1d0))
+         (mask (getf selection :mask))
+         (pixels (if (and layer (eql (the-object layer kind) :raster))
+                     (the-object layer pixels)
+                     (the-object doc (render-cpu))))
+         (region (region-around (getf selection :rect) (ceiling (* 3 r)) w h)))
+    (declare (type (simple-array (unsigned-byte 8) (*)) mask pixels))
+    (destructuring-bind (x0 y0 pw ph) region
+      (let ((depth (edge-depths mask w region))
+            (colors (make-array (* 4 pw ph) :element-type '(unsigned-byte 8)))
+            (out (copy-seq mask)))
+        (dotimes (y ph)
+          (let ((from (* 4 (+ x0 (* (+ y0 y) w)))))
+            (replace colors pixels :start1 (* 4 y pw) :start2 from :end2 (+ from (* 4 pw)))))
+        (let ((side (tidy-sides! (smooth-sides (smooth-sides (refine-judgment colors depth pw ph r)
+                                                             depth pw ph r)
+                                               depth pw ph r)
+                                 depth pw ph r)))
+          (dotimes (y ph)
+            (dotimes (x pw)
+              (setf (aref out (+ x0 x (* w (+ y0 y)))) (* 255 (aref side (+ x (* y pw))))))))
+        (the-object doc (set-slot! :selection (make-selection out w h)))))))

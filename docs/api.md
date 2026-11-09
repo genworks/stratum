@@ -75,8 +75,9 @@ eyes, blur a sign):
    thirty points and more for a curved shape, each a document pixel
    worked out from the caption's mapping.  Or, when its color differs
    from what surrounds it, a loose polygon around it and then
-   `select-wand` on a point inside it with `:mode :intersect`.
-   Separate things are separate selections joined with `:mode :add`.
+   `select-wand` on a point inside it with `:mode :intersect`.  Or a
+   polygon near its edge and then `refine-selection`, which finds the
+   edge by color.  Separate things are separate selections joined with `:mode :add`.
    Where the thing stands against something plain (sky, snow, a
    wall), outline it generously on that side and take the plain part
    away: `select-wand` on a point of the background with `:mode
@@ -114,14 +115,25 @@ pixels):
    through an arm or a shoulder.  Leave such a subject where it is, and
    move the others toward it if they must move.  If it must move too,
    crop at the end so that its cut lies on the new edge.
-2. Cut it out.  Select it on its edge as above, leaving out any pocket
-   of the old background between an arm and the body, then
-   `(contract-selection 2.5)` and `(feather 1)`: a feather spreads both
-   ways, so a selection on the outline itself brings a rim of the old
-   background with it.  `(cut-out layer :name "Subject")` puts the
-   subject on a layer of its own without the old background's tint at
-   its edge; subjects that stay together can share one selection and one
-   layer.  To move it, `(select-none)` and then
+2. Cut it out.  Outline it with `select-polygon` as above, leaving out
+   any pocket of the old background between an arm and the body; the
+   points need only come near the edge.  Then `(refine-selection
+   :radius 10)` moves the selection's edge onto the subject's own
+   outline, judging by color within that many pixels either side of
+   where you drew it.  Make the radius a little more than your points
+   could be off: 8 to 12 on a picture under a thousand pixels wide,
+   about one for each hundred pixels of width on a larger one.  Past
+   the radius it cannot reach, and a strip of background the polygon
+   took in deeper than the radius stays.  `look` at the selection: where
+   the subject and the background share a color the edge may follow
+   the wrong one; put that part right with a polygon and `:add` or
+   `:subtract`.  Then `(feather 1)` and `(cut-out layer :name
+   "Subject")`, which puts the subject on a layer of its own without
+   the old background's tint at its edge.  A selection made without
+   `refine-selection`, on the outline by eye, needs
+   `(contract-selection 2.5)` before the feather, or it brings a rim of
+   the old background.  Subjects that stay together can share one
+   selection and one layer.  To move it, `(select-none)` and then
    `(move-pixels layer dx dy)`.
 3. Make the background a layer of its own, never a fill around the
    subject: `(generate-layer prompt :name "New background")`, then
@@ -326,9 +338,15 @@ cover).
   feather spreads both ways.
 - `(contract-selection pixels)`, `(expand-selection pixels)` — the edge
   moved in or out, except that what reaches the picture's edge stays
-  there.  A soft edge comes out hard, so feather after.  To cut a subject
-  out, `(contract-selection 2.5)` then `(feather 1)`: on the outline
-  itself, a rim of what was behind it comes too.
+  there.  A soft edge comes out hard, so feather after.  To cut out a
+  subject outlined by eye and not refined, `(contract-selection 2.5)`
+  then `(feather 1)`: on the outline itself, a rim of what was behind it
+  comes too.
+- `(refine-selection &key (radius 8) layer)` — the edge moved onto the
+  subject's own outline by color, within RADIUS pixels (1 to 100) either
+  side of where it is, on a layer or the composite; nothing farther from
+  the edge changes.  For a polygon drawn near a subject, before cutting
+  it out.  The edge comes out hard: feather after, and contract none.
 - `(select-all)`, `(select-none)`, `(invert-selection)`.
 
 ## Pixels

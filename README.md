@@ -332,6 +332,26 @@ showing how far it has got.  Where the model is reached is `(stratum:configure-a
 reached the box shows what its server said, changes nothing, and
 keeps the prompt for another try.
 
+**Add image reference**, above the box, attaches pictures to the prompt
+beside the one being edited: a product, a logo, a garment, a style to
+follow.  Up to four (`stratum::*max-references*`), chosen from files,
+pasted into the box or dropped on the panel; each goes up reduced to
+1024 pixels on its longer side and shows as a numbered thumbnail with a
+button that takes it off.  They belong to the session, not the
+document, and stay until removed.  The model that plans is shown them
+with every prompt, after the document's picture, and is told each one's
+number, name and size (this needs a Gendl whose sexp-agent takes
+several pictures in a message; with an older one it is told they are
+there and can still use them by number).  It has two things to do with
+one: `(place-reference n)` puts its pixels into the document as a
+layer, exactly, and `:references` on `generate-picture` and
+`generate-layer` shows it to the image generator, which redraws what it
+is shown.  From Lisp, `(stratum-api:add-reference "logo.png")`,
+`(stratum-api:references)`, `(stratum-api:remove-reference 1)` and
+`(stratum-api:clear-references)`.  A reference picture is an upload
+like an opened one: the activity log keeps it when it keeps uploads,
+and the prompt log keeps a small copy with each prompt it was shown to.
+
 The browser decodes an opened image and sends its pixels as rows of
 differences (each byte less the same channel of the pixel to its
 left), deflated by the browser's own compressor: every pixel exact, at
@@ -394,7 +414,11 @@ picture, shown to the model as a reference (`:reference nil :strength
 and one that cannot takes the request and answers from the words alone,
 so Stratum asks the generator what the loaded model can do at each
 generation, starts from the picture with such a model, and says so.
-All run outside the server's lock.
+`:references` on `generate-picture` and `generate-layer` shows the
+generator the reference pictures attached to the prompt box as well
+(all with `t`, or by number): after the open picture for the first,
+alone for the second, which refuses with a model that cannot be shown
+one.  All run outside the server's lock.
 
 The generator's model can be changed from Stratum: `(stratum:use-generator-model!
 "juggernaut-xl")`, `(stratum-api:generator-models)` for the list (the
@@ -413,6 +437,8 @@ cannot switch.
 Layer > Generate Image does these with no model planning them: the
 words go to the generator as they are, through the prompt door and its
 one undo, from nothing, from the open picture or into the selection.
+With reference pictures attached, a checkbox there shows them to the
+generator too, except for a fill.
 
 ### Keeping a record of prompts
 
@@ -421,7 +447,8 @@ directory per prompt under that path, closed to everyone but its owner:
 `turn.sexp` (who asked, by the name on their invite, the prompt, the
 document described, the forms with their results, the reply, the
 model and any failure) and small pictures, at most 640 pixels on a
-side, of what the model was shown (`before.png`, `look-1.png` ...) and
+side, of what the model was shown (`before.png`, `reference-1.png` ...
+for reference pictures, `look-1.png` ...) and
 how it ended (`after.png`).  The oldest go past `:turns`.  There is no
 log by default: the pictures are the visitors', so keeping them is the
 operator's decision, and the visitors should be told.  A log that

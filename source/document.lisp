@@ -44,7 +44,8 @@
 
 ;;; Sessions.  Two browsers open the same sample as two documents, and
 ;;; each tester's work is its own: a session holds a documents table, a
-;;; lock, the clipboard, and when it was last touched.  Sessions share no
+;;; lock, the clipboard, the reference pictures attached to its prompt
+;;; box (reference.lisp), and when it was last touched.  Sessions share no
 ;;; document, so they run in parallel.  Gendl's referencing needs no lock
 ;;; of ours; a session's lock keeps an edit's steps together (pixels
 ;;; changed in place, the undo lists, a prompt's journal) and keeps a
@@ -56,7 +57,8 @@
   (table (make-hash-table :test 'equal))
   (lock (bt:make-lock "stratum session"))
   (touched (get-universal-time))
-  clipboard)
+  clipboard
+  (references '()))
 
 (defvar *shared-session* (%make-session)
   "The session of Lisp callers and requests with no id.")

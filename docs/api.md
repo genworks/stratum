@@ -261,6 +261,44 @@ body, and each repaint puts the neck somewhere new.
 5. No generator over the face, ever: the head layer is the person.
    `look` at the face, the neck and the edges last.
 
+## Reference pictures
+
+A person can attach pictures to the prompt box beside the one being
+edited: a product, a logo, a face, a style to follow.  The message with
+each request says how many are attached, with each one's number, name
+and size, and they come with it after the document's picture, in that
+order.  They are not part of the document until a form puts one there.
+
+- `(references)` — the reference pictures attached, in order: a list
+  of `(:index n :name ... :width ... :height ...)`, or `nil`.
+- `(place-reference n &key name above)` — reference picture `n` as a
+  new raster layer, on top or above layer `above`: its own pixels,
+  centered, and reduced to fit inside the document when it is larger.
+  This is the way for anything that must stay exactly as it is, a logo,
+  a product, a label, a face: a generator redraws whatever it is shown.
+  Then `move-pixels`, `transform`, a mask or `cut-out` as for any
+  layer, and `look` at the result.
+- `:references` on `generate-picture` and `generate-layer` — `t` for
+  all of them, a number for one, a list of numbers for several — shows
+  them to the image generator.  `generate-picture` shows the document's
+  picture first and the references after it; `generate-layer` shows the
+  references alone.  The prompt is then an instruction that says which
+  picture is which, by what is in it: "put the red jacket from the
+  second picture on the person in the first picture, keeping their
+  face, pose and the room".  The generator redraws everything, the
+  person too: for a face that must stay the person's own, cut the head
+  out first and put it back over the result (Keeping a face, changing
+  the rest).  A model that cannot be shown a picture does not take
+  references: `generate-layer` refuses, and `generate-picture` starts
+  from the document's picture and says in its `:note` that they went
+  unused.
+
+When someone attaches a picture and says "use this" or "add this", look
+at what it is: a thing to put into the picture as it is calls for
+`place-reference`; a look, a material, a garment or a setting to follow
+calls for `:references`.  With no reference picture attached, none of
+this applies.
+
 ## Making new pixels
 
 Everything else here changes what is in the picture.  When a request
@@ -291,15 +329,17 @@ the operations above, which are exact and immediate.
   a line or a change of texture where it ends, never fill over the
   seam: that adds a fade of its own and another line.  Delete the fill
   and do it again over the whole region at once, selected generously.
-- `(generate-layer prompt &key name seed)` — a whole new picture of the
-  document's shape as a new raster layer on top.
+- `(generate-layer prompt &key name seed references)` — a whole new
+  picture of the document's shape as a new raster layer on top.  With
+  `:references` the generator is shown reference pictures and `prompt`
+  is an instruction about them (Reference pictures).
 - `(generate-background prompt &key layer name seed)` — a new picture
   painted around the subject on raster `layer` (the top layer by
   default), which the generator is shown, as a raster layer `name`
   ("New background" by default) just under it; `layer` does not
   change.  For a cut-out subject: see Putting a subject on a new
   background.
-- `(generate-picture prompt &key name seed reference strength)` — the
+- `(generate-picture prompt &key name seed reference strength references)` — the
   whole picture made over as a new raster layer on top: a change of
   style, season or light across all of it.  With `:reference t`, the
   default, the generator is shown the picture and `prompt` is an
@@ -310,8 +350,9 @@ the operations above, which are exact and immediate.
   the picture with `:strength` of noise, 0 to 1, default 0.35: 0.3 keeps
   the pose and little of a new style, 0.6 redraws the subject.  A model
   that cannot be shown a picture starts from it in either case, and the
-  answer's `:note` says so.  The result is a megapixel or so, scaled up:
-  fine detail of a large photograph is lost.
+  answer's `:note` says so.  `:references` shows it reference pictures
+  as well, after the picture (Reference pictures).  The result is a
+  megapixel or so, scaled up: fine detail of a large photograph is lost.
 
 `prompt` is a description of the result in plain visual words, not an
 instruction: "weathered stone wall in soft daylight", not "make this a

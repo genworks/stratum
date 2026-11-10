@@ -2570,7 +2570,7 @@
         img.src = api('my-upload?file=' + encodeURIComponent(u.file));
         list.appendChild(el('label', { 'class': 'st-row', style: 'gap: 8px; align-items: center; margin: 4px 0' }, [
           check, img,
-          el('span', { text: (u.door === 'place' ? 'Placed ' : 'Opened ') + u.time.replace('T', ' ').replace('Z', ' UTC') +
+          el('span', { text: (u.door === 'place' ? 'Placed ' : u.door === 'add-reference' ? 'Attached ' : 'Opened ') + u.time.replace('T', ' ').replace('Z', ' UTC') +
                              ', ' + megabytes(u.bytes) })]));
       });
       return data;
@@ -4152,6 +4152,36 @@
                 S.busyText() === '' && document.getElementById('stratum-busy').style.display === 'none');
         });
       }).then(function () {
+        // Reference pictures: one attached beside the prompt box shows as
+        // a thumbnail, reduced on its way up; the Generate dialog offers
+        // it to the generator; and it comes off again.
+        var c = document.createElement('canvas');
+        c.width = 1600; c.height = 800;
+        var x = c.getContext('2d');
+        x.fillStyle = '#c81e1e';
+        x.fillRect(0, 0, 1600, 800);
+        var strip = document.getElementById('stratum-references');
+        var add = document.getElementById('stratum-reference-add');
+        function brief(refs) { return refs.map(function (r) { return [r.n, r.name, r.width, r.height]; }); }
+        return new Promise(function (resolve) { c.toBlob(resolve, 'image/png'); }).then(function (blob) {
+          return S.clearReferences().then(function () { return S.addReference(blob, 'swatch'); });
+        }).then(function (refs) {
+          check('a reference picture is attached and shows beside the prompt box',
+                refs.length === 1 && refs[0].name === 'swatch' && refs[0].width === 1024 && refs[0].height === 512 &&
+                strip.querySelectorAll('.st-ref img').length === 1 && strip.style.display !== 'none', brief(refs));
+          var g = S.openGenerate();
+          g.set({ source: 'new' });
+          var row = document.getElementById('stratum-generate-references').parentNode;
+          var offered = row.style.display !== 'none';
+          g.set({ source: 'selection' });
+          check('the Generate dialog offers it to the generator, though not for a fill',
+                offered && row.style.display === 'none');
+          g.cancel();
+          return S.removeReference(refs[0].id);
+        }).then(function (refs) {
+          check('and it comes off again', refs.length === 0 && strip.style.display === 'none' && !add.disabled, brief(refs));
+        });
+      }).then(function () {
         // The same PNG file sent whole: the server's own reader decodes
         // it to the bytes the browser decoded.
         return pngBlob.arrayBuffer().then(function (buf) {
@@ -5501,7 +5531,7 @@
   // uploaded image is the open picture: open it first.
   S.openGenerate = function () {
     if (S.generateDialog) S.generateDialog.cancel();
-    var state = { prompt: '', source: S.selection ? 'selection' : 'new', reference: true, strength: 0.35, keepAll: false, name: 'Generated' };
+    var state = { prompt: '', source: S.selection ? 'selection' : 'new', reference: true, strength: 0.35, keepAll: false, references: false, name: 'Generated' };
     var words = el('textarea', { 'class': 'st-prompt-box', rows: '4', id: 'stratum-generate-text',
       placeholder: 'Describe the picture, for example: a stone bridge in morning fog' });
     words.addEventListener('input', function () { state.prompt = words.value; });
@@ -5518,6 +5548,13 @@
     keep.addEventListener('change', function () { state.keepAll = keep.checked; });
     var howRow = el('div', { 'class': 'st-row' }, [el('span', { text: 'use it' }), how]);
     var keepRow = el('div', { 'class': 'st-row' }, [keep, el('span', { text: 'Keep the whole selection, not only what changed' })]);
+    // The reference pictures attached to the prompt box, for the
+    // generator to see: with nothing to start from, or beside the open
+    // picture when that is a reference too.
+    var refs = el('input', { type: 'checkbox', id: 'stratum-generate-references' });
+    refs.addEventListener('change', function () { state.references = refs.checked; });
+    var refsLabel = el('span', { text: '' });
+    var refsRow = el('div', { 'class': 'st-row' }, [refs, refsLabel]);
     // The generator's model: the whole server's, so changing it is for
     // those the server lets (the menu is disabled for anyone else).
     // as wide as the row leaves it, not as its longest name: the open
@@ -5555,12 +5592,17 @@
       howRow.style.display = state.source === 'picture' ? '' : 'none';
       strength.style.display = state.source === 'picture' && !state.reference ? '' : 'none';
       keepRow.style.display = state.source === 'selection' ? '' : 'none';
+      var count = S.references.length;
+      refsLabel.textContent = count === 1 ? 'Show it the reference picture too'
+        : 'Show it the ' + count + ' reference pictures too';
+      refsRow.style.display = count && (state.source === 'new' || (state.source === 'picture' && state.reference))
+        ? '' : 'none';
     }
     source.addEventListener('change', function () { state.source = source.value; shown(); });
     how.addEventListener('change', function () { state.reference = how.value === 'reference'; shown(); });
     var box = el('div', { 'class': 'st-dialog' }, [el('h2', { text: 'Generate Image' }), words,
       el('div', { 'class': 'st-row' }, [el('span', { text: 'start from' }), source]),
-      howRow, strength, keepRow, modelRow]);
+      howRow, strength, keepRow, refsRow, modelRow]);
     var cancel = el('button', { type: 'button', text: 'Cancel' });
     var ok = el('button', { type: 'button', text: 'Generate' });
     box.appendChild(el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, ok]));
@@ -5576,6 +5618,7 @@
         source.value = state.source;
         how.value = state.reference ? 'reference' : 'start';
         keep.checked = state.keepAll;
+        refs.checked = !!state.references;
         shown();
       },
       cancel: function () { box.remove(); S.generateDialog = null; },
@@ -5585,7 +5628,8 @@
         box.remove();
         S.generateDialog = null;
         return S.prompt(text, { source: state.source, name: state.name, reference: state.reference,
-                                strength: state.strength, keepAll: state.keepAll });
+                                strength: state.strength, keepAll: state.keepAll,
+                                references: !!state.references && refsRow.style.display !== 'none' });
       }
     };
     cancel.addEventListener('click', dialog.cancel);
@@ -5593,6 +5637,113 @@
     words.focus();
     return dialog;
   };
+
+  // ---- reference pictures ----------------------------------------------------
+  //
+  // Pictures attached to the prompt box beside the one being edited: a
+  // face, a product, a style to follow.  They are the session's and are
+  // kept by the server (reference.lisp), so they are there after a reload
+  // and whichever document is open; the model that plans is shown them
+  // with each prompt, after the document's picture.  One goes up as a PNG
+  // of at most REFERENCE_SIDE pixels on its longer side, reduced here:
+  // the server keeps no more of it, and a phone's photograph is twenty
+  // times that.
+  S.references = [];
+  S.maxReferences = 4;
+  var REFERENCE_SIDE = 1024, referenceStrip = null, referenceAdd = null;
+
+  function drawReferences() {
+    if (!referenceStrip) return;
+    referenceStrip.innerHTML = '';
+    S.references.forEach(function (r) {
+      var remove = el('button', { type: 'button', 'class': 'st-ref-remove', text: '×',
+        title: 'Remove reference ' + r.n, 'aria-label': 'Remove reference ' + r.n });
+      remove.addEventListener('click', function () { S.removeReference(r.id); });
+      referenceStrip.appendChild(el('div', { 'class': 'st-ref', title: r.name + ', ' + r.width + ' x ' + r.height }, [
+        el('img', { src: r.thumb, alt: 'Reference ' + r.n + ': ' + r.name }),
+        el('span', { 'class': 'st-ref-n', text: String(r.n) }),
+        remove]));
+    });
+    referenceStrip.style.display = S.references.length ? '' : 'none';
+    if (referenceAdd) {
+      referenceAdd.disabled = S.references.length >= S.maxReferences;
+      referenceAdd.title = referenceAdd.disabled
+        ? 'A prompt takes ' + S.maxReferences + ' reference pictures at most'
+        : 'A picture for the prompt to work from: a face, a product, a style';
+    }
+  }
+
+  function showReferences(res) {
+    S.references = res.references || [];
+    if (res.max) S.maxReferences = res.max;
+    drawReferences();
+    return S.references;
+  }
+
+  S.refreshReferences = function () {
+    return fetchJSON(api('references')).then(showReferences);
+  };
+
+  // FILE, an image file or blob, as a PNG blob of at most REFERENCE_SIDE
+  // pixels on its longer side, turned as its camera held it.
+  S.referencePng = function (file) {
+    return createImageBitmap(file).then(function (bmp) {
+      var scale = Math.min(1, REFERENCE_SIDE / Math.max(bmp.width, bmp.height));
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bmp.width * scale));
+      canvas.height = Math.max(1, Math.round(bmp.height * scale));
+      var ctx = canvas.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+      return new Promise(function (resolve, reject) {
+        canvas.toBlob(function (png) {
+          if (png) resolve(png); else reject(new Error('This browser could not make a PNG of the picture.'));
+        }, 'image/png');
+      });
+    }, function () {
+      throw new Error('This file is not a picture this browser can read.');
+    });
+  };
+
+  S.addReference = function (file, name) {
+    if (S.references.length >= S.maxReferences)
+      return Promise.reject(new Error('A prompt takes ' + S.maxReferences + ' reference pictures at most. Remove one first.'));
+    return S.referencePng(file).then(function (png) {
+      return fetchJSON(api('add-reference?name=' + encodeURIComponent(name || baseName(file))),
+                       { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: png });
+    }).then(showReferences);
+  };
+
+  S.removeReference = function (id) {
+    return postJSON('references', JSON.stringify({ remove: id })).then(showReferences, function (e) {
+      // gone already, from another tab: show what is there
+      return S.refreshReferences().then(function () { throw e; });
+    });
+  };
+
+  S.clearReferences = function () {
+    return postJSON('references', JSON.stringify({ clear: true })).then(showReferences);
+  };
+
+  // FILES, of a file input, a paste or a drop: each picture among them
+  // attached, one after another so that they keep their order.
+  function addReferenceFiles(files, note) {
+    var pictures = [].filter.call(files || [], function (f) { return /^image\//.test(f.type || ''); });
+    if (!pictures.length) return Promise.resolve(S.references);
+    var chain = Promise.resolve();
+    pictures.forEach(function (f, i) {
+      chain = chain.then(function () {
+        if (note) note('adding ' + (pictures.length > 1 ? 'reference ' + (i + 1) + ' of ' + pictures.length : 'the reference') + '...');
+        return S.addReference(f);
+      });
+    });
+    return chain.then(function () { if (note) note(''); return S.references; }, function (e) {
+      if (note) note('');
+      S.notice('Add image reference', plainError(e));
+      return S.references;
+    });
+  }
 
   function installPrompt() {
     var host = document.getElementById('stratum-prompt');
@@ -5605,9 +5756,45 @@
     host.appendChild(el('div', { 'class': 'st-layers-head' }, [
       el('span', { text: 'Prompt' }),
       el('span', { 'class': 'st-lkind', text: 'Ctrl+Enter' })]));
+    // Add image reference: files chosen, a picture pasted into the box,
+    // or one dropped on the panel.
+    var pick = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple', id: 'stratum-reference-file' });
+    pick.style.display = 'none';
+    referenceAdd = el('button', { type: 'button', 'class': 'st-ref-add', id: 'stratum-reference-add',
+      text: '+ Add image reference' });
+    referenceStrip = el('div', { 'class': 'st-refs', id: 'stratum-references' });
+    function note(text) { if (!go.disabled) busy.textContent = text; }
+    referenceAdd.addEventListener('click', function () { pick.click(); });
+    pick.addEventListener('change', function () {
+      addReferenceFiles(pick.files, note).then(function () { pick.value = ''; });
+    });
+    box.addEventListener('paste', function (e) {
+      var files = e.clipboardData && e.clipboardData.files;
+      // words paste as words
+      if (!files || ![].some.call(files, function (f) { return /^image\//.test(f.type || ''); })) return;
+      e.preventDefault();
+      addReferenceFiles(files, note);
+    });
+    host.addEventListener('dragover', function (e) {
+      if (!e.dataTransfer || [].indexOf.call(e.dataTransfer.types || [], 'Files') < 0) return;
+      e.preventDefault();
+      host.classList.add('st-dropping');
+    });
+    host.addEventListener('dragleave', function () { host.classList.remove('st-dropping'); });
+    host.addEventListener('drop', function (e) {
+      host.classList.remove('st-dropping');
+      if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+      addReferenceFiles(e.dataTransfer.files, note);
+    });
+    host.appendChild(referenceAdd);
+    host.appendChild(pick);
+    host.appendChild(referenceStrip);
     host.appendChild(box);
     host.appendChild(el('div', { 'class': 'st-row' }, [go, busy]));
     host.appendChild(promptLog);
+    drawReferences();
+    S.refreshReferences().catch(function () {});
     function run() {
       var text = box.value.trim();
       if (!text || go.disabled) return;

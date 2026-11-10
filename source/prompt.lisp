@@ -61,6 +61,10 @@ goes on from the picture it was sent, as it did before there was one."
                          :max-tokens 8000)
   "The prompt box's agent.")
 
+;; Made once, so that a reload keeps where its model is reached; the
+;; operations it admits are those of this load.
+(setf (sexp-agent:agent-operators *agent*) (prompt-operators))
+
 (defun configure-agent! (&key (messages-url nil url?) (api-key-file nil key?)
                               (model nil model?) (effort nil effort?)
                               (session-header nil header?))
@@ -144,7 +148,7 @@ selection, and once more at the result.")
 (defparameter *reading-operators*
   '(stratum-api:documents stratum-api:describe-document stratum-api:document-info
     stratum-api:layers stratum-api:layer-info stratum-api:selection stratum-api:look
-    stratum-api:drawing-sources stratum-api:undo stratum-api:redo)
+    stratum-api:drawing-sources stratum-api:references stratum-api:undo stratum-api:redo)
   "The operations that leave nothing for a prompt's own undo to take
 back.  Undo and redo are among them: 'undo that' is not itself a change
 to undo, and the lists stand as those forms left them.")
@@ -374,11 +378,12 @@ their order.")
     (collect-if-full!)
     (document-picture doc :size *prompt-log-picture-size*)))
 
-(defun log-turn! (turn before looks after)
+(defun log-turn! (turn before looks after &optional references)
   "TURN, a plist, and its pictures -- BEFORE, what the model was shown,
-LOOKS, what it asked to see, in order, AFTER, how it ended -- into a
-directory of their own: turn.sexp, before.png, look-1.png ..., after.png.
-No token goes in: a person is the name on their invite.  A log that
+LOOKS, what it asked to see, in order, AFTER, how it ended, REFERENCES,
+the reference pictures attached to the prompt -- into a directory of
+their own: turn.sexp, before.png, reference-1.png ..., look-1.png ...,
+after.png.  No token goes in: a person is the name on their invite.  A log that
 cannot be written must not cost anyone their prompt."
   (when *prompt-log-directory*
     (handler-case
@@ -388,9 +393,16 @@ cannot be written must not cost anyone their prompt."
                                                                  :external-format :utf-8 :if-exists :supersede)
             (let ((*print-pretty* t) (*print-right-margin* 100) (*print-readably* nil)
                   (*package* (find-package :common-lisp)) (*print-case* :downcase))
-              (prin1 (append turn (list :looks (mapcar #'picture-note looks))) out)
+              (prin1 (append turn
+                             (and references (list :references (mapcar #'ref-name references)))
+                             (list :looks (mapcar #'picture-note looks)))
+                     out)
               (terpri out)))
           (write-octets-file (merge-pathnames "before.png" dir) (picture-log-png before))
+          (loop for reference in references
+                for n from 1
+                do (write-octets-file (merge-pathnames (format nil "reference-~d.png" n) dir)
+                                      (ref-view reference)))
           (loop for look in looks
                 for n from 1
                 do (write-octets-file (merge-pathnames (format nil "look-~d.png" n) dir)
@@ -409,12 +421,17 @@ PROMPT painted with no model between it and the generator."
          (seed (let ((s (gethash "seed" settings))) (if (integerp s) s -1)))
          (reference? (gethash "reference" settings))
          (strength (let ((s (gethash "strength" settings))) (if (realp s) (max 0.05d0 (min 1d0 (float s 1d0))) 0.35d0)))
-         (changed? (not (eq (gethash "keepAll" settings) t))))
+         (changed? (not (eq (gethash "keepAll" settings) t)))
+         ;; the reference pictures attached to the prompt box, all of them
+         (references? (eq (gethash "references" settings) t)))
     (cond ((equal source "new")
-           (format nil "(generate-layer ~s :name ~s :seed ~d)" prompt name seed))
+           (format nil "(generate-layer ~s :name ~s :seed ~d~:[~; :references t~])"
+                   prompt name seed references?))
           ((equal source "picture")
-           (format nil "(generate-picture ~s :name ~s :seed ~d :strength ~,2f :reference ~:[nil~;t~])"
-                   prompt name seed strength (eq reference? t)))
+           (format nil "(generate-picture ~s :name ~s :seed ~d :strength ~,2f :reference ~:[nil~;t~]~:[~; :references t~])"
+                   prompt name seed strength (eq reference? t)
+                   ;; they go beside the picture, so only when it goes
+                   (and references? (eq reference? t))))
           ((equal source "selection")
            (format nil "(generate-fill ~s :name ~s :seed ~d :keep ~:[:all~;:changed~])"
                    prompt name seed changed?))
@@ -440,11 +457,15 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
         (ran 0)
         (changed nil)
         (looks '())
-        journal state picture history answer outcome failure)
+        (several? (let ((s (find-symbol "TRIMMED-PICTURES" :sexp-agent))) (and s (fboundp s))))
+        journal state picture references history answer outcome failure)
     (bt:with-lock-held (*lock*)
       (let ((stratum-api:*document* doc))
         (setf state (stratum-api:describe-document)))
       (setf picture (document-picture doc)
+            ;; as they stand now: one removed while the model works is
+            ;; still what this prompt was asked with
+            references (session-references)
             history (reverse (the-object doc prompt-log))
             journal (begin-prompt-journal! doc)))
     (unwind-protect
@@ -477,10 +498,17 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                                  :rounds 0
                                  :assistant forms)))
                        (sexp-agent:ask *agent* prompt
-                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~a, and ~a."
+                                       :state-text (format nil "~a~%The picture with this message is ~a~%This server ~a, and ~a.~@[~%~a~]"
                                                            state (picture-note picture) (generator-state)
-                                                           (subject-state))
-                                       :image-png (picture-png picture)
+                                                           (subject-state)
+                                                           (references-state references several?))
+                                       ;; the document's picture, then the
+                                       ;; reference pictures; a Gendl whose
+                                       ;; sexp-agent takes one picture gets
+                                       ;; the document's alone
+                                       :image-png (if (and references several?)
+                                                      (cons (picture-png picture) (mapcar #'ref-view references))
+                                                      (picture-png picture))
                                        :session-id (and session (format nil "stratum-~a" session))
                                        :history history
                                        :runner runner
@@ -529,7 +557,7 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                          :rounds (getf answer :rounds)
                          :failure (or failure (getf answer :stopped))
                          :outcome outcome)
-                   picture (reverse looks) after)))))
+                   picture (reverse looks) after references)))))
 
 (defun prompt-json (result)
   (json-string

@@ -1894,6 +1894,247 @@ and what the person hears.  The replies have sd-server's own shape."
                      info))
             (stratum-api:delete-layer "Oils")))))))
 
+(defun test-reference-pictures ()
+  "Reference pictures: attached, listed, removed and cleared through the
+page's doors over a real connection, each session's its own and no more
+than may be; then what the sandbox, the image generator, the model that
+plans and the prompt log make of them."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (root (format nil "/tmp/stratum-references-~d/" (get-universal-time)))
+         (logo (let* ((w 64) (h 40) (rgba (make-rgba w h)))
+                 (dotimes (i (* w h)) (replace rgba '(200 30 30 255) :start1 (* 4 i)))
+                 (png-octets rgba w h)))
+         (scene (let* ((w 1600) (h 800) (rgba (make-rgba w h)))
+                  (dotimes (i (* w h)) (replace rgba '(20 90 160 255) :start1 (* 4 i)))
+                  (png-octets rgba w h))))
+    (labels ((text (octets) (map 'string #'code-char octets))
+             (listed (session)
+               (destructuring-bind (code body) (raw-get port (format nil "/stratum/api/references?s=~a" session))
+                 (and (eql code 200) (gethash "references" (yason:parse (text body))))))
+             (add (session name octets)
+               (raw-post port (format nil "/stratum/api/add-reference?s=~a&name=~a" session name) octets))
+             (ask (session body)
+               (first (raw-post port (format nil "/stratum/api/references?s=~a" session)
+                                (map '(vector (unsigned-byte 8)) #'char-code body) "application/json")))
+             (refused (thunk words)
+               (handler-case (progn (funcall thunk) nil)
+                 (error (e) (search words (princ-to-string e)))))
+             (png-size (octets)
+               (multiple-value-bind (pixels w h) (read-png octets)
+                 (declare (ignore pixels))
+                 (list w h))))
+      (unwind-protect
+           (progn
+             ;; an open gate, and nothing kept: set globally, since the
+             ;; doors run in the server's threads
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
+                   *activity-directory* nil
+                   *prompt-log-directory* nil)
+             (publish-references! server nil)
+             (let ((answer (raw-get port "/stratum/api/references?s=ref-a")))
+               (check "a session starts with no reference picture, and is told how many it may have"
+                      (and (eql (first answer) 200)
+                           (let ((said (yason:parse (text (second answer)))))
+                             (and (eql (gethash "max" said) *max-references*)
+                                  (null (gethash "references" said)))))
+                      (text (second answer))))
+             (let ((answer (add "ref-a" "logo.png" logo))
+                   (one (first (listed "ref-a"))))
+               (check "a picture is attached, with its name, its size and a small picture of it"
+                      (and (eql (first answer) 200) one
+                           (equal (gethash "name" one) "logo.png")
+                           (eql (gethash "n" one) 1)
+                           (eql (gethash "width" one) 64) (eql (gethash "height" one) 40)
+                           (stringp (gethash "id" one))
+                           (eql 0 (search "data:image/png;base64," (gethash "thumb" one))))
+                      answer))
+             (add "ref-a" "scene" scene)
+             (let ((two (second (listed "ref-a"))))
+               (check "a larger one is reduced on its way in"
+                      (and two (eql (gethash "n" two) 2)
+                           (eql (gethash "width" two) 1024) (eql (gethash "height" two) 512))
+                      (and two (list (gethash "width" two) (gethash "height" two)))))
+             (check "another session has none of them" (null (listed "ref-b")))
+             (add "ref-a" "third" logo)
+             (add "ref-a" "fourth" logo)
+             (let ((answer (add "ref-a" "fifth" logo)))
+               (check "one more than a prompt takes is refused in words, and the rest stay"
+                      (and (eql (first answer) 500) (search "at most" (second answer))
+                           (= (length (listed "ref-a")) *max-references*))
+                      answer))
+             (let ((id (gethash "id" (first (listed "ref-a")))))
+               (check "one is removed by its id, and the others count from 1 again"
+                      (and (eql 200 (ask "ref-a" (format nil "{\"remove\": ~s}" id)))
+                           (equal (mapcar (lambda (r) (list (gethash "n" r) (gethash "name" r))) (listed "ref-a"))
+                                  '((1 "scene") (2 "third") (3 "fourth"))))
+                      (listed "ref-a"))
+               (check "removing it again, a body that names nothing, and a body that is no picture are refused"
+                      (and (eql 500 (ask "ref-a" (format nil "{\"remove\": ~s}" id)))
+                           (eql 500 (ask "ref-a" "{}"))
+                           (eql 500 (ask "ref-a" "[1]"))
+                           (eql 500 (first (add "ref-a" "words" (map '(vector (unsigned-byte 8)) #'char-code "no picture"))))
+                           (= (length (listed "ref-a")) 3))))
+             (check "and all of them at once"
+                    (and (eql 200 (ask "ref-a" "{\"clear\": true}")) (null (listed "ref-a"))))
+             ;; from Lisp, on that session
+             (with-session ((session-for "ref-a"))
+               (let* ((stratum-api:*document* nil)
+                      (doc (progn (stratum-api:use-document "parity") stratum-api:*document*))
+                      (dw (the-object doc doc-width))
+                      (layers (length (stratum-api:layers)))
+                      (before (copy-seq (the-object doc (render-cpu)))))
+                 (flet ((px (pixels x y) (coerce (subseq pixels (* 4 (+ x (* dw y))) (+ 3 (* 4 (+ x (* dw y))))) 'list))
+                        (near (a b) (every (lambda (u v) (<= (abs (- u v)) 2)) a b)))
+                   (stratum-api:add-reference logo :name "logo")
+                   (check "add-reference attaches PNG octets and answers the list"
+                          (equal (stratum-api:add-reference scene :name "scene")
+                                 '((:index 1 :name "logo" :width 64 :height 40)
+                                   (:index 2 :name "scene" :width 1024 :height 512)))
+                          (stratum-api:references))
+                   (let ((results (stratum:run-forms "(references) (clear-references)")))
+                     (check "the sandbox admits references, and not detaching them"
+                            (and (getf (first results) :ok)
+                                 (equal (getf (first results) :value) (stratum-api:references))
+                                 (not (getf (second results) :ok))
+                                 (= 2 (length (stratum-api:references))))
+                            results))
+                   (let ((info (getf (first (stratum:run-forms "(place-reference 1)")) :value)))
+                     (check "place-reference puts one in the document as a layer, its own pixels, centered"
+                            (and (equal (getf info :name) "logo") (eql (getf info :kind) :raster)
+                                 (= (length (stratum-api:layers)) (1+ layers))
+                                 (near (px (the-object doc (render-cpu)) 160 100) '(200 30 30))
+                                 (equal (px (the-object doc (render-cpu)) 2 2) (px before 2 2)))
+                            (list info (px (the-object doc (render-cpu)) 160 100))))
+                   (let ((info (stratum-api:place-reference 2 :name "Scene")))
+                     (check "one larger than the document is reduced to fit inside it"
+                            (and (equal (getf info :name) "Scene")
+                                 (near (px (the-object doc (render-cpu)) 2 100) '(20 90 160))
+                                 (near (px (the-object doc (render-cpu)) 317 100) '(20 90 160))
+                                 (equal (px (the-object doc (render-cpu)) 2 2) (px before 2 2)))
+                            (list info (px (the-object doc (render-cpu)) 2 100))))
+                   (check "a number that names none is an error in words"
+                          (refused (lambda () (stratum-api:place-reference 7)) "numbered 1 to 2"))
+                   (stratum-api:delete-layer "Scene")
+                   (stratum-api:delete-layer "logo")
+                   ;; the image generator
+                   (let* ((generator (make-generator "http://localhost" 4 1 0.9d0 256 "" 20 nil))
+                          (one (yason:parse (generator-body generator "x" 1 64 64 :reference logo)))
+                          (two (yason:parse (generator-body generator "x" 1 64 64 :reference (list logo scene)))))
+                     (check "a job carries one picture to work from, or several in order"
+                            (and (equal (gethash "ref_images" one) (list (data-url logo)))
+                                 (equal (gethash "ref_images" two) (list (data-url logo) (data-url scene))))))
+                   (flet ((capabilities (name references)
+                            (format nil "{\"model\":{\"name\":~s,\"path\":\"\",\"stem\":\"\"},~
+                                        \"generation_features\":{\"ref_images\":~:[false~;true~],\"img2img\":true}}"
+                                    name references))
+                          (with-stub (capabilities fn)
+                            (call-with-stub-generator
+                             (lambda (generator seen)
+                               (let ((*generator* generator))
+                                 (funcall fn (lambda () (first (car (last (funcall seen))))))))
+                             :capabilities capabilities))
+                          (kept (n) (data-url (ref-png (reference-numbered n)))))
+                     (with-stub (capabilities "klein.gguf" t)
+                       (lambda (last-body)
+                         (let ((info (stratum-api:generate-picture "put the logo on the wall" :name "Made" :references t))
+                               (shown (gethash "ref_images" (funcall last-body))))
+                           (check "generate-picture shows the generator the document's picture, then the references"
+                                  (and (= (length shown) 3) (null (getf info :note))
+                                       (equal (rest shown) (list (kept 1) (kept 2)))
+                                       (null (gethash "init_image" (funcall last-body))))
+                                  (list (length shown) info)))
+                         (stratum-api:delete-layer "Made")
+                         (stratum-api:generate-layer "a wall with this logo" :name "Made" :references 1)
+                         (check "generate-layer shows it the references asked for, and no picture of the document"
+                                (and (equal (gethash "ref_images" (funcall last-body)) (list (kept 1)))
+                                     (null (gethash "init_image" (funcall last-body)))))
+                         (stratum-api:delete-layer "Made")
+                         (stratum-api:generate-layer "a wall" :name "Made")
+                         (check "with none asked for it goes as it always did"
+                                (null (gethash "ref_images" (funcall last-body))))
+                         (stratum-api:delete-layer "Made")
+                         (check "references asked for that are not there, or without the picture they follow, are errors in words"
+                                (and (refused (lambda () (stratum-api:generate-layer "a wall" :references 9)) "numbered 1 to 2")
+                                     (refused (lambda () (stratum-api:generate-picture "a wall" :reference nil :references t))
+                                              ":reference"))
+                                (length (stratum-api:layers)))))
+                     (with-stub (capabilities "sdxl.safetensors" nil)
+                       (lambda (last-body)
+                         (let ((info (stratum-api:generate-picture "in oils" :name "Made" :references t)))
+                           (check "a model that cannot be shown a picture starts from the document's, and says the references went unused"
+                                  (and (gethash "init_image" (funcall last-body))
+                                       (null (gethash "ref_images" (funcall last-body)))
+                                       (search "reference picture" (getf info :note)))
+                                  info))
+                         (stratum-api:delete-layer "Made")
+                         (check "and generate-layer refuses in words, rather than paint from the words alone"
+                                (refused (lambda () (stratum-api:generate-layer "a wall" :references t))
+                                         "cannot be shown")))))
+                   (flet ((forms (&rest settings)
+                            (let ((table (make-hash-table :test 'equal)))
+                              (loop for (k v) on settings by #'cddr do (setf (gethash k table) v))
+                              (generation-forms table "a wall"))))
+                     (check "the Generate dialog's forms ask for the references when it says so"
+                            (and (search ":references t" (forms "source" "new" "references" t))
+                                 (search ":references t" (forms "source" "picture" "reference" t "references" t))
+                                 (not (search ":references" (forms "source" "new")))
+                                 (not (search ":references" (forms "source" "picture" "reference" t)))
+                                 (not (search ":references" (forms "source" "picture" "references" t)))
+                                 (not (search ":references" (forms "source" "selection" "references" t))))
+                            (forms "source" "picture" "reference" t "references" t)))
+                   ;; the model that plans, and the prompt log
+                   (let ((*prompt-log-directory* nil))
+                     (configure-prompt-log! :directory root)
+                     (call-with-stub-model
+                      (list (format nil "Done.~%```lisp~%(references)~%```"))
+                      (lambda (agent requests)
+                        (let* ((*agent* agent)
+                               (answer (prompt-document doc "put the logo on the wall" :session "ref-a" :who "Alice")))
+                          (multiple-value-bind (images text) (last-user-content (first (funcall requests)))
+                            (check "the planner is shown the document's picture and then each reference, and told which is which"
+                                   (and (getf answer :ok) (= (length images) 3)
+                                        (search "2 reference pictures are attached" text)
+                                        (search "1, \"logo\", 64 x 40; 2, \"scene\", 1024 x 512" text)
+                                        (search "(place-reference n)" text))
+                                   text)))))
+                     (let* ((dir (first (uiop:subdirectories root)))
+                            (turn (with-open-file (in (merge-pathnames "turn.sexp" dir) :external-format :utf-8)
+                                    (let ((*package* (find-package :common-lisp)))
+                                      (read in)))))
+                       (check "the prompt log keeps them with the prompt, small, and the admin page lists them"
+                              (and (equal (getf turn :references) '("logo" "scene"))
+                                   (equal (png-size (stratum-api::file-octets (merge-pathnames "reference-1.png" dir)))
+                                          '(64 40))
+                                   (equal (png-size (stratum-api::file-octets (merge-pathnames "reference-2.png" dir)))
+                                          (list *reference-view-size* (/ *reference-view-size* 2)))
+                                   (equal (turn-pictures dir) '("before" "reference-1" "reference-2" "after")))
+                              (list turn (turn-pictures dir))))
+                     (stratum-api:remove-reference 1)
+                     (check "remove-reference detaches one by its number"
+                            (equal (stratum-api:references) '((:index 1 :name "scene" :width 1024 :height 512)))
+                            (stratum-api:references))
+                     (stratum-api:clear-references)
+                     (call-with-stub-model
+                      (list (format nil "Done.~%```lisp~%(references)~%```"))
+                      (lambda (agent requests)
+                        (let ((*agent* agent))
+                          (prompt-document doc "what is attached?" :session "ref-a" :who "Alice")
+                          (multiple-value-bind (images text) (last-user-content (first (funcall requests)))
+                            (check "with none attached a prompt goes as it always did"
+                                   (and (= (length images) 1) (not (search "reference picture" text)))
+                                   text)))))
+                     (check "and the log lists no reference of that prompt"
+                            (let ((dir (second (sort (uiop:subdirectories root) #'string< :key #'namestring))))
+                              (and dir (equal (turn-pictures dir) '("before" "after"))))))))))
+        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts)
+        (bt:with-lock-held (*sessions-lock*)
+          (remhash "ref-a" *sessions*)
+          (remhash "ref-b" *sessions*))
+        (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))
+        (net.aserve:shutdown :server server)))))
+
 (defun test-generate-turn ()
   "A generator shared with something else: its turn runs around the job
 alone, with no lock of ours held."
@@ -4524,7 +4765,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-reference-pictures test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -92,14 +92,11 @@ matches what it paints to what it can see."
     (flexi-streams:with-output-to-sequence (out :element-type '(unsigned-byte 8))
       (zpng:write-png-stream png out))))
 
-(defun data-url (png)
-  (format nil "data:image/png;base64,~a" (sexp-agent:base64-encode png)))
-
 (defun generator-body (generator prompt seed w h &key image mask strength reference)
   "The job for a picture of W x H, as JSON text.  With IMAGE, PNG octets,
 a repainting of it, by STRENGTH or the generator's own, and with MASK
-of that part alone; with REFERENCE, PNG octets, a picture the model is
-shown and works from."
+of that part alone; with REFERENCE, PNG octets or a list of them, the
+pictures the model is shown and works from, in that order."
   (flet ((object (&rest keys-and-values)
            (let ((table (make-hash-table :test 'equal)))
              (loop for (key value) on keys-and-values by #'cddr
@@ -129,7 +126,8 @@ shown and works from."
       (when mask
         (setf (gethash "mask_image" body) (data-url mask)))
       (when reference
-        (setf (gethash "ref_images" body) (list (data-url reference))))
+        (setf (gethash "ref_images" body)
+              (mapcar #'data-url (if (listp reference) reference (list reference)))))
       (yason:with-output-to-string* () (yason:encode body)))))
 
 (defparameter *generator-poll-seconds* 1
@@ -207,6 +205,11 @@ name comes first."
          (name (and (hash-table-p model) (gethash "name" model))))
     (when (and (hash-table-p features) (stringp name) (plusp (length name)))
       (if (gethash "ref_images" features) :yes :no))))
+
+(defparameter *unsaid-reference-note*
+  "The image generator did not say whether its model can be shown a picture, so it may have worked from the words alone."
+  "The :note of a generation whose generator could not be asked what its
+model takes.")
 
 ;;; Which model the generator has loaded.  sd-server holds one model for
 ;;; everything it serves and changes it by recipe (POST
@@ -485,18 +488,30 @@ layer's layer-info."
             (bt:with-lock-held (*lock*)
               (stratum-api:layer-info (generated-layer! doc layer name)))))))))
 
-(defun stratum-api:generate-layer (prompt &key (name "Generated") (seed -1))
+(defun stratum-api:generate-layer (prompt &key (name "Generated") (seed -1) references)
   "A picture of PROMPT from the image generator, the document's shape,
-as a new raster layer NAME on top.  Slow: a minute or so.  The layer's
-layer-info."
+as a new raster layer NAME on top.  With REFERENCES -- t for every
+reference picture attached to the prompt box, one's number, or a list of
+numbers -- the model is shown those and PROMPT reads as an instruction
+about them; a model that cannot be shown a picture is an error then,
+since it would answer from the words alone and say nothing.  Slow: a
+minute or so.  The layer's layer-info, with a :note when the generator
+did not say whether its model can be shown a picture."
   (let* ((generator (require-generator))
          (doc (stratum-api::doc))
+         (shown (bt:with-lock-held (*lock*) (mapcar #'ref-png (chosen-references references))))
+         (takes (and shown (generator-references generator)))
+         (note (and shown (not takes) *unsaid-reference-note*))
          (dw (the-object doc doc-width))
          (dh (the-object doc doc-height)))
+    (when (eq takes :no)
+      (error "This model cannot be shown a picture, so the reference picture~p cannot be shown to it. (place-reference n) puts one in the document as it is."
+             (length shown)))
     (multiple-value-bind (sw sh) (fitted-size dw dh (generator-size generator))
       (multiple-value-bind (pixels w h)
-          (ask-generator generator (generator-body generator prompt seed sw sh))
-        (whole-layer! doc pixels w h name)))))
+          (ask-generator generator (generator-body generator prompt seed sw sh :reference shown))
+        (let ((info (whole-layer! doc pixels w h name)))
+          (if note (append info (list :note note)) info))))))
 
 (defparameter *background-reach* 6
   "How far, in the picture's pixels, a background made around a subject
@@ -582,7 +597,8 @@ layer-info."
                       (prompt-journal-stretched journal)))
               (stratum-api:layer-info index))))))))
 
-(defun stratum-api:generate-picture (prompt &key (name "Generated") (seed -1) (reference t) (strength 0.35))
+(defun stratum-api:generate-picture (prompt &key (name "Generated") (seed -1) (reference t) (strength 0.35)
+                                              references)
   "The open picture made over by PROMPT, as a new raster layer NAME on
 top of it, the picture's shape.  With REFERENCE the model is shown the
 picture and PROMPT reads as an instruction: said to keep the composition,
@@ -590,17 +606,23 @@ it does.  With none it starts from the picture with STRENGTH of noise,
 0 to 1, and PROMPT describes the result: 0.3 keeps the pose and little
 of the style, 0.6 redraws the subject.  A model that cannot be shown a
 picture would answer from the words alone and say nothing, so with one
-of those it starts from the picture all the same.  Slow: a minute or so.
-The layer's layer-info, with a :note when REFERENCE did not go as asked."
+of those it starts from the picture all the same.  With REFERENCES -- t
+for every reference picture attached to the prompt box, one's number, or
+a list of numbers -- the model is shown those too, after the picture, in
+that order; they need REFERENCE.  Slow: a minute or so.  The layer's
+layer-info, with a :note when REFERENCE did not go as asked."
+  (when (and references (not reference))
+    (error "Reference pictures are shown to the generator beside the document's picture: :references needs :reference t."))
   (let* ((generator (require-generator))
          (doc (stratum-api::doc))
+         (shown (bt:with-lock-held (*lock*) (mapcar #'ref-png (chosen-references references))))
          (takes (and reference (generator-references generator)))
          (reference (and reference (not (eq takes :no))))
          (note (cond (reference
-                      (unless takes
-                        "The image generator did not say whether its model can be shown a picture, so it may have worked from the words alone."))
+                      (unless takes *unsaid-reference-note*))
                      ((eq takes :no)
-                      (format nil "This model cannot be shown a picture, so it started from the picture, with ~,2f of noise." strength))))
+                      (format nil "This model cannot be shown a picture, so it started from the picture, with ~,2f of noise~@[, and the reference picture~p went unused~]."
+                              strength (and shown (length shown))))))
          dw dh sw sh body)
     (bt:with-lock-held (*lock*)
       (setf dw (the-object doc doc-width)
@@ -608,7 +630,7 @@ The layer's layer-info, with a :note when REFERENCE did not go as asked."
       (multiple-value-setq (sw sh) (fitted-size dw dh (generator-size generator)))
       (let ((picture (png-octets (resample-rgba (the-object doc (render-cpu)) dw dh sw sh) sw sh)))
         (setf body (if reference
-                       (generator-body generator prompt seed sw sh :reference picture)
+                       (generator-body generator prompt seed sw sh :reference (cons picture shown))
                        (generator-body generator prompt seed sw sh :image picture :strength strength)))))
     (multiple-value-bind (pixels w h) (ask-generator generator body)
       (let ((info (whole-layer! doc pixels w h name)))

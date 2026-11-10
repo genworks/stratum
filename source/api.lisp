@@ -31,6 +31,7 @@
            #:select-rect #:select-polygon #:select-wand #:select-all #:select-none
            #:invert-selection #:feather #:contract-selection #:expand-selection #:refine-selection #:select-subject #:selection #:look #:generate-fill #:generate-layer #:generate-background #:generate-picture
            #:generator-models #:use-generator-model
+           #:references #:place-reference #:add-reference #:remove-reference #:clear-references
            #:fill-selection #:clear-selection #:paint #:gradient #:move-pixels #:transform
            #:copy #:cut #:paste #:cut-out
            #:levels #:curves #:hue-saturation #:gaussian-blur #:unsharp-mask #:add-noise
@@ -52,9 +53,10 @@
     fill-selection clear-selection paint gradient move-pixels transform copy cut paste cut-out
     levels curves hue-saturation gaussian-blur unsharp-mask add-noise
     crop image-size canvas-size rotate color-mode undo redo set-history-source
-    drawing-sources place-drawing)
+    drawing-sources place-drawing references place-reference)
   "The operations the prompt box's agent may run: everything but the
-file operations and the choice of document, which are the page's.")
+file operations, the choice of document and the attaching of reference
+pictures, which are the page's.")
 
 ;;; Finding things.
 

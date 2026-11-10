@@ -119,13 +119,17 @@ so nothing else can be named."
 
 (defun turn-pictures (dir)
   "The names of the pictures kept in DIR, a prompt's directory, in the
-order they were made: before, look-1 ..., after."
+order the model met them: before, reference-1 ..., look-1 ..., after."
   (let ((names (loop for file in (uiop:directory-files dir)
                      when (equal (pathname-type file) "png") collect (pathname-name file))))
-    (append (and (member "before" names :test #'equal) (list "before"))
-            (sort (remove-if-not (lambda (name) (eql 0 (search "look-" name))) names)
-                  #'< :key (lambda (name) (or (parse-integer name :start 5 :junk-allowed t) 0)))
-            (and (member "after" names :test #'equal) (list "after")))))
+    (flet ((numbered (prefix)
+             (sort (remove-if-not (lambda (name) (eql 0 (search prefix name))) names)
+                   #'< :key (lambda (name)
+                              (or (parse-integer name :start (length prefix) :junk-allowed t) 0)))))
+      (append (and (member "before" names :test #'equal) (list "before"))
+              (numbered "reference-")
+              (numbered "look-")
+              (and (member "after" names :test #'equal) (list "after"))))))
 
 (defun read-octets-file (path)
   (with-open-file (in path :element-type '(unsigned-byte 8))

@@ -1096,6 +1096,17 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-prompt-box { width: 100%; box-sizing: border-box; background: #17181b; color: inherit;
   border: 1px solid #3a3e45; border-radius: 3px; padding: 4px 6px; font: inherit; resize: vertical; }
 .st-prompt-log { font-size: 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; }
+#stratum-panel .st-ref-add { width: 100%; border-style: dashed; text-align: center; margin-bottom: 6px; }
+#stratum-panel .st-ref-add:disabled { opacity: .5; cursor: default; }
+.st-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.st-ref { position: relative; width: 56px; height: 56px; border: 1px solid #3a3e45; border-radius: 3px;
+  background: #17181b; overflow: hidden; }
+.st-ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.st-ref-n { position: absolute; left: 0; bottom: 0; padding: 0 4px; font-size: 10px;
+  background: rgba(0,0,0,0.65); color: #e8eaed; border-top-right-radius: 3px; }
+#stratum-panel .st-ref-remove { position: absolute; top: 0; right: 0; width: 18px; height: 18px; padding: 0;
+  line-height: 16px; border: none; border-radius: 0 0 0 3px; background: rgba(0,0,0,0.65); color: #e8eaed; }
+#stratum-prompt.st-dropping .st-prompt-box { border-color: #4a8fe0; }
 .st-prompt-turn { border-top: 1px solid #2c2f35; padding: 4px 0; }
 .st-prompt-you, .st-prompt-reply, .st-prompt-forms { border-left: 3px solid; padding: 2px 4px 2px 7px;
   margin: 4px 0; white-space: pre-wrap; }
@@ -1210,6 +1221,9 @@ body.st-phone #stratum-prompt { border-top: none; margin-top: 0; padding-top: 0;
 body.st-phone #stratum-status { margin: 0 0 6px; }
 body.st-phone #stratum-layers > .st-layers-head, body.st-phone #stratum-prompt > .st-layers-head { display: none; }
 body.st-phone .st-prompt-log { max-height: none; font-size: 14px; }
+body.st-phone .st-ref { width: 68px; height: 68px; }
+body.st-phone #stratum-panel .st-ref-remove { min-height: 0; width: 28px; height: 28px; padding: 0;
+  border: none; background: rgba(0,0,0,0.65); font-size: 18px; line-height: 26px; }
 body.st-phone #stratum-tools { width: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px;
   padding: 0 0 8px; border-right: none; background: none; overflow: visible; }
 body.st-phone .st-tool-btn { width: 46px; height: 44px; border-radius: 6px; }

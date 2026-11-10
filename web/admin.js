@@ -8,7 +8,9 @@
 //
 // The admin page, /stratum/admin (source/admin.lisp): the visitors with
 // what each did, session by session, and the sessions in memory with
-// their documents' layers.  It only reads.  Everything shown here that
+// their documents' layers.  It reads, and deletes from the two logs what
+// its operator asks it to, each time after asking back: one line, one
+// prompt, or everything kept of a visitor.  Everything shown here that
 // a visitor typed -- a prompt, a document's name, a request's body --
 // goes into the page as text, never as markup.
 
@@ -19,6 +21,8 @@
   var opened = {};   // visitor key -> true while that visitor's card is open
   var limits = {};   // visitor key -> how many events to ask for
   var live = {};     // session id -> true for the sessions in memory
+  var heads = {};    // visitor key -> the head of that visitor's card
+  var facts = null;  // the line about the server, under the title
   var EVENTS = 300;
 
   function el(tag, attrs, kids) {
@@ -32,11 +36,26 @@
     return e;
   }
 
-  function get(path) {
-    return fetch(path, { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
-      if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t.slice(0, 300)); });
-      return r.json();
+  function fill(e, kids) {
+    e.textContent = '';
+    kids.forEach(function (k) {
+      if (k) e.appendChild(typeof k === 'string' ? document.createTextNode(k) : k);
     });
+  }
+
+  function answer(r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t.slice(0, 300)); });
+    return r.json();
+  }
+
+  function get(path) {
+    return fetch(path, { credentials: 'same-origin', cache: 'no-store' }).then(answer);
+  }
+
+  function post(path, body) {
+    return fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                         headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify(body) }).then(answer);
   }
 
   function when(iso) {
@@ -183,13 +202,67 @@
     return el('div', { 'class': 'ad-session' }, kids);
   }
 
+  // ---- deleting ---------------------------------------------------------------
+
+  function whose(v) {
+    return v.name || 'the open gate';
+  }
+
+  // A button that deletes what BODY names once QUESTION is answered yes,
+  // since nothing brings a record back; THEN runs when it is gone.
+  function remover(label, kind, question, body, then) {
+    var b = el('button', { 'class': 'ad-' + kind, type: 'button', text: label });
+    b.addEventListener('click', function () {
+      if (!window.confirm(question)) return;
+      b.disabled = true;
+      post('/stratum/api/admin/delete', body).then(then).catch(function (e) {
+        b.disabled = false;
+        window.alert('Could not delete: ' + e.message);
+      });
+    });
+    return b;
+  }
+
+  function entryRemover(v, ev, then) {
+    if (ev.kind === 'prompt') {
+      return remover('Delete', 'del', 'Delete this prompt of ' + whose(v) + ', with its forms and its pictures?  It cannot be brought back.',
+                     { who: v.key, turn: ev.turn }, then);
+    }
+    return remover('Delete', 'del', 'Delete this ' + (ev.kind === 'upload' ? 'upload, and the picture kept of it,' : 'line') +
+                   ' from the record of ' + whose(v) + '?  It cannot be brought back.',
+                   { who: v.key, line: ev.line, mark: ev.mark }, then);
+  }
+
+  function everythingRemover(v, total) {
+    return remover('Delete everything kept of ' + whose(v), 'danger',
+                   'Delete everything kept of ' + whose(v) + ': ' + count(total, 'line or prompt', 'lines and prompts') +
+                   ', with every picture kept with them?  ' + (v.invited ? 'Their invite stays.  ' : '') + 'It cannot be brought back.',
+                   { who: v.key, everything: true },
+                   function () { opened[v.key] = false; load(); });
+  }
+
+  // After one thing of V's has gone: the counts on their card and under
+  // the title, and their record again, all in place, so that the page
+  // stays where it was for the next one.
+  function recount(v, body) {
+    get('/stratum/api/admin').then(function (res) {
+      var now = res.visitors.filter(function (x) { return x.key === v.key; })[0];
+      if (!now || !heads[v.key] || !facts) { render(res); return; }
+      Object.keys(now).forEach(function (k) { v[k] = now[k]; });
+      fill(heads[v.key], visitorHead(v));
+      fill(facts, serverFacts(res));
+      loadVisitor(v, body);
+    }).catch(load);
+  }
+
   function loadVisitor(v, body) {
     var limit = limits[v.key] || EVENTS;
-    body.textContent = 'Loading…';
+    if (!body.firstChild) body.textContent = 'Loading…';
     get('/stratum/api/admin/visitor?who=' + encodeURIComponent(v.key) + '&limit=' + limit).then(function (res) {
       var session = null;
       body.textContent = '';
       body.appendChild(inviteFacts(v));
+      if (res.total) body.appendChild(el('p', {}, [everythingRemover(v, res.total)]));
       if (res.total > res.events.length) {
         var all = el('button', { text: 'Show all' });
         all.addEventListener('click', function () { limits[v.key] = 20000; loadVisitor(v, body); });
@@ -202,22 +275,28 @@
           session = ev.session;
           body.appendChild(sessionHead(v, session));
         }
-        body.appendChild(ev.kind === 'prompt' ? promptRow(ev) : lineRow(v, ev));
+        var row = ev.kind === 'prompt' ? promptRow(ev) : lineRow(v, ev);
+        row.appendChild(entryRemover(v, ev, function () { recount(v, body); }));
+        body.appendChild(row);
       });
     }).catch(function (e) {
       body.textContent = 'Could not load this visitor: ' + e.message;
     });
   }
 
-  function visitorCard(v) {
-    var body = el('div', { 'class': 'ad-body' });
+  function visitorHead(v) {
     var head = [el('span', { 'class': 'ad-name', text: v.name || 'Open gate (no invite)' })];
     if (!v.invited && v.name) head.push(pill('no invite now'));
     head.push(el('span', { 'class': 'ad-dim', text: [count(v.visits, 'visit'), count(v.prompts, 'prompt'),
                                                      count(v.changes, 'change') + ' by hand', count(v.uploads, 'upload'),
                                                      count(v.sessions.length, 'session')].join(' · ') }));
     head.push(el('span', { 'class': 'ad-dim', text: v.last ? 'last ' + ago(v.last) : 'nothing recorded' }));
-    var card = el('details', { 'class': 'ad-card' }, [el('summary', {}, head), body]);
+    return head;
+  }
+
+  function visitorCard(v) {
+    var body = el('div', { 'class': 'ad-body' });
+    var card = el('details', { 'class': 'ad-card' }, [heads[v.key] = el('summary', {}, visitorHead(v)), body]);
     var shown = false;
     function show() {
       opened[v.key] = card.open;
@@ -271,22 +350,28 @@
 
   // ---- the page ---------------------------------------------------------------
 
-  function render(res) {
-    var refresh = el('button', { text: 'Refresh' });
-    refresh.addEventListener('click', load);
+  function serverFacts(res) {
     var server = res.server;
-    live = {};
-    res.sessions.forEach(function (s) { if (s.id) live[s.id] = true; });
-    root.textContent = '';
-    root.appendChild(el('div', { 'class': 'ad-head' }, [
-      el('h1', { text: 'Stratum admin' }), el('a', { href: '/stratum/', text: 'the editor' }), refresh]));
-    root.appendChild(el('div', { 'class': 'ad-facts' }, [
+    return [
       fact('as of', when(res.now)),
       fact('Lisp', server.lisp),
       server.heapUsed === null ? null : fact('heap', Math.round(server.heapUsed * 100) + '%'),
       fact('gate', server.gate ? 'invites only' : 'open', server.gate ? '' : 'warn'),
       fact('activity log', server.activityLog ? 'on' : 'off', server.activityLog ? '' : 'warn'),
-      fact('prompt log', server.promptLog ? server.promptsKept + ' kept of ' + server.promptLimit : 'off', server.promptLog ? '' : 'warn')]));
+      fact('prompt log', server.promptLog ? server.promptsKept + ' kept of ' + server.promptLimit : 'off', server.promptLog ? '' : 'warn')];
+  }
+
+  function render(res) {
+    var refresh = el('button', { text: 'Refresh' });
+    refresh.addEventListener('click', load);
+    var server = res.server;
+    live = {};
+    heads = {};
+    res.sessions.forEach(function (s) { if (s.id) live[s.id] = true; });
+    root.textContent = '';
+    root.appendChild(el('div', { 'class': 'ad-head' }, [
+      el('h1', { text: 'Stratum admin' }), el('a', { href: '/stratum/', text: 'the editor' }), refresh]));
+    root.appendChild(facts = el('div', { 'class': 'ad-facts' }, serverFacts(res)));
     if (!server.activityLog) {
       root.appendChild(el('p', { 'class': 'ad-warn', text: 'The activity log is off: visits, uploads and requests made by hand are not being recorded.' }));
     }

@@ -94,6 +94,13 @@ which could wait on a body nobody meant to read."
           ;; the page's own packing; the line's query says how to read it
           (t "bin"))))
 
+(defun print-activity-line (line out)
+  "LINE, a plist, written to OUT as the activity log keeps one."
+  (with-standard-io-syntax
+    (let ((*print-readably* nil) (*package* (find-package :keyword)) (*print-case* :downcase))
+      (prin1 line out)
+      (terpri out))))
+
 (defun note-activity! (req &key upload)
   "A line for REQ in its visitor's file, with UPLOAD, the octets of an
 opened or placed picture, kept beside it.  Nothing when the log is off
@@ -129,10 +136,8 @@ written must not cost anyone their request."
             (with-open-file (out (merge-pathnames (format nil "~a.log" name) *activity-directory*)
                                  :direction :output :if-exists :append :if-does-not-exist :create
                                  :external-format :utf-8)
-              (with-standard-io-syntax
-                (let ((*print-readably* nil) (*package* (find-package :keyword)) (*print-case* :downcase))
-                  (prin1 (loop for (key value) on line by #'cddr when value append (list key value)) out)
-                  (terpri out))))))
+              (print-activity-line (loop for (key value) on line by #'cddr when value append (list key value))
+                                   out))))
       (serious-condition (e)
         (let ((*print-readably* nil))
           (format *error-output* "~&[stratum] activity log: ~a~%" e))))))
@@ -150,6 +155,38 @@ evaluated."
             (loop for line = (read in nil in)
                   until (eq line in)
                   collect line)))))))
+
+(defun activity-line-mark (line)
+  "A short word for LINE's content, the same while the line is: whoever
+names a line by where it stands in its file says this too, and so cannot
+take another for it once the file has changed."
+  (format nil "~36r" (sxhash (with-output-to-string (out) (print-activity-line line out)))))
+
+(defun delete-activity-line! (who index mark)
+  "Line INDEX of WHO's activity file, counted from 0, taken out, and
+the picture kept with it deleted; an error unless the line there has
+MARK (activity-line-mark), as it will not once the file has been
+rewritten.  The file is written anew beside itself and put in its place
+whole; the last line gone, the file goes.  The line."
+  (bt:with-lock-held (*activity-lock*)
+    (let* ((lines (activity-lines who))
+           (line (and (integerp index) (<= 0 index) (nth index lines))))
+      (unless (and line (equal mark (activity-line-mark line)))
+        (error "That line is not where it was: the record has changed.  Refresh and try again."))
+      (let ((file (merge-pathnames (format nil "~a.log" (visitor-file-name who)) *activity-directory*))
+            (kept (append (subseq lines 0 index) (nthcdr (1+ index) lines)))
+            (upload (getf line :upload)))
+        (if kept
+            (let ((anew (merge-pathnames (format nil "~a.rewrite" (visitor-file-name who))
+                                         *activity-directory*)))
+              (with-open-file (out anew :direction :output :if-exists :supersede :external-format :utf-8)
+                (dolist (line kept) (print-activity-line line out)))
+              (uiop:rename-file-overwriting-target anew file))
+            (delete-file file))
+        (when (and upload (notany (lambda (line) (equal upload (getf line :upload))) kept))
+          (let ((picture (probe-file (merge-pathnames upload *activity-directory*))))
+            (when picture (delete-file picture))))
+        line))))
 
 (defun activity-report ()
   "Each visitor in the activity log: (name :requests n :uploads n :first

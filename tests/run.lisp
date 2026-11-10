@@ -2954,7 +2954,10 @@ one visitor's lines and prompts, with the forms run by hand and the
 planned ones and how each went; the pictures kept with them; and the
 sessions in memory with their layers.  Anyone else is told there is no
 such page.  Nothing it answers has a token in it, and looking touches
-no session and writes no line."
+no session and writes no line.  An admin's POST of JSON, and nothing
+else, deletes a line, a prompt or everything kept of a visitor: a line
+only where its mark says it still stands, a prompt only as its own
+visitor's, and the invite and the session in memory stay."
   (let* ((port (free-port))
          ;; UTF-8 on the wire, as the server the rooms start has it: a
          ;; visitor's words and the page's script are not all Latin-1
@@ -2983,6 +2986,20 @@ no session and writes no line."
                (destructuring-bind (code body) (fetch token path)
                  (list code (ignore-errors (yason:parse (octets-string body))))))
              (codes (token) (mapcar (lambda (door) (first (fetch token door))) doors))
+             (post (token body &optional (content-type "application/json"))
+               ;; the delete door asked as the page asks it: (status text)
+               (raw-post port (format nil "/stratum/api/admin/delete?invite=~a" token)
+                         (map '(vector (unsigned-byte 8)) #'char-code body) content-type))
+             (del (token body &optional (content-type "application/json"))
+               (first (post token body content-type)))
+             (events ()
+               (let ((timeline (second (json "alicetoken" "/stratum/api/admin/visitor?who=Bob"))))
+                 (and timeline (gethash "events" timeline))))
+             (kept ()
+               ;; how many lines, pictures and prompts are kept of Bob
+               (list (length (activity-lines "Bob"))
+                     (length (uiop:directory-files (merge-pathnames "Bob/" *activity-directory*)))
+                     (length (kept-turns "Bob"))))
              (named (name rows key)
                (find name rows :key (lambda (row) (gethash key row)) :test #'equal))
              (show (table)
@@ -3136,7 +3153,75 @@ no session and writes no line."
                            (notany (lambda (text) (or (search "alicetoken" text) (search "bobtoken" text)))
                                    answered)))
                (check "looking touched no session" (= (sess-touched session) touched)
-                      (- (sess-touched session) touched)))
+                      (- (sess-touched session) touched))
+               ;; deleting, which only an admin's POST of JSON does
+               (let* ((everything "{\"who\":\"Bob\",\"everything\":true}")
+                      (change (named "change" (events) "kind"))
+                      (one (format nil "{\"who\":\"Bob\",\"line\":~d,\"mark\":~s}"
+                                   (gethash "line" change) (gethash "mark" change)))
+                      (refused (list (del "bobtoken" everything) (del "nobody" everything)
+                                     (del "alicetoken" everything "text/plain")
+                                     (first (fetch "alicetoken" "/stratum/api/admin/delete")))))
+                 (check "deleting takes an admin's POST of JSON: anyone and anything else leaves all as it was"
+                        (and (equal refused '(404 403 500 500)) (equal (kept) '(3 1 2)))
+                        (list refused (kept)))
+                 (check "one line goes, named by where it stands and its mark, and the others stay"
+                        (and (eql 200 (del "alicetoken" one))
+                             (equal (kept) '(2 1 2))
+                             (equal (mapcar #'line-kind (activity-lines "Bob")) '(:visit :upload)))
+                        (kept))
+                 (check "the same place under a mark it no longer has is refused: the record has changed"
+                        (and (eql 500 (del "alicetoken" one)) (equal (kept) '(2 1 2)))
+                        (kept))
+                 (let* ((upload (named "upload" (events) "kind"))
+                        (kept-picture (merge-pathnames (gethash "file" upload) *activity-directory*))
+                        (there (probe-file kept-picture)))
+                   (check "an upload's line takes the picture kept of it along"
+                          (and there
+                               (eql 200 (del "alicetoken" (format nil "{\"who\":\"Bob\",\"line\":~d,\"mark\":~s}"
+                                                                  (gethash "line" upload) (gethash "mark" upload))))
+                               (not (probe-file kept-picture))
+                               (equal (kept) '(1 0 2)))
+                          (kept)))
+                 (let* ((turns (mapcar (lambda (event) (gethash "turn" event))
+                                       (remove "prompt" (events) :key (lambda (event) (gethash "kind" event))
+                                                                 :test-not #'equal)))
+                        (wrong (mapcar (lambda (body) (del "alicetoken" body))
+                                       (list (format nil "{\"who\":\"Alice\",\"turn\":~s}" (first turns))
+                                             "{\"who\":\"Bob\",\"turn\":\"..\"}"
+                                             "{\"who\":\"../Bob\",\"everything\":true}"
+                                             "{\"who\":\"Bob\",\"line\":7,\"mark\":\"X\"}"
+                                             "{\"who\":\"Bob\"}"
+                                             "[]"))))
+                   (check "a prompt goes only as its own visitor's, and nothing goes that is not named"
+                          (and (equal wrong (make-list 6 :initial-element 500)) (equal (kept) '(1 0 2)))
+                          (list wrong (kept)))
+                   (check "one prompt goes with its pictures, and the other stays"
+                          (and (= 2 (length turns))
+                               (eql 200 (del "alicetoken" (format nil "{\"who\":\"Bob\",\"turn\":~s}" (first turns))))
+                               (equal (mapcar #'turn-name (kept-turns "Bob")) (rest turns)))
+                          (mapcar #'turn-name (kept-turns "Bob"))))
+                 ;; Bob opens another picture, so that there is some of everything
+                 (raw-post port (format nil "/stratum/api/open?invite=bobtoken&s=~a" id) picture)
+                 (lines-written "Bob" 2)
+                 (let* ((before (kept))
+                        (said (second (post "alicetoken" everything)))
+                        (summary (second (json "alicetoken" "/stratum/api/admin")))
+                        (bob (and summary (named "Bob" (gethash "visitors" summary) "name"))))
+                   (check "everything kept of a visitor goes at once, and the answer counts it"
+                          (and (equal before '(2 1 1)) (equal (kept) '(0 0 0))
+                               (search "\"lines\":2" said) (search "\"uploads\":1" said)
+                               (search "\"prompts\":1" said)
+                               (not (probe-file (merge-pathnames "Bob.log" *activity-directory*)))
+                               (not (probe-file (merge-pathnames "Bob/" *activity-directory*))))
+                          (list before (kept)))
+                   (check "their invite and their session in memory stay, and deleting left no line of the admin's"
+                          (and bob (eq (gethash "invited" bob) t)
+                               (equal (mapcar (lambda (key) (gethash key bob)) '("visits" "uploads" "prompts"))
+                                      '(0 0 0))
+                               (named id (gethash "sessions" summary) "id")
+                               (null (activity-lines "Alice")))
+                          (show bob)))))
              (setf *admins* nil)
              (check "with no admin named, there is no page for anyone"
                     (equal (codes "alicetoken") (make-list 6 :initial-element 404)))

@@ -497,12 +497,26 @@ Below the visitors, each session in memory shows whose it is, when it
 was last touched, and its documents with their size, mode, undo depth
 and layers (name, kind, blend mode, opacity, mask, hidden or not).
 
-The page only reads. It takes no session's lock, so it never waits on
-or holds up someone's request; a session that is busy says so. Looking
-writes no line in the activity log and keeps no session alive. No
-invite token is in anything it answers. What it can show is what the
-logs hold: with the prompt log or the activity log off, the page says
-which, and that half is empty.
+Looking changes nothing. The page takes no session's lock, so it never
+waits on or holds up someone's request; a session that is busy says
+so. Looking writes no line in the activity log and keeps no session
+alive. No invite token is in anything it answers. What it can show is
+what the logs hold: with the prompt log or the activity log off, the
+page says which, and that half is empty.
+
+The one thing the page changes is what its admin deletes from those two
+records. Each entry of a visitor has a Delete button: a line of the
+activity log goes alone (an upload's line takes the picture kept of it
+along), and a prompt goes with its forms and pictures. The line that
+says a prompt was sent and the prompt itself are two entries, each with
+its own button. "Delete everything kept of ..." at the top of an open
+visitor takes that visitor's whole activity file, the pictures they
+sent and all their prompts. Every one of these asks first, and none can
+be undone. The invite stays (`stratum:revoke-invite!` removes one),
+and so do the visitor's sessions in memory, documents and all, until
+they are forgotten as any idle session is. Deleting goes through one
+door, `/stratum/api/admin/delete`, which takes only a POST of JSON from
+an admin, so a link or a form on some other site cannot set it off.
 
 `*admins*` is `nil` by default, and then there is no such page: to a
 visitor who is not an admin, `/stratum/admin` and its doors under

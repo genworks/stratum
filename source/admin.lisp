@@ -15,9 +15,11 @@
 ;; with their documents' layers.  It reads what is already kept -- the
 ;; gate's roster and counts (invite.lisp), the activity log
 ;; (activity.lisp), the prompt log (prompt.lisp) -- and the sessions
-;; table; it keeps nothing of its own and changes nothing.  Only a name
-;; on *admins* gets any of it; anyone else, invited or not, is told there
-;; is no such page.  No invite token is in anything it answers.
+;; table; it keeps nothing of its own.  The one thing it changes is what
+;; it is asked to delete from those two logs: a line, a prompt, or
+;; everything kept of a visitor.  Only a name on *admins* gets any of it;
+;; anyone else, invited or not, is told there is no such page.  No invite
+;; token is in anything it answers.
 ;;
 
 (defvar *admins* nil
@@ -335,7 +337,10 @@ up, and the sessions in memory: a JSON object for the admin page."
                  "query" query
                  "body" (plain-text (getf line :body))
                  "file" (getf line :upload)
-                 "bytes" (plain-number (getf line :bytes)))))
+                 "bytes" (plain-number (getf line :bytes))
+                 ;; what the delete door is told to name this line
+                 "line" (getf line :index)
+                 "mark" (getf line :mark))))
 
 (defun turn-json (turn)
   "The prompt of TURN, an entry of logged-turns, with the whole of its
@@ -377,7 +382,9 @@ and the names of its pictures."
   "The last LIMIT things kept of the visitor whose file is KEY, oldest
 first: the lines of their activity file and their prompts in the prompt
 log, by time.  (values events how-many-in-all)."
-  (let* ((lines (activity-lines key))
+  (let* ((lines (loop for line in (activity-lines key)
+                      for index from 0
+                      collect (list* :index index :mark (activity-line-mark line) line)))
          (turns (remove-if-not (lambda (turn) (equal key (visitor-file-name (getf turn :who))))
                                (logged-turns)))
          (events (stable-sort (append (mapcar (lambda (line) (cons (or (getf line :time) "") line)) lines)
@@ -396,6 +403,55 @@ its listed name, or an error."
     (error "There is no such picture."))
   (merge-pathnames file *activity-directory*))
 
+;;; What is kept, deleted.
+
+(defun visitor-key (key)
+  "KEY when it is a visitor's file name as the summary gives them, or an
+error: nothing else is looked for under the logs."
+  (unless (and (stringp key) (plusp (length key)) (equal key (visitor-file-name key)))
+    (error "Say which visitor: who, as the summary names them."))
+  key)
+
+(defun kept-turns (key)
+  "The prompt log's directories of the prompts the page shows under the
+visitor whose file is KEY."
+  (when *prompt-log-directory*
+    (remove-if-not (lambda (turn)
+                     (and (probe-file (merge-pathnames "turn.sexp" turn))
+                          (equal key (visitor-file-name (getf (turn-head turn) :who)))))
+                   (uiop:subdirectories *prompt-log-directory*))))
+
+(defun delete-turn! (key name)
+  "The prompt NAME deleted from the prompt log, its pictures with it;
+an error unless it is one of the visitor's whose file is KEY."
+  (let ((turn (find name (kept-turns key) :key #'turn-name :test #'equal)))
+    (unless turn
+      (error "That visitor has no such prompt."))
+    (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
+    name))
+
+(defun delete-kept! (key)
+  "Everything the page shows of the visitor whose file is KEY, deleted:
+their activity file, the pictures they opened, and their prompts in the
+prompt log.  Their invite stays, and so does a session of theirs in
+memory.  What went, as (:lines n :uploads n :prompts n)."
+  (let ((lines 0) (uploads 0) (prompts 0))
+    (when *activity-directory*
+      ;; with the log's lock, so no line is being written as its file goes
+      (bt:with-lock-held (*activity-lock*)
+        (let ((file (probe-file (merge-pathnames (format nil "~a.log" key) *activity-directory*)))
+              (pictures (probe-file (merge-pathnames (format nil "~a/" key) *activity-directory*))))
+          (when file
+            (setf lines (length (activity-lines key)))
+            (delete-file file))
+          (when pictures
+            (setf uploads (length (uiop:directory-files pictures)))
+            (uiop:delete-directory-tree (uiop:ensure-directory-pathname pictures) :validate t)))))
+    (dolist (turn (kept-turns key))
+      (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
+      (incf prompts))
+    (list :lines lines :uploads uploads :prompts prompts)))
+
 ;;; The doors.
 
 (defun handle-admin-summary (req)
@@ -410,9 +466,7 @@ the last N things kept of one visitor, oldest first."
         (limit (or (ignore-errors
                     (parse-integer (net.aserve:request-query-value "limit" req :post nil)))
                    *admin-events*)))
-    (unless (and (stringp key) (plusp (length key)) (equal key (visitor-file-name key)))
-      (error "Say which visitor: ?who= as the summary names them."))
-    (multiple-value-bind (events total) (visitor-events key (max 1 (min limit 20000)))
+    (multiple-value-bind (events total) (visitor-events (visitor-key key) (max 1 (min limit 20000)))
       (json-string (json-object "who" key "total" total "events" (coerce events 'vector))))))
 
 (defun handle-admin-picture (req)
@@ -432,6 +486,32 @@ when it cannot be shown."
                                             (net.aserve:request-query-value "file" req :post nil))))
         (make-array 0 :element-type '(unsigned-byte 8)))))
 
+(defun handle-admin-delete (req)
+  "POST /stratum/api/admin/delete, a JSON body naming a visitor as the
+summary does and what of theirs is to go: {who: KEY, everything: true},
+everything kept of them; {who: KEY, line: N, mark: WORD}, one line of
+their activity file, as the visitor door numbered and marked it, and the
+picture kept with it; {who: KEY, turn: NAME}, one of their prompts and
+its pictures.  {deleted: {lines, uploads, prompts}}.  Nothing but a POST
+of JSON is taken, which a form on someone else's page cannot send."
+  (unless (and (eq (net.aserve:request-method req) :post)
+               (search "application/json" (or (net.aserve:header-slot-value req :content-type) "")
+                       :test #'char-equal))
+    (error "Deleting takes a POST of JSON."))
+  (let* ((body (ignore-errors (yason:parse (gwl:request-body-text req))))
+         (key (visitor-key (and (hash-table-p body) (gethash "who" body))))
+         (gone (cond ((eq (gethash "everything" body) t) (delete-kept! key))
+                     ((gethash "turn" body)
+                      (delete-turn! key (gethash "turn" body))
+                      (list :lines 0 :uploads 0 :prompts 1))
+                     ((gethash "line" body)
+                      (let ((line (delete-activity-line! key (gethash "line" body) (gethash "mark" body))))
+                        (list :lines 1 :uploads (if (getf line :upload) 1 0) :prompts 0)))
+                     (t (error "Say what is to go: everything, a line or a turn.")))))
+    (json-string (json-object "deleted" (json-object "lines" (getf gone :lines)
+                                                     "uploads" (getf gone :uploads)
+                                                     "prompts" (getf gone :prompts))))))
+
 (defparameter *admin-css* "
 html, body { margin: 0; background: #1b1d21; color: #d8dbe0;
   font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
@@ -442,6 +522,11 @@ a { color: #8fb8f0; }
 button { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; border-radius: 4px;
   padding: 5px 12px; font: inherit; cursor: pointer; }
 button:hover { background: #3b5f93; }
+button:disabled { opacity: .5; cursor: default; }
+button.ad-danger { border-color: #7a3a3a; color: #e0a0a0; }
+button.ad-del { grid-column: 4; grid-row: 1; align-self: start; padding: 0 8px; font-size: 12px;
+  background: none; border-color: transparent; color: #8a9099; }
+button.ad-danger:hover, button.ad-del:hover { background: #7a2e2e; border-color: #7a2e2e; color: #fff; }
 .ad-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .ad-head h1 { flex: 1; }
 .ad-dim { color: #8a9099; }
@@ -466,7 +551,7 @@ button:hover { background: #3b5f93; }
 .ad-pill.ad-live { background: #1f3a2a; border-color: #2f6b45; color: #9fd8b0; }
 .ad-pill.ad-hand { background: #3a2f1f; border-color: #6b5530; color: #e0c088; }
 .ad-pill.ad-model { background: #1f2b3a; border-color: #3b5f93; color: #a8c8f0; }
-.ad-event { display: grid; grid-template-columns: 140px 78px 1fr; gap: 2px 10px; padding: 5px 0;
+.ad-event { display: grid; grid-template-columns: 140px 78px 1fr auto; gap: 2px 10px; padding: 5px 0;
   border-top: 1px solid #2c2f35; align-items: baseline; }
 .ad-event > .ad-time { color: #8a9099; font-size: 12px; white-space: nowrap; }
 .ad-what { min-width: 0; overflow-wrap: anywhere; }
@@ -494,8 +579,9 @@ table.ad-layers th { color: #8a9099; font-weight: 400; font-size: 11px; }
 .ad-scroll { overflow-x: auto; }
 @media (max-width: 640px) {
   #admin { padding: 10px 12px 60px; }
-  .ad-event { grid-template-columns: 1fr auto; }
-  .ad-event > .ad-what { grid-column: 1 / -1; }
+  .ad-event { grid-template-columns: 1fr auto auto; }
+  .ad-event > .ad-what { grid-column: 1 / -1; grid-row: 2; }
+  button.ad-del { grid-column: 3; }
   .ad-pictures img { max-width: 44vw; }
 }
 "
@@ -557,6 +643,7 @@ under /stratum, and then for *admins* alone."
     (pub "/stratum/api/admin" "application/json" #'handle-admin-summary)
     (pub "/stratum/api/admin/visitor" "application/json" #'handle-admin-visitor)
     (pub "/stratum/api/admin/picture" "image/png" #'handle-admin-picture)
-    (pub "/stratum/api/admin/upload" "image/png" #'handle-admin-upload)))
+    (pub "/stratum/api/admin/upload" "image/png" #'handle-admin-upload)
+    (pub "/stratum/api/admin/delete" "application/json" #'handle-admin-delete)))
 
 (pushnew 'publish-admin! *stratum-publishers*)

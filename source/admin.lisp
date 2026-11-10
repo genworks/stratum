@@ -19,7 +19,9 @@
 ;; it is asked to delete from those two logs: a line, a prompt, or
 ;; everything kept of a visitor.  Only a name on *admins* gets any of it;
 ;; anyone else, invited or not, is told there is no such page.  No invite
-;; token is in anything it answers.
+;; token is in anything it answers.  The page's look and the pieces its
+;; script is built from are Gendl's visitor-log's, shared with other
+;; applications' admin pages; web/admin.js holds what is Stratum's.
 ;;
 
 (defvar *admins* nil
@@ -517,97 +519,27 @@ of JSON is taken, which a form on someone else's page cannot send."
                                                      "prompts" (getf gone :prompts))))))
 
 (defparameter *admin-css* "
-html, body { margin: 0; background: #1b1d21; color: #d8dbe0;
-  font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-#admin { max-width: 1100px; margin: 0 auto; padding: 12px 16px 60px; }
-h1 { font-size: 18px; margin: 4px 0; }
-h2 { font-size: 14px; margin: 22px 0 8px; color: #c9cdd3; text-transform: uppercase; letter-spacing: .06em; }
-a { color: #8fb8f0; }
-button { background: #2c2f35; color: inherit; border: 1px solid #3a3e45; border-radius: 4px;
-  padding: 5px 12px; font: inherit; cursor: pointer; }
-button:hover { background: #3b5f93; }
-button:disabled { opacity: .5; cursor: default; }
-button.ad-danger { border-color: #7a3a3a; color: #e0a0a0; }
-button.ad-del { grid-column: 4; grid-row: 1; align-self: start; padding: 0 8px; font-size: 12px;
-  background: none; border-color: transparent; color: #8a9099; }
-button.ad-danger:hover, button.ad-del:hover { background: #7a2e2e; border-color: #7a2e2e; color: #fff; }
-.ad-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.ad-head h1 { flex: 1; }
-.ad-dim { color: #8a9099; }
-.ad-mono { font: 12px/1.45 ui-monospace, Menlo, monospace; }
-.ad-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; color: #9aa0a8; font-size: 13px; }
-.ad-facts b { color: #d8dbe0; font-weight: 600; }
-.ad-warn { color: #e0b070; }
-.ad-bad { color: #e07a7a; }
-.ad-card { background: #222429; border: 1px solid #33363c; border-radius: 6px; margin: 8px 0; }
-.ad-card > summary { padding: 9px 12px; cursor: pointer; list-style: none; display: flex;
-  flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
-.ad-card > summary::-webkit-details-marker { display: none; }
-.ad-card > summary::before { content: '\\25b8'; color: #8a9099; }
-.ad-card[open] > summary::before { content: '\\25be'; }
-.ad-card[open] > summary { border-bottom: 1px solid #33363c; }
-.ad-name { font-weight: 600; font-size: 15px; }
-.ad-body { padding: 8px 12px 12px; }
-.ad-session { border-left: 3px solid #3b5f93; padding: 2px 0 2px 10px; margin: 12px 0 4px; }
 .ad-session.ad-none { border-color: #4a5058; }
-.ad-pill { display: inline-block; border-radius: 9px; padding: 0 8px; font-size: 11px; line-height: 18px;
-  background: #2c2f35; color: #c9cdd3; border: 1px solid #3a3e45; white-space: nowrap; }
-.ad-pill.ad-live { background: #1f3a2a; border-color: #2f6b45; color: #9fd8b0; }
-.ad-pill.ad-hand { background: #3a2f1f; border-color: #6b5530; color: #e0c088; }
-.ad-pill.ad-model { background: #1f2b3a; border-color: #3b5f93; color: #a8c8f0; }
-.ad-event { display: grid; grid-template-columns: 140px 78px 1fr auto; gap: 2px 10px; padding: 5px 0;
-  border-top: 1px solid #2c2f35; align-items: baseline; }
-.ad-event > .ad-time { color: #8a9099; font-size: 12px; white-space: nowrap; }
-.ad-what { min-width: 0; overflow-wrap: anywhere; }
-.ad-words { border-left: 3px solid #4a8fe0; background: #1f2b3a; color: #e8eaed; padding: 3px 8px;
-  margin: 3px 0; white-space: pre-wrap; }
-.ad-reply { border-left: 3px solid #8a9099; padding: 3px 8px; margin: 3px 0; white-space: pre-wrap; }
-.ad-forms { border-left: 3px solid #5aa469; background: #17181b; padding: 3px 8px; margin: 3px 0; }
-.ad-form { padding-left: 1.4em; text-indent: -1.4em; white-space: pre-wrap; }
-.ad-form::before { content: '\\2713\\a0'; color: #5aa469; }
-.ad-form.ad-failed::before { content: '\\2717\\a0'; color: #e07a7a; }
-.ad-form .ad-value { color: #8a9099; }
-.ad-form.ad-failed .ad-value { color: #e07a7a; }
-details.ad-more > summary { cursor: pointer; color: #8a9099; font-size: 12px; }
-details.ad-more > pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #c9cdd3;
-  background: #17181b; padding: 6px 8px; border-radius: 3px; max-height: 50vh; overflow: auto; }
 .ad-pictures { display: flex; flex-wrap: wrap; gap: 8px; margin: 5px 0; }
 .ad-pictures figure { margin: 0; }
 .ad-pictures img { display: block; max-width: 180px; max-height: 140px; border: 1px solid #3a3e45;
   background: #17181b; border-radius: 3px; }
 .ad-pictures figcaption { font-size: 11px; color: #8a9099; text-align: center; }
-table.ad-layers { border-collapse: collapse; margin: 4px 0 10px; font-size: 13px; }
-table.ad-layers td, table.ad-layers th { padding: 2px 12px 2px 0; text-align: left; white-space: nowrap; }
-table.ad-layers th { color: #8a9099; font-weight: 400; font-size: 11px; }
-.ad-hidden { color: #6b7079; }
-.ad-scroll { overflow-x: auto; }
 @media (max-width: 640px) {
-  #admin { padding: 10px 12px 60px; }
-  .ad-event { grid-template-columns: 1fr auto auto; }
-  .ad-event > .ad-what { grid-column: 1 / -1; grid-row: 2; }
-  button.ad-del { grid-column: 3; }
   .ad-pictures img { max-width: 44vw; }
 }
 "
-  "The admin page: one column of cards, at a desk or on a phone.")
+  "What the admin page shows that no other application's does, pictures,
+after the look every such page has (visitor-log:*admin-css*).")
 
-(define-object stratum-admin-page (base-html-page)
-  :input-slots
-  ((title "Stratum admin")
-   (use-x3dom? nil)
-   (use-svgpanzoom? nil)
-   (use-tailwind? nil)
-   (use-ajax? nil)
-   (additional-header-content
-    (string-append (call-next-method)
-                   (with-lhtml-string () (:style (str *admin-css*))))))
-
-  :computed-slots
-  ((body (with-lhtml-string ()
-           (:div :id "admin" "Loading...")
-           (:script :src (format nil "/stratum/admin.js?v=~a"
-                                 (file-write-date (merge-pathnames "web/admin.js" *stratum-dir*)))
-                    "")))))
+(defun admin-html ()
+  "The page: visitor-log's, its script of helpers ahead of ours."
+  (visitor-log:admin-page
+   "Stratum admin"
+   (list "/stratum/admin-kit.js"
+         (format nil "/stratum/admin.js?v=~a"
+                 (file-write-date (merge-pathnames "web/admin.js" *stratum-dir*))))
+   :css *admin-css*))
 
 (defun serve-admin (req ent content-type fn)
   "FN, a function of REQ answering a string or octets, for someone on
@@ -639,8 +571,9 @@ under /stratum, and then for *admins* alone."
                                            (when (door-admits? req ent *max-request-bytes*)
                                              (serve-admin req ent content-type fn))))))
     (pub "/stratum/admin" "text/html"
-         (lambda (req) (declare (ignore req))
-           (the-object (make-object 'stratum-admin-page) main-sheet)))
+         (lambda (req) (declare (ignore req)) (admin-html)))
+    (pub "/stratum/admin-kit.js" "application/javascript"
+         (lambda (req) (declare (ignore req)) visitor-log:*admin-script*))
     (pub "/stratum/admin.js" "application/javascript"
          (lambda (req) (declare (ignore req))
            (uiop:read-file-string (merge-pathnames "web/admin.js" *stratum-dir*))))

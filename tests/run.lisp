@@ -3211,7 +3211,7 @@ visitor's, and the invite and the session in memory stay."
          (dir (format nil "/tmp/stratum-admin-~d/" stamp))
          (prompts (format nil "/tmp/stratum-admin-prompts-~d/" stamp))
          (id "adm-s1")
-         (doors '("/stratum/admin" "/stratum/admin.js" "/stratum/api/admin"
+         (doors '("/stratum/admin" "/stratum/admin-kit.js" "/stratum/admin.js" "/stratum/api/admin"
                   "/stratum/api/admin/visitor?who=Bob" "/stratum/api/admin/picture?turn=x&name=before"
                   "/stratum/api/admin/upload?who=Bob&file=x"))
          (picture (let* ((w 300) (h 200) (rgba (make-rgba w h)))
@@ -3287,16 +3287,21 @@ visitor's, and the invite and the session in memory stay."
                       (prompt-document doc "make it blue — please" :session id :who "Bob")))))
                (setf (sess-touched session) touched)
                (check "anyone but an admin, invited or not, is told there is no such page"
-                      (and (equal (codes "bobtoken") (make-list 6 :initial-element 404))
-                           (equal (codes "nobody") (make-list 6 :initial-element 403))))
+                      (and (equal (codes "bobtoken") (make-list (length doors) :initial-element 404))
+                           (equal (codes "nobody") (make-list (length doors) :initial-element 403))))
                (let ((page (fetch "alicetoken" "/stratum/admin"))
+                     (kit (fetch "alicetoken" "/stratum/admin-kit.js"))
                      (script (fetch "alicetoken" "/stratum/admin.js")))
-                 (check "an admin gets the page and its script"
+                 (check "an admin gets the page, the shared pieces it is built from, and its script"
                         (and (eql 200 (first page))
+                             (search "/stratum/admin-kit.js" (octets-string (second page)))
                              (search "/stratum/admin.js?v=" (octets-string (second page)))
+                             (search ".ad-pictures" (octets-string (second page)))
+                             (eql 200 (first kit))
+                             (search "visitorAdmin" (octets-string (second kit)))
                              (eql 200 (first script))
                              (search "/stratum/api/admin" (octets-string (second script))))
-                        (list (first page) (first script))))
+                        (list (first page) (first kit) (first script))))
                (let* ((summary (json "alicetoken" "/stratum/api/admin"))
                       (visitors (and (second summary) (gethash "visitors" (second summary))))
                       (bob (named "Bob" visitors "name"))
@@ -3465,11 +3470,11 @@ visitor's, and the invite and the session in memory stay."
                           (show bob)))))
              (setf *admins* nil)
              (check "with no admin named, there is no page for anyone"
-                    (equal (codes "alicetoken") (make-list 6 :initial-element 404)))
+                    (equal (codes "alicetoken") (make-list (length doors) :initial-element 404)))
              (setf *admins* '("Alice")
                    *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
              (check "with the gate open, a list of names admits no one"
-                    (equal (codes "x") (make-list 6 :initial-element 404)))
+                    (equal (codes "x") (make-list (length doors) :initial-element 404)))
              (setf *admins* t)
              (check "and t admits whoever the gate does"
                     (eql 200 (first (fetch "x" "/stratum/api/admin")))))

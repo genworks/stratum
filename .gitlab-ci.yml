@@ -38,8 +38,8 @@ stages:
   - fetch
   - test
 
-# The invite gate and sexp-agent live in Gendl (gwl/source/); until the
-# images carry them, the two files come from Gendl's repository -- by
+# The invite gate, visitor-log and sexp-agent live in Gendl (gwl/source/);
+# until the images carry them, the files come from Gendl's repository -- by
 # git, which common-lisp.net's bot screen lets through where it answers
 # curl with a challenge page (the 2026-11-04 failure: the image read an
 # HTML page as Lisp).  The Gendl images have no git, so a job of its
@@ -57,8 +57,8 @@ gendl-files:
   script:
     - rm -rf gendl-partial gendl-files
     - git clone --depth 1 --filter=blob:none --no-checkout -b devo https://gitlab.common-lisp.net/gendl/gendl.git gendl-partial
-    - git -C gendl-partial checkout devo -- gwl/source/invite-gate.lisp gwl/source/sexp-agent.lisp
-    - mkdir gendl-files && cp gendl-partial/gwl/source/invite-gate.lisp gendl-partial/gwl/source/sexp-agent.lisp gendl-files/
+    - git -C gendl-partial checkout devo -- gwl/source/invite-gate.lisp gwl/source/visitor-log.lisp gwl/source/sexp-agent.lisp
+    - mkdir gendl-files && cp gendl-partial/gwl/source/invite-gate.lisp gendl-partial/gwl/source/visitor-log.lisp gendl-partial/gwl/source/sexp-agent.lisp gendl-files/
     - for f in gendl-files/*.lisp; do head -c 120 "$f" | grep -q Copyright || { echo "$f is not the Lisp file"; exit 1; }; done
     - git -C gendl-partial log --oneline -1
   artifacts:
@@ -75,6 +75,7 @@ gendl-files:
   variables:
     GIT_DEPTH: "1"
     INVITE_GATE_FILE: /tmp/stratum/gendl-files/invite-gate.lisp
+    VISITOR_LOG_FILE: /tmp/stratum/gendl-files/visitor-log.lisp
     SEXP_AGENT_FILE: /tmp/stratum/gendl-files/sexp-agent.lisp
   before_script:
     # A private copy: the build directory belongs to the runner's helper,

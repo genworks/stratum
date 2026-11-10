@@ -12,7 +12,9 @@
 // its operator asks it to, each time after asking back: one line, one
 // prompt, or everything kept of a visitor.  Everything shown here that
 // a visitor typed -- a prompt, a document's name, a request's body --
-// goes into the page as text, never as markup.
+// goes into the page as text, never as markup.  The pieces it is built
+// from (elements, fetching, times, pills, the delete button) are
+// window.visitorAdmin, Gendl's visitor-log's, which the page loads first.
 
 (function () {
   'use strict';
@@ -25,75 +27,11 @@
   var facts = null;  // the line about the server, under the title
   var EVENTS = 300;
 
-  function el(tag, attrs, kids) {
-    var e = document.createElement(tag);
-    Object.keys(attrs || {}).forEach(function (k) {
-      if (k === 'text') e.textContent = attrs[k]; else e.setAttribute(k, attrs[k]);
-    });
-    (kids || []).forEach(function (k) {
-      if (k) e.appendChild(typeof k === 'string' ? document.createTextNode(k) : k);
-    });
-    return e;
-  }
-
-  function fill(e, kids) {
-    e.textContent = '';
-    kids.forEach(function (k) {
-      if (k) e.appendChild(typeof k === 'string' ? document.createTextNode(k) : k);
-    });
-  }
-
-  function answer(r) {
-    if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t.slice(0, 300)); });
-    return r.json();
-  }
-
-  function get(path) {
-    return fetch(path, { credentials: 'same-origin', cache: 'no-store' }).then(answer);
-  }
-
-  function post(path, body) {
-    return fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
-                         headers: { 'Content-Type': 'application/json' },
-                         body: JSON.stringify(body) }).then(answer);
-  }
-
-  function when(iso) {
-    var d = iso ? new Date(iso) : null;
-    if (!d) return '';
-    if (isNaN(d.getTime())) return String(iso);
-    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
-
-  function ago(iso) {
-    var d = iso ? new Date(iso) : null;
-    if (!d || isNaN(d.getTime())) return '';
-    var s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
-    if (s < 90) return s + ' s ago';
-    if (s < 5400) return Math.round(s / 60) + ' min ago';
-    if (s < 129600) return Math.round(s / 3600) + ' h ago';
-    return Math.round(s / 86400) + ' days ago';
-  }
-
-  function count(n, one, many) {
-    return n + ' ' + (n === 1 ? one : (many || one + 's'));
-  }
-
-  function pill(text, kind) {
-    return el('span', { 'class': 'ad-pill' + (kind ? ' ad-' + kind : ''), text: text });
-  }
-
-  function fact(label, value, kind) {
-    return el('span', kind ? { 'class': 'ad-' + kind } : {}, [label + ' ', el('b', { text: String(value) })]);
-  }
-
-  function more(label, text) {
-    return el('details', { 'class': 'ad-more' }, [el('summary', { text: label }), el('pre', { 'class': 'ad-mono', text: text })]);
-  }
-
-  function shortId(id) {
-    return id && id.length > 14 ? id.slice(0, 12) + '…' : id;
-  }
+  // What every operator's page is built from, served by
+  // /stratum/admin-kit.js (Gendl's visitor-log).
+  var A = window.visitorAdmin;
+  var el = A.el, fill = A.fill, get = A.get, when = A.when, ago = A.ago, count = A.count,
+      pill = A.pill, fact = A.fact, more = A.more, shortId = A.shortId;
 
   // ---- one visitor's record -------------------------------------------------
 
@@ -107,10 +45,7 @@
   }
 
   function eventRow(ev, label, kind, what) {
-    return el('div', { 'class': 'ad-event' }, [
-      el('span', { 'class': 'ad-time', title: ev.time || '', text: when(ev.time) }),
-      el('span', {}, [pill(label, kind)]),
-      el('div', { 'class': 'ad-what' }, what)]);
+    return A.eventRow(ev.time, label, kind, what);
   }
 
   // A prompt as the activity log has it: the request's body, which may
@@ -211,16 +146,7 @@
   // A button that deletes what BODY names once QUESTION is answered yes,
   // since nothing brings a record back; THEN runs when it is gone.
   function remover(label, kind, question, body, then) {
-    var b = el('button', { 'class': 'ad-' + kind, type: 'button', text: label });
-    b.addEventListener('click', function () {
-      if (!window.confirm(question)) return;
-      b.disabled = true;
-      post('/stratum/api/admin/delete', body).then(then).catch(function (e) {
-        b.disabled = false;
-        window.alert('Could not delete: ' + e.message);
-      });
-    });
-    return b;
+    return A.remover('/stratum/api/admin/delete', label, kind, question, body, then);
   }
 
   function entryRemover(v, ev, then) {
@@ -319,7 +245,7 @@
         el('td', { text: Math.round(layer.opacity * 100) + '%' }),
         el('td', { text: layer.mask ? 'mask' : '' })]));
     });
-    return el('div', { 'class': 'ad-scroll' }, [el('table', { 'class': 'ad-layers' }, rows)]);
+    return el('div', { 'class': 'ad-scroll' }, [el('table', { 'class': 'ad-table' }, rows)]);
   }
 
   function sessionCard(s) {

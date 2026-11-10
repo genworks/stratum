@@ -548,7 +548,11 @@ an admin, so a link or a form on some other site cannot set it off.
 `*admins*` is `nil` by default, and then there is no such page: to a
 visitor who is not an admin, `/stratum/admin` and its doors under
 `/stratum/api/admin` answer 404 like any path never published (someone
-with no invite gets the gate's refusal, as everywhere else). A list of
+with no invite gets the gate's refusal, as everywhere else). The page's
+look and the pieces its script is built from come from Gendl's
+`visitor-log`, which other applications' admin pages share;
+`dev.lisp` loads that file from a Gendl checkout when the image does
+not carry it. A list of
 names needs the invite gate, since the names are the invites'; `t`
 admits whoever the gate does, for a room on one's own machine.
 

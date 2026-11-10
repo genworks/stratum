@@ -53,8 +53,10 @@
 ;;; before sexp-agent could say the model declined has the package and
 ;;; not that), else the files INVITE_GATE_FILE and
 ;;; SEXP_AGENT_FILE name (.gitlab-ci.yml fetches them from the Gendl
-;;; repository).
+;;; repository).  A third, visitor-log (VISITOR_LOG_FILE), has what the
+;;; admin page is built from.
 (dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
+                (:visitor-log "VISITOR_LOG_FILE" "visitor-log" "ADMIN-PAGE")
                 (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "TRIMMED-PICTURES")))
   (destructuring-bind (package variable name proof) need
     (handler-case

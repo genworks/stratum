@@ -44,8 +44,10 @@
 ;; carried it -- else the one file
 ;; from a Gendl checkout beside this one, or wherever INVITE_GATE_FILE
 ;; and SEXP_AGENT_FILE point.  An image with an older copy and no file
-;; to be found keeps its copy.
+;; to be found keeps its copy.  A third, visitor-log (VISITOR_LOG_FILE),
+;; has what the admin page is built from.
 (dolist (need '((:invite-gate "INVITE_GATE_FILE" "invite-gate" nil)
+                (:visitor-log "VISITOR_LOG_FILE" "visitor-log" "ADMIN-PAGE")
                 (:sexp-agent "SEXP_AGENT_FILE" "sexp-agent" "TRIMMED-PICTURES")))
   (destructuring-bind (package variable name proof) need
     (unless (and (find-package package)

@@ -166,7 +166,11 @@
 
   function fetchJSON(url, init) {
     return fetch(url, init).then(function (r) {
-      if (!r.ok) return r.text().then(function (t) { throw new Error(url + ': ' + r.status + ' ' + t); });
+      if (!r.ok) return r.text().then(function (t) {
+        var e = new Error(url + ': ' + r.status + ' ' + t);
+        e.status = r.status;
+        throw e;
+      });
       return r.json();
     });
   }
@@ -5086,6 +5090,61 @@
       S.clipboard = clipboard;
       S.select = select;
     }).then(function () {
+      // A prompt's job outlives the page's connection: a question about
+      // it that cannot reach the server is asked again, and only the
+      // server's own word, or a long silence, ends the wait.  The
+      // server here is a script of answers.
+      var realFetch = window.fetch, timing = S.promptPoll, note = S.promptNote;
+      var script = [], asked = 0, notes = [];
+      function answer(body, status) {
+        return function () {
+          return Promise.resolve(new Response(JSON.stringify(body), { status: status || 200 }));
+        };
+      }
+      function drop() { return Promise.reject(new TypeError('Failed to fetch')); }
+      function hang(init) {
+        return new Promise(function (resolve, reject) {
+          init.signal.addEventListener('abort', function () { reject(new DOMException('gave up', 'AbortError')); });
+        });
+      }
+      function outcome(steps) {
+        script = steps;
+        asked = 0;
+        notes = [];
+        return S.awaitPromptJob('selftest-job').then(function (res) { return { res: res, asked: asked, notes: notes }; },
+                                                     function (e) { return { error: String(e.message), asked: asked, notes: notes }; });
+      }
+      function restore() {
+        window.fetch = realFetch;
+        S.promptPoll = timing;
+        S.promptNote = note;
+      }
+      window.fetch = function (url, init) {
+        if (String(url).indexOf('prompt?job=selftest-job') < 0) return realFetch.apply(window, arguments);
+        asked++;
+        return (script.length > 1 ? script.shift() : script[0])(init);
+      };
+      S.promptPoll = { every: 5, again: 5, patience: 60, misses: 4 };
+      S.promptNote = function (text) { notes.push(text); };
+      return outcome([drop, hang, answer({ status: 'working', note: 'round 2' }), drop, answer({ status: 'done', reply: 'here' })])
+        .then(function (o) {
+          check('A prompt outlives questions that never reach the server, dropped or hung',
+                !!o.res && o.res.reply === 'here' && o.asked === 5, o);
+          check('and the person is told while it asks again, then how far the work is',
+                /asking again/.test(o.notes[0]) && o.notes.indexOf('round 2') === 2, o.notes);
+          return outcome([drop]);
+        }).then(function (o) {
+          check('A long silence ends the wait, saying the work may be done all the same',
+                o.asked === 4 && /may have finished/.test(o.error), o);
+          return outcome([answer({ error: 'no such document' }, 404)]);
+        }).then(function (o) {
+          check('The server\'s own refusal ends it at once', o.asked === 1 && /no such document/.test(o.error), o);
+          return outcome([answer('bad gateway', 502), answer({ status: 'failed', error: 'the model said no' })]);
+        }).then(function (o) {
+          check('A gateway\'s refusal is asked again, and a failed job says why',
+                o.asked === 2 && o.error === 'the model said no', o);
+        }).then(restore, function (e) { restore(); throw e; });
+    }).then(function () {
       // The exported picture is never a cached one: each export has an
       // address of its own, and the server tells caches to keep nothing.
       return fetch(S.exportAddress()).then(function (r) {
@@ -5350,20 +5409,56 @@
   };
   S.busyText = function () { return busyText; };
 
+  // How the page waits for a prompt's job, in milliseconds: it asks
+  // EVERY so often while the job works.  A question that cannot reach
+  // the server (a phone's screen dimmed, the network changed under it),
+  // or that hangs past PATIENCE, is asked AGAIN after that long, up to
+  // MISSES times running: the job works on at the server whatever
+  // becomes of the page's connection, and its answer waits there.
+  S.promptPoll = { every: 1500, again: 3000, patience: 20000, misses: 40 };
+
+  // True of a failure to reach the server at all, or of a gateway
+  // answering in its place; false of anything the server itself said.
+  function unreached(e) {
+    if (!e) return false;
+    return e instanceof TypeError || e.name === 'AbortError' ||
+      e.status === 502 || e.status === 503 || e.status === 504 || (e.status >= 520 && e.status <= 524);
+  }
+
   function awaitPromptJob(id) {
     return new Promise(function (resolve, reject) {
+      var missed = 0, said = '';
       function poll() {
-        fetchJSON(api('prompt?job=' + encodeURIComponent(id))).then(function (res) {
+        var timing = S.promptPoll, stop = new AbortController();
+        var patience = setTimeout(function () { stop.abort(); }, timing.patience);
+        fetchJSON(api('prompt?job=' + encodeURIComponent(id)), { signal: stop.signal }).then(function (res) {
+          clearTimeout(patience);
           // the model may look and answer several times: say how far it is
-          if (res.status === 'working' && res.note && S.promptNote) S.promptNote(res.note);
-          if (res.status === 'working') setTimeout(poll, 1500);
+          if (res.status === 'working' && S.promptNote && (res.note || missed)) S.promptNote(res.note || '');
+          if (said) S.busy(said);
+          missed = 0;
+          said = '';
+          if (res.status === 'working') setTimeout(poll, timing.every);
           else if (res.status === 'done') resolve(res);
           else reject(new Error(res.error || ('the prompt job is ' + res.status)));
-        }, reject);
+        }, function (e) {
+          clearTimeout(patience);
+          if (!unreached(e)) return reject(e);
+          if (++missed >= timing.misses) {
+            return reject(new Error('The server could not be reached, so its answer never arrived. ' +
+                                    'It may have finished the work all the same: reload the page to see.'));
+          }
+          // over the picture, where a phone shows it, and by the prompt
+          if (!said && S.busyText()) said = S.busyText();
+          if (said) S.busy('No answer from the server; asking again...');
+          if (S.promptNote) S.promptNote('no answer from the server; asking again');
+          setTimeout(poll, timing.again);
+        });
       }
       poll();
     });
   }
+  S.awaitPromptJob = awaitPromptJob;
 
   // GENERATE, the Generate dialog's settings: the text goes to the image
   // generator with no model between them.

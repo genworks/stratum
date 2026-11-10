@@ -14,7 +14,8 @@
 ;; small picture of each, and deletes some, all, or everything kept of
 ;; them, their prompts in the prompt log (prompt.lisp) included.  Only an
 ;; invited visitor has any of this: with the gate open there is no one to
-;; say whose pictures are whose.
+;; say whose pictures are whose.  The operator's own hand on the same
+;; records is here too: forget-visitor! and purge-prompt-log!.
 ;;
 
 (defparameter *upload-preview-size* 160
@@ -101,6 +102,51 @@ was removed, as (:activity t-or-nil :uploads n :prompts n)."
       (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
       (incf prompts))
     (list :activity activity :uploads uploads :prompts prompts)))
+
+(defun turn-stamp (time)
+  "TIME as the prompt log's directory names begin, yyyymmdd-hhmmss in
+UTC: a universal time, or a string of the digits however they are
+punctuated, as much of the time as is said (\"2026-11-09\",
+\"20261109-2330\", \"2026-11-09T23:30:00Z\")."
+  (etypecase time
+    (integer (multiple-value-bind (second minute hour day month year) (decode-universal-time time 0)
+               (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d" year month day hour minute second)))
+    (string (let ((digits (remove-if-not #'digit-char-p time)))
+              (unless (<= 4 (length digits) 14)
+                (error "~s is not a time: a year at least, to the second at most." time))
+              (if (> (length digits) 8)
+                  (format nil "~a-~a" (subseq digits 0 8) (subseq digits 8))
+                  digits)))))
+
+(defun purge-prompt-log! (&key (who nil who?) from before keep dry-run)
+  "Prompts deleted from the prompt log, the operator's choice of them:
+those of WHO, the name on an invite (nil: those with no name, asked
+through an open gate); those from FROM on, and those before BEFORE,
+times in UTC as turn-stamp reads them; and of those chosen, all but the
+newest KEEP.  One of the four at least must be said: nothing is chosen
+by default.  With DRY-RUN nothing is deleted.  What went, as (:deleted
+n :oldest name :newest name :left n), or :would-delete with DRY-RUN."
+  (unless (or who? from before keep)
+    (error "Say which prompts: :who, :from, :before or :keep."))
+  (check-type keep (or null (integer 0)))
+  (let* ((from (and from (turn-stamp from)))
+         (before (and before (turn-stamp before)))
+         (all (and *prompt-log-directory* (uiop:subdirectories *prompt-log-directory*)))
+         (chosen (sort (loop for turn in all
+                             for name = (car (last (pathname-directory turn)))
+                             when (and (or (null from) (string<= from name))
+                                       (or (null before) (string< name before))
+                                       (or (not who?)
+                                           (equal who (turn-who (merge-pathnames "turn.sexp" turn)))))
+                               collect (cons name turn))
+                       #'string< :key #'car))
+         (going (if keep (butlast chosen keep) chosen)))
+    (unless dry-run
+      (dolist (turn going)
+        (uiop:delete-directory-tree (uiop:ensure-directory-pathname (cdr turn)) :validate t)))
+    (list (if dry-run :would-delete :deleted) (length going)
+          :oldest (car (first going)) :newest (car (first (last going)))
+          :left (- (length all) (length going)))))
 
 (defun my-uploads-json (who)
   (json-string

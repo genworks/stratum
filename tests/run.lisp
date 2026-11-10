@@ -3728,6 +3728,68 @@ log that cannot be written costs nobody their prompt."
         (setf *prompt-log-directory* nil)
         (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))))))
 
+(defun test-purge-prompt-log ()
+  "purge-prompt-log!: nothing chosen by default; a dry run deletes
+nothing; one person's prompts in a window of time go, and no one
+else's; nobody's go by :who nil; the newest :keep of those chosen stay;
+and a time reads as a universal time or as digits however punctuated."
+  (let* ((root (format nil "/tmp/stratum-purge-~d/" (get-universal-time)))
+         (*prompt-log-directory* (uiop:ensure-directory-pathname root)))
+    (flet ((turns ()
+             (sort (mapcar (lambda (dir) (car (last (pathname-directory dir)))) (uiop:subdirectories root))
+                   #'string<))
+           (refused? (&rest args)
+             (handler-case (progn (apply #'purge-prompt-log! args) nil)
+               (error () t))))
+      (unwind-protect
+           (progn
+             ;; six prompts over three days, written as log-turn! writes them
+             (dolist (turn '(("20261108-101500-000001-AAAA" "Alice") ("20261109-120000-000002-BBBB" nil)
+                             ("20261109-233000-000003-CCCC" "Alice") ("20261109-234109-000004-DDDD" "Bob")
+                             ("20261110-000500-000005-EEEE" "Bob") ("20261110-090000-000006-FFFF" "Alice")))
+               (let ((path (format nil "~a~a/" root (first turn))))
+                 (ensure-directories-exist path)
+                 (with-open-file (out (merge-pathnames "turn.sexp" path) :direction :output :external-format :utf-8)
+                   (let ((*package* (find-package :common-lisp)) (*print-case* :downcase))
+                     (prin1 (list :who (second turn) :prompt "x" :ok t) out)))))
+             (check "purge-prompt-log! chooses nothing by default, and says so"
+                    (and (refused?) (= 6 (length (turns)))))
+             (check "a time that is no time is refused"
+                    (and (refused? :before "soon") (= 6 (length (turns)))))
+             (let ((would (purge-prompt-log! :who "Alice" :dry-run t)))
+               (check "a dry run says what would go and deletes nothing"
+                      (and (equal would '(:would-delete 3 :oldest "20261108-101500-000001-AAAA"
+                                          :newest "20261110-090000-000006-FFFF" :left 3))
+                           (= 6 (length (turns))))
+                      would))
+             (let ((gone (purge-prompt-log! :who "Bob" :from "2026-11-09T23:30" :before "20261110")))
+               (check "one person's prompts in a window of time go, and no one else's"
+                      (and (equal gone '(:deleted 1 :oldest "20261109-234109-000004-DDDD"
+                                         :newest "20261109-234109-000004-DDDD" :left 5))
+                           (equal (turns) '("20261108-101500-000001-AAAA" "20261109-120000-000002-BBBB"
+                                            "20261109-233000-000003-CCCC" "20261110-000500-000005-EEEE"
+                                            "20261110-090000-000006-FFFF")))
+                      (list gone (turns))))
+             (let ((gone (purge-prompt-log! :who nil)))
+               (check "the prompts of no one named go by :who nil"
+                      (and (= 1 (getf gone :deleted)) (= 4 (getf gone :left))
+                           (not (member "20261109-120000-000002-BBBB" (turns) :test #'equal)))
+                      (list gone (turns))))
+             (let ((gone (purge-prompt-log! :before (encode-universal-time 0 0 0 10 11 2026 0) :keep 1)))
+               (check "before a universal time, all but the newest kept"
+                      (and (= 1 (getf gone :deleted))
+                           (equal (turns) '("20261109-233000-000003-CCCC" "20261110-000500-000005-EEEE"
+                                            "20261110-090000-000006-FFFF")))
+                      (list gone (turns))))
+             (let ((gone (purge-prompt-log! :keep 0)))
+               (check ":keep 0 alone empties the log"
+                      (and (= 3 (getf gone :deleted)) (zerop (getf gone :left)) (null (turns)))
+                      (list gone (turns))))
+             (let ((*prompt-log-directory* nil))
+               (check "with no log there is nothing to purge"
+                      (equal (purge-prompt-log! :keep 0) '(:deleted 0 :oldest nil :newest nil :left 0)))))
+        (when (probe-file root) (uiop:delete-directory-tree (uiop:ensure-directory-pathname root) :validate t))))))
+
 (defun test-long-prompt ()
   "A prompt whose pictures outgrow a request drops the oldest, and one
 whose later call fails keeps what it did and says so."
@@ -4377,7 +4439,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

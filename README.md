@@ -427,6 +427,21 @@ log by default: the pictures are the visitors', so keeping them is the
 operator's decision, and the visitors should be told.  A log that
 cannot be written costs nobody their prompt.
 
+`(stratum:purge-prompt-log! ...)` deletes prompts from the log before
+their turn comes: `:who "name"` chooses one visitor's (`:who nil` those
+asked through an open gate, with no name), `:from` and `:before` a
+window of time, and `:keep 20` spares the newest twenty of those
+chosen.  A time is in UTC, as the directories are named: a universal
+time, or a string of its digits however punctuated, as much as is said
+(`"2026-11-09"`, `"20261109-2330"`).  One of the four must be given;
+`:dry-run t` deletes nothing and says what would go.
+
+```lisp
+(stratum:purge-prompt-log! :before "2026-11-01")            ; everything older
+(stratum:purge-prompt-log! :who "name" :from "2026-11-09T23:30" :before "2026-11-10")
+(stratum:purge-prompt-log! :keep 0)                         ; the whole log
+```
+
 ### Keeping a record of what each visitor does
 
 `(stratum:configure-activity-log! :directory "/path/")` keeps the rest:

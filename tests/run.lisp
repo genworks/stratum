@@ -3210,6 +3210,96 @@ open there is no one to delete for."
         (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
         (net.aserve:shutdown :server server)))))
 
+(defun test-notes ()
+  "Help > Send a Note over a real connection, behind a gate with one
+invite: the words are kept as one line of the visitor's record, with the
+document's name, and a picture of the document beside them when asked
+for -- one line, not also the line every door adds; no words, or too
+many, are refused; the admin page reads a note as a note and counts it,
+and My Uploads lists its picture; with the log off the door says the
+note was not kept."
+  (let* ((port (free-port))
+         (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
+         (old-gate *gate*) (old-dir (activity-directory))
+         (stamp (get-universal-time))
+         (roster (format nil "/tmp/stratum-notes-roster-~d.sexp" stamp))
+         (dir (format nil "/tmp/stratum-notes-~d/" stamp)))
+    (flet ((send (body)
+             (raw-post port "/stratum/api/note?invite=alicetoken&s=notes-test&doc=parity"
+                       (map '(vector (unsigned-byte 8)) #'char-code body) "application/json")))
+      (unwind-protect
+           (progn
+             (with-open-file (out roster :direction :output :if-exists :supersede)
+               (format out "~s~%" '("alicetoken" "Alice" "2026-11-11")))
+             (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite"))
+             (configure-gate! :invites-file roster)
+             (configure-activity-log! :directory dir)
+             (publish-visitor! server nil)
+             (let ((with (send "{\"text\": \"  the brush felt slow  \", \"picture\": true}"))
+                   (without (send "{\"text\": \"no picture, please\"}")))
+               (check "a note is answered as kept, with its picture when asked for"
+                      (and (eql 200 (first with)) (search "\"kept\":true" (second with))
+                           (search "\"picture\":true" (second with))
+                           (eql 200 (first without)) (search "\"picture\":false" (second without)))
+                      (list with without)))
+             (lines-written "Alice" 2)
+             ;; and nothing more than the two, a moment later
+             (sleep 0.3)
+             (let ((lines (activity-lines "Alice")))
+               (destructuring-bind (&optional one two &rest more) lines
+                 (check "each note is one line of the visitor's record, the words trimmed, the document named"
+                        (and one two (null more)
+                             (equal (getf one :door) "/stratum/api/note")
+                             (equal (getf one :note) "the brush felt slow")
+                             (equal (getf two :note) "no picture, please")
+                             (equal "parity" (query-part (getf one :query) "doc"))
+                             (equal "Alice" (getf one :who)))
+                        lines)
+                 (let ((kept (and one (getf one :upload))))
+                   (check "the picture of the document as it is now is kept beside the first, and none with the second"
+                          (and kept (search ".png" kept) (null (getf two :upload))
+                               (multiple-value-bind (rgba w h)
+                                   (read-png (with-open-file (in (merge-pathnames kept dir) :element-type '(unsigned-byte 8))
+                                               (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                                                 (read-sequence v in)
+                                                 v)))
+                                 (declare (ignore rgba))
+                                 ;; parity is 320 x 200
+                                 (and (plusp w) (= (* w 200) (* h 320)))))
+                          kept))
+                 (check "the admin page reads a note as a note, and counts the visitor's notes"
+                        (and one (eq :note (line-kind one)) (eq :note (line-kind two))
+                             (equal "the brush felt slow" (gethash "note" (line-json one)))
+                             (let ((alice (find "Alice" (coerce (gethash "visitors" (admin-summary)) 'list)
+                                                :key (lambda (row) (gethash "name" row)) :test #'equal)))
+                               (and alice (eql 2 (gethash "notes" alice)) (eql 0 (gethash "uploads" alice)))))
+                        (and one (line-json one)))
+                 (check "My Uploads lists the note's picture, the visitor's to delete"
+                        (equal '("note") (mapcar (lambda (u) (getf u :door)) (visitor-uploads "Alice")))
+                        (visitor-uploads "Alice"))))
+             (let ((empty (send "{\"text\": \"   \"}"))
+                   (long (send (format nil "{\"text\": \"~a\"}" (make-string (1+ *note-characters*) :initial-element #\x))))
+                   (junk (send "not json")))
+               (sleep 0.3)
+               (check "no words, too many, or no JSON are refused, and leave no line"
+                      (and (eql 500 (first empty)) (search "Write something" (second empty))
+                           (eql 500 (first long)) (search "up to" (second long))
+                           (eql 500 (first junk))
+                           (= 2 (length (activity-lines "Alice"))))
+                      (list (first empty) (first long) (first junk) (length (activity-lines "Alice")))))
+             (configure-activity-log! :directory nil)
+             (let ((off (send "{\"text\": \"anyone there?\", \"picture\": true}")))
+               (check "with the log off the door says the note was not kept"
+                      (and (eql 200 (first off)) (search "\"kept\":false" (second off))
+                           (search "\"picture\":false" (second off)))
+                      off)))
+        (setf *gate* old-gate)
+        (configure-activity-log! :directory old-dir)
+        (bt:with-lock-held (*sessions-lock*) (remhash "notes-test" *sessions*))
+        (when (probe-file roster) (delete-file roster))
+        (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
+        (net.aserve:shutdown :server server)))))
+
 (defun test-admin ()
   "The admin page over a real connection, behind a gate with two
 invites, one of them an admin's: the admin sees every visitor summed up;
@@ -3735,7 +3825,7 @@ picture, the reference and the rules."
                     (and (= w 64) (= h 40))))
              (length png))))
   (check "base64 of a known vector"
-         (equal (sexp-agent:base64-encode (coerce '(77 97 110) '(simple-array (unsigned-byte 8) (*)))) "TWFu")))
+         (equal (octets-base64 (coerce '(77 97 110) '(simple-array (unsigned-byte 8) (*)))) "TWFu")))
 
 (defun stub-model-reply (text)
   "A Messages response whose one text block is TEXT, or for (:refusal
@@ -4347,7 +4437,7 @@ first."
                                     (object "status" "completed"
                                             "result" (object "output_format" "png"
                                                              "images" (list (object "index" 0 "b64_json"
-                                                                                    (sexp-agent:base64-encode (png-octets rgba w h)))))))))
+                                                                                    (octets-base64 (png-octets rgba w h)))))))))
                                (t (object "status" job-state
                                           "error" (object "code" "generation_failed" "message" "out of memory")))))))
       (unwind-protect
@@ -4793,7 +4883,7 @@ and comes back again on redo; the undo list before it stays good."
   (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
-                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-reference-pictures test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
+                  test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-notes test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-reference-pictures test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg
                   test-threads test-golden))
     (handler-case (funcall test)
       (error (e) (check (format nil "~(~a~) ran without error" test) nil (princ-to-string e)))))

@@ -29,6 +29,16 @@
     (flexi-streams:with-output-to-sequence (s)
       (zpng:write-png-stream png s))))
 
+(defun octets-base64 (octets)
+  "OCTETS as a base64 string, on one line.  Ours, with cl-base64 (which
+sexp-agent loads), rather than sexp-agent's: Gendl b1209e24 renamed its
+base64-encode to octets-to-base64, because a package that uses
+AllegroServe inherits base64-encode from it, and an octet version
+defined there replaced aserve's string one.  This package uses
+AllegroServe too, hence the name."
+  (cl-base64:usb8-array-to-base64-string
+   (coerce octets '(simple-array (unsigned-byte 8) (*)))))
+
 (defparameter *png-signature* (coerce #(137 80 78 71 13 10 26 10) '(simple-array (unsigned-byte 8) (*))))
 
 (defun png-octets-p (octets)

@@ -501,6 +501,17 @@ everything kept of them (GET and POST `/stratum/api/my-uploads`, GET
 listed under their own invite.  Off by default, for the same reason as
 the prompt log.
 
+Help > Send a Note is how a visitor tells the operator something in
+their own words: what they tried, what confused them, what broke.  The
+note is a line of their file, with the time, the document's name and
+the words; "Include the picture as it is now" (on by default) keeps a
+picture of the document beside it, its longer side at most 1280 pixels,
+which My Uploads then lists like any other.  The dialog says, before
+anything is sent, that the note and its picture are kept for whoever
+runs the server to read.  With the activity log off a note goes
+nowhere, and the page says so.  POST `/stratum/api/note?doc=` with
+`{text, picture}` (up to 2000 characters) answers `{kept, picture}`.
+
 ### Private beta: invite links
 
 With an invites file set, `(stratum:configure-gate! :invites-file
@@ -524,10 +535,11 @@ functions, so several applications on one server are run the same way:
 `(setf stratum:*admins* '("Name"))` gives the people invited under
 those names a page at `/stratum/admin` that sums up the two records
 above with the invites and the sessions in memory. It lists every
-visitor, the most recently active first, with their visits, prompts,
-changes made by hand, uploads and sessions; an open visitor shows
+visitor, the most recently active first, with their notes, visits,
+prompts, changes made by hand, uploads and sessions; an open visitor shows
 what they did in order, session by session: each request made by hand
-with its door, document and body, each picture they opened, and each
+with its door, document and body, each note they sent with its picture,
+each picture they opened, and each
 prompt with its words, the forms that ran and how each went (a form
 that failed is marked with its error), the reply, and the pictures
 kept with it. A prompt a model planned names the model; forms sent
@@ -981,6 +993,10 @@ The self-test checks:
 - sessions: the page has a session id, a document made here is listed
   for this session and not for another nor for the shared pool, Close
   drops it, and what this session copied another session cannot paste;
+- Help > Send a Note, against a scripted server so no note lands in a
+  real record: a note with no words sends nothing, and the words,
+  trimmed, and the choice of picture go to the note door with the
+  document named, and the person is told the note is kept;
 - Image ▸ Mode ▸ Grayscale on the document: every pixel of a layer and
   the swatches turn gray, the Mode menu checks Grayscale, parity holds,
   and one undo brings the color and the mode back exactly;

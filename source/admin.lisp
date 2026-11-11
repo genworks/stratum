@@ -41,11 +41,13 @@ unless it asks for more.")
            t)))
 
 (defun line-kind (line)
-  "What a line of the activity log was: :visit, the page asked for;
-:download; :upload, a picture opened or placed; :asked, a prompt sent;
-:change, anything else done by hand."
+  "What a line of the activity log was: :note, Help > Send a Note (with
+or without its picture); :visit, the page asked for; :download;
+:upload, a picture opened or placed; :asked, a prompt sent; :change,
+anything else done by hand."
   (let ((door (getf line :door)))
-    (cond ((getf line :upload) :upload)
+    (cond ((getf line :note) :note)
+          ((getf line :upload) :upload)
           ((member door '("/stratum" "/stratum/") :test #'equal) :visit)
           ((eq (getf line :method) :get) :download)
           ((equal door "/stratum/api/prompt") :asked)
@@ -271,6 +273,7 @@ up, and the sessions in memory: a JSON object for the admin page."
                              "changes" (kind :change)
                              "uploads" (kind :upload)
                              "downloads" (kind :download)
+                             "notes" (kind :note)
                              "asked" (kind :asked)
                              "prompts" (length mine)
                              "first" (and times (reduce (lambda (a b) (if (string< a b) a b)) times))
@@ -329,6 +332,7 @@ up, and the sessions in memory: a JSON object for the admin page."
                  "document" (query-part query "doc")
                  "query" query
                  "body" (plain-text (getf line :body))
+                 "note" (plain-text (getf line :note))
                  "file" (getf line :upload)
                  "bytes" (plain-number (getf line :bytes))
                  ;; what the delete door is told to name this line
@@ -499,6 +503,7 @@ of JSON is taken, which a form on someone else's page cannot send."
 
 (defparameter *admin-css* "
 .ad-session.ad-none { border-color: #4a5058; }
+.ad-pill.ad-note { background: #3a1f33; border-color: #93407f; color: #f0b0e0; }
 .ad-pictures { display: flex; flex-wrap: wrap; gap: 8px; margin: 5px 0; }
 .ad-pictures figure { margin: 0; }
 .ad-pictures img { display: block; max-width: 180px; max-height: 140px; border: 1px solid #3a3e45;
@@ -508,8 +513,9 @@ of JSON is taken, which a form on someone else's page cannot send."
   .ad-pictures img { max-width: 44vw; }
 }
 "
-  "What the admin page shows that no other application's does, pictures,
-after the look every such page has (visitor-log:*admin-css*).")
+  "What the admin page shows that no other application's does, pictures
+and a visitor's notes, after the look every such page has
+(visitor-log:*admin-css*).")
 
 (defun admin-html ()
   "The page: visitor-log's, its script of helpers ahead of ours."

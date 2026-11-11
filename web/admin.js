@@ -61,6 +61,16 @@
 
   function lineRow(v, ev) {
     var doc = ev.document ? el('span', { 'class': 'ad-dim', text: ' in ' + ev.document }) : null;
+    if (ev.kind === 'note') {
+      // Help > Send a Note: the visitor's own words, first of all
+      var said = [el('span', { 'class': 'ad-dim', text: 'Sent a note' }), doc,
+                  el('div', { 'class': 'ad-words', text: ev.note || '' })];
+      if (ev.file) {
+        var shot = '/stratum/api/admin/upload?who=' + encodeURIComponent(v.key) + '&file=' + encodeURIComponent(ev.file);
+        said.push(pictures([{ src: shot, full: shot + '&size=1280', label: 'the picture as it was' }]));
+      }
+      return eventRow(ev, 'note', 'note', said);
+    }
     if (ev.kind === 'visit') return eventRow(ev, 'visit', '', ['Opened the page', doc]);
     if (ev.kind === 'download') return eventRow(ev, 'download', '', [el('span', { 'class': 'ad-mono', text: ev.door }), doc]);
     if (ev.kind === 'upload') {
@@ -154,7 +164,9 @@
       return remover('Delete', 'del', 'Delete this prompt of ' + whose(v) + ', with its forms and its pictures?  It cannot be brought back.',
                      { who: v.key, turn: ev.turn }, then);
     }
-    return remover('Delete', 'del', 'Delete this ' + (ev.kind === 'upload' ? 'upload, and the picture kept of it,' : 'line') +
+    var what = ev.kind === 'upload' ? 'upload, and the picture kept of it,'
+      : ev.kind === 'note' ? 'note' + (ev.file ? ', and the picture kept with it,' : '') : 'line';
+    return remover('Delete', 'del', 'Delete this ' + what +
                    ' from the record of ' + whose(v) + '?  It cannot be brought back.',
                    { who: v.key, line: ev.line, mark: ev.mark }, then);
   }
@@ -213,6 +225,7 @@
   function visitorHead(v) {
     var head = [el('span', { 'class': 'ad-name', text: v.name || 'Open gate (no invite)' })];
     if (!v.invited && v.name) head.push(pill('no invite now'));
+    if (v.notes) head.push(pill(count(v.notes, 'note'), 'note'));
     head.push(el('span', { 'class': 'ad-dim', text: [count(v.visits, 'visit'), count(v.prompts, 'prompt'),
                                                      count(v.changes, 'change') + ' by hand', count(v.uploads, 'upload'),
                                                      count(v.sessions.length, 'session')].join(' · ') }));

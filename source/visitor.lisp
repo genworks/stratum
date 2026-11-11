@@ -15,7 +15,9 @@
 ;; them, their prompts in the prompt log (prompt.lisp) included.  Only an
 ;; invited visitor has any of this: with the gate open there is no one to
 ;; say whose pictures are whose.  The operator's own hand on the same
-;; records is here too: forget-visitor! and purge-prompt-log!.
+;; records is here too: forget-visitor! and purge-prompt-log!.  And
+;; Help > Send a Note: what a visitor wants the operator to know, in
+;; their own words, kept with the rest of their record.
 ;;
 
 (defparameter *upload-preview-size* 160
@@ -185,10 +187,45 @@ visitor's pictures; an empty answer when it cannot be shown."
     (or (upload-preview (visitor-upload-path who (net.aserve:request-query-value "file" req)))
         (make-array 0 :element-type '(unsigned-byte 8)))))
 
+(defparameter *note-characters* 2000
+  "The most a note's words may run to.")
+
+(defparameter *note-picture-size* 1280
+  "The longer side, in pixels, of the picture of the document a note
+may carry.")
+
+(defun handle-note (req)
+  "POST /stratum/api/note?doc= {text, picture}: the visitor's note, kept
+as a line of their record in the activity log -- the time, the document's
+name, the words as :note -- and with PICTURE true a picture of the
+document as it is now kept beside it, as an opened picture is.  Answers
+{kept, picture}; kept is false when this server keeps no activity log,
+so that the page can say the note went nowhere."
+  (let* ((body (yason:parse (gwl:request-body-text req)))
+         (text (and (hash-table-p body) (gethash "text" body)))
+         (words (and (stringp text) (string-trim '(#\Space #\Tab #\Newline #\Return) text))))
+    (unless (and words (plusp (length words)))
+      (error "Write something in the note first."))
+    (when (> (length words) *note-characters*)
+      (error "A note takes up to ~d characters; this one has ~d." *note-characters* (length words)))
+    (let* ((kept (and (activity-directory) t))
+           (png (and kept (eq (gethash "picture" body) t)
+                     (document-picture-png (request-doc req) *note-picture-size*))))
+      (when kept
+        (visitor-log:note! *activity* *gate* req :upload png :more (list :note words)))
+      (json-string (json-object "kept" (json-bool kept) "picture" (json-bool png))))))
+
 (defun publish-visitor! (server host)
-  "The My Uploads doors, behind the invite gate like every door under
-/stratum."
+  "The My Uploads doors and the note door, behind the invite gate like
+every door under /stratum."
   (publish-door server host "/stratum/api/my-uploads" "application/json" #'handle-my-uploads)
-  (publish-door server host "/stratum/api/my-upload" "image/png" #'handle-my-upload))
+  (publish-door server host "/stratum/api/my-upload" "image/png" #'handle-my-upload)
+  ;; not publish-door: the note writes its own line, words and picture
+  ;; together, where publish-door would add the line every door gets
+  (net.aserve:publish :path "/stratum/api/note" :server server :host host
+                      :content-type "application/json"
+                      :function (lambda (req ent)
+                                  (when (door-admits? req ent *max-request-bytes*)
+                                    (serve-door req ent "application/json" #'handle-note)))))
 
 (pushnew 'publish-visitor! *stratum-publishers*)

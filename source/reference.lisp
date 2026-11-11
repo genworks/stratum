@@ -41,7 +41,7 @@ shown it and as the prompt log keeps it.")
   thumb)  ; the page's
 
 (defun data-url (png)
-  (format nil "data:image/png;base64,~a" (sexp-agent:base64-encode png)))
+  (format nil "data:image/png;base64,~a" (octets-base64 png)))
 
 (defun session-references ()
   "The current session's reference pictures, the oldest first."

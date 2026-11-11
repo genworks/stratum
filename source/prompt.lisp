@@ -582,7 +582,7 @@ plist for the page: :reply :forms :results :ok :declined :stopped :changed :usag
                 "stretched" (coerce (mapcar (lambda (s)
                                               (json-object "stamp" (getf s :stamp)
                                                            "w" (getf s :w) "h" (getf s :h)
-                                                           "png" (sexp-agent:base64-encode (getf s :png))))
+                                                           "png" (octets-base64 (getf s :png))))
                                             (getf result :stretched))
                                     'vector)
                 "usage" (let ((usage (getf result :usage)))

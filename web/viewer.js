@@ -2570,7 +2570,8 @@
         img.src = api('my-upload?file=' + encodeURIComponent(u.file));
         list.appendChild(el('label', { 'class': 'st-row', style: 'gap: 8px; align-items: center; margin: 4px 0' }, [
           check, img,
-          el('span', { text: (u.door === 'place' ? 'Placed ' : u.door === 'add-reference' ? 'Attached ' : 'Opened ') + u.time.replace('T', ' ').replace('Z', ' UTC') +
+          el('span', { text: (u.door === 'place' ? 'Placed ' : u.door === 'add-reference' ? 'Attached '
+                              : u.door === 'note' ? 'Sent with a note ' : 'Opened ') + u.time.replace('T', ' ').replace('Z', ' UTC') +
                              ', ' + megabytes(u.bytes) })]));
       });
       return data;
@@ -2607,6 +2608,63 @@
       }
     });
     dialog.ready = dialog.refresh();
+    return dialog;
+  };
+
+  // Help > Send a Note: words for whoever runs this server, kept with
+  // the time and the document's name in this visitor's record (the
+  // activity log), where the operator reads the rest of what they did;
+  // 'include the picture' keeps a picture of the document as it is now
+  // beside them.  The dialog says so before anything is sent.  The
+  // dialog object is the test hook: set({ text, picture }), and send(),
+  // a promise of the server's { kept, picture } (null when there are no
+  // words to send).
+  S.openSendNote = function () {
+    if (S.sendNoteDialog) S.sendNoteDialog.cancel();
+    var words = el('textarea', { 'class': 'st-prompt-box', rows: '5', id: 'stratum-note-text',
+      placeholder: 'What you tried, what you expected, and what happened' });
+    var picture = el('input', { type: 'checkbox', id: 'stratum-note-picture' });
+    picture.checked = true;
+    var said = el('div', { style: 'margin: 6px 0', text: 'Your note, and the picture when you include it, ' +
+      'are kept with your record on this server, for whoever runs it to read.' });
+    var cancel = el('button', { type: 'button', text: 'Cancel' });
+    var send = el('button', { type: 'button', text: 'Send', id: 'stratum-note-send' });
+    var box = el('div', { 'class': 'st-dialog', style: 'width: 420px' }, [
+      el('h2', { text: 'Send a Note' }), words,
+      el('label', { 'class': 'st-row', style: 'gap: 6px; align-items: center; margin-top: 6px' },
+         [picture, el('span', { text: 'Include the picture as it is now' })]),
+      said,
+      el('div', { 'class': 'st-row st-dialog-buttons' }, [cancel, send])]);
+    document.getElementById('stratum-app').appendChild(box);
+    var dialog = S.sendNoteDialog = {
+      set: function (changes) {
+        if ('text' in changes) words.value = changes.text;
+        if ('picture' in changes) picture.checked = !!changes.picture;
+      },
+      cancel: function () { box.remove(); if (S.sendNoteDialog === dialog) S.sendNoteDialog = null; },
+      send: function () {
+        var text = words.value.trim();
+        if (!text) { said.textContent = 'Write something first.'; return Promise.resolve(null); }
+        send.disabled = true;
+        said.textContent = 'Sending...';
+        // the picture shows every stroke made before Send
+        return S.strokesSettled().then(function () {
+          return postJSON('note', JSON.stringify({ text: text, picture: picture.checked }));
+        }).then(function (res) {
+          dialog.cancel();
+          S.notice('Note sent', res.kept
+            ? 'Thank you. Your note' + (res.picture ? ' and the picture are' : ' is') + ' kept for whoever runs this server.'
+            : 'This server keeps no record of visits, so the note went nowhere. Tell whoever invited you instead.');
+          return res;
+        }, function (e) {
+          send.disabled = false;
+          said.textContent = 'Not sent: ' + plainError(e);
+          throw e;
+        });
+      }
+    };
+    cancel.addEventListener('click', dialog.cancel);
+    send.addEventListener('click', function () { dialog.send().catch(function () {}); });
     return dialog;
   };
 
@@ -3144,6 +3202,7 @@
           return { label: n, check: n === docName, run: function () { location.search = '?doc=' + encodeURIComponent(n); } };
         })) },
       { title: 'Help', items: [
+        { label: 'Send a Note...', run: function () { S.openSendNote(); } },
         { label: 'About Stratum', run: function () {
           status('Stratum: a layered image editor in Common Lisp, on Gendl.  AGPL-3.0-or-later.'); } },
         { label: 'Source Code', run: function () { window.open('https://github.com/genworks/stratum'); } }] }
@@ -5174,6 +5233,40 @@
           check('A gateway\'s refusal is asked again, and a failed job says why',
                 o.asked === 2 && o.error === 'the model said no', o);
         }).then(restore, function (e) { restore(); throw e; });
+    }).then(function () {
+      // Help > Send a Note: the menu has it; with no words nothing is
+      // sent; the words and the choice of picture go to the note door,
+      // and the person is told what became of them.  The server here is
+      // a script, so no note lands in a real record.
+      var realFetch = window.fetch, sent = [];
+      function restore() { window.fetch = realFetch; }
+      window.fetch = function (url, init) {
+        if (String(url).indexOf('/stratum/api/note?') < 0) return realFetch.apply(window, arguments);
+        sent.push({ url: String(url), body: init && init.body });
+        return Promise.resolve(new Response(JSON.stringify({ kept: true, picture: true }), { status: 200 }));
+      };
+      var listed = menuSpec().some(function (m) {
+        return m.title === 'Help' && m.items.some(function (it) { return it.label === 'Send a Note...'; });
+      });
+      var noteDialog = S.openSendNote();
+      return noteDialog.send().then(function (empty) {
+        check('Help has Send a Note, and a note with no words sends nothing',
+              listed && empty === null && sent.length === 0, { listed: listed, sent: sent.length });
+        noteDialog.set({ text: '  the brush felt slow  ', picture: true });
+        return noteDialog.send();
+      }).then(function (res) {
+        var body = sent[0] && JSON.parse(sent[0].body);
+        check('the words, trimmed, and the picture go to the note door, and the person is told they are kept',
+              sent.length === 1 && /[?&]doc=/.test(sent[0].url) && body.text === 'the brush felt slow' &&
+              body.picture === true && res.kept === true && !S.sendNoteDialog &&
+              !!S.noticeDialog && /kept/.test(S.noticeDialog.text),
+              { sent: sent, notice: S.noticeDialog && S.noticeDialog.text });
+        if (S.noticeDialog) S.noticeDialog.ok();
+      }).then(restore, function (e) {
+        restore();
+        if (S.sendNoteDialog) S.sendNoteDialog.cancel();
+        throw e;
+      });
     }).then(function () {
       // The exported picture is never a cached one: each export has an
       // address of its own, and the server tells caches to keep nothing.

@@ -1901,7 +1901,7 @@ than may be; then what the sandbox, the image generator, the model that
 plans and the prompt log make of them."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
-         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (old-gate *gate*) (old-dir (activity-directory)) (old-prompts *prompt-log-directory*)
          (root (format nil "/tmp/stratum-references-~d/" (get-universal-time)))
          (logo (let* ((w 64) (h 40) (rgba (make-rgba w h)))
                  (dotimes (i (* w h)) (replace rgba '(200 30 30 255) :start1 (* 4 i)))
@@ -1930,8 +1930,8 @@ plans and the prompt log make of them."
              ;; an open gate, and nothing kept: set globally, since the
              ;; doors run in the server's threads
              (setf *gate* (invite-gate:make-gate :name "Stratum" :prefix "/stratum" :cookie "stratum_invite")
-                   *activity-directory* nil
                    *prompt-log-directory* nil)
+             (configure-activity-log! :directory nil)
              (publish-references! server nil)
              (let ((answer (raw-get port "/stratum/api/references?s=ref-a")))
                (check "a session starts with no reference picture, and is told how many it may have"
@@ -2128,7 +2128,8 @@ plans and the prompt log make of them."
                      (check "and the log lists no reference of that prompt"
                             (let ((dir (second (sort (uiop:subdirectories root) #'string< :key #'namestring))))
                               (and dir (equal (turn-pictures dir) '("before" "after"))))))))))
-        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts)
+        (setf *gate* old-gate *prompt-log-directory* old-prompts)
+        (configure-activity-log! :directory old-dir)
         (bt:with-lock-held (*sessions-lock*)
           (remhash "ref-a" *sessions*)
           (remhash "ref-b" *sessions*))
@@ -3011,7 +3012,7 @@ counts it, forget-visitor! takes it all away, and with the log off
 nothing is written."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
-         (old-gate *gate*) (old-dir *activity-directory*)
+         (old-gate *gate*) (old-dir (activity-directory))
          (stamp (get-universal-time))
          (roster (format nil "/tmp/stratum-activity-roster-~d.sexp" stamp))
          (dir (format nil "/tmp/stratum-activity-~d/" stamp))
@@ -3094,10 +3095,30 @@ nothing is written."
                            (null (probe-file (format nil "~aprompts/t1/" dir)))
                            (probe-file (format nil "~aprompts/t2/turn.sexp" dir)))
                       gone))
+             ;; a visitor's file as Stratum wrote it before the log stood
+             ;; on Gendl's visitor-log, to the character
+             (with-open-file (out (format nil "~aCarol.log" dir) :direction :output :external-format :utf-8)
+               (write-string "(:time \"2026-11-09T18:35:02Z\" :who \"Carol\" :method :get :door \"/stratum/\" :query \"s=c1&doc=my%20photo\")
+(:time \"2026-11-09T18:36:40Z\" :who \"Carol\" :method :post :door \"/stratum/api/open\" :query \"s=c1\" :upload \"Carol/2026-11-09T183640Z-open-ER2R.png\" :bytes 725001)
+" out))
+             (check "a file written before the log stood on visitor-log reads, and is edited, as it was"
+                    (let ((lines (activity-lines "Carol")))
+                      (and (= 2 (length lines))
+                           (equal (first lines) '(:time "2026-11-09T18:35:02Z" :who "Carol" :method :get
+                                                  :door "/stratum/" :query "s=c1&doc=my%20photo"))
+                           (eql 725001 (getf (second lines) :bytes))
+                           (equal "my photo" (query-part (getf (first lines) :query) "doc"))
+                           (equal (first lines)
+                                  (delete-activity-line! "Carol" 0 (activity-line-mark (first lines))))
+                           (equal (activity-lines "Carol") (rest lines))
+                           (find "Carol" (activity-report) :key #'first :test #'equal)
+                           t))
+                    (activity-lines "Carol"))
              (configure-activity-log! :directory nil)
              (raw-get port "/stratum/?invite=alicetoken")
              (check "with the log off, nothing is written" (null (alice-file))))
-        (setf *gate* old-gate *activity-directory* old-dir)
+        (setf *gate* old-gate)
+        (configure-activity-log! :directory old-dir)
         (when (probe-file roster) (delete-file roster))
         (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
         (net.aserve:shutdown :server server)))))
@@ -3110,7 +3131,7 @@ and cannot name them, nor any other file under the log; with the gate
 open there is no one to delete for."
   (let* ((port (free-port))
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"))
-         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (old-gate *gate*) (old-dir (activity-directory)) (old-prompts *prompt-log-directory*)
          (stamp (get-universal-time))
          (roster (format nil "/tmp/stratum-myuploads-roster-~d.sexp" stamp))
          (dir (format nil "/tmp/stratum-myuploads-~d/" stamp))
@@ -3183,7 +3204,8 @@ open there is no one to delete for."
              (check "with the gate open, there is no one to delete for"
                     (and (null (gethash "who" (second (listing "x"))))
                          (eql 500 (first (ask "x" "{\"everything\": true}"))))))
-        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts)
+        (setf *gate* old-gate *prompt-log-directory* old-prompts)
+        (configure-activity-log! :directory old-dir)
         (when (probe-file roster) (delete-file roster))
         (when (probe-file dir) (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))
         (net.aserve:shutdown :server server)))))
@@ -3204,7 +3226,7 @@ visitor's, and the invite and the session in memory stay."
          ;; visitor's words and the page's script are not all Latin-1
          (server (net.aserve:start :port port :server :new :listeners 2 :host "127.0.0.1"
                                    :external-format :utf-8))
-         (old-gate *gate*) (old-dir *activity-directory*) (old-prompts *prompt-log-directory*)
+         (old-gate *gate*) (old-dir (activity-directory)) (old-prompts *prompt-log-directory*)
          (old-admins *admins*)
          (stamp (get-universal-time))
          (roster (format nil "/tmp/stratum-admin-roster-~d.sexp" stamp))
@@ -3239,7 +3261,7 @@ visitor's, and the invite and the session in memory stay."
              (kept ()
                ;; how many lines, pictures and prompts are kept of Bob
                (list (length (activity-lines "Bob"))
-                     (length (uiop:directory-files (merge-pathnames "Bob/" *activity-directory*)))
+                     (length (uiop:directory-files (merge-pathnames "Bob/" (activity-directory))))
                      (length (kept-turns "Bob"))))
              (named (name rows key)
                (find name rows :key (lambda (row) (gethash key row)) :test #'equal))
@@ -3420,7 +3442,7 @@ visitor's, and the invite and the session in memory stay."
                         (and (eql 500 (del "alicetoken" one)) (equal (kept) '(2 1 2)))
                         (kept))
                  (let* ((upload (named "upload" (events) "kind"))
-                        (kept-picture (merge-pathnames (gethash "file" upload) *activity-directory*))
+                        (kept-picture (merge-pathnames (gethash "file" upload) (activity-directory)))
                         (there (probe-file kept-picture)))
                    (check "an upload's line takes the picture kept of it along"
                           (and there
@@ -3458,8 +3480,8 @@ visitor's, and the invite and the session in memory stay."
                           (and (equal before '(2 1 1)) (equal (kept) '(0 0 0))
                                (search "\"lines\":2" said) (search "\"uploads\":1" said)
                                (search "\"prompts\":1" said)
-                               (not (probe-file (merge-pathnames "Bob.log" *activity-directory*)))
-                               (not (probe-file (merge-pathnames "Bob/" *activity-directory*))))
+                               (not (probe-file (merge-pathnames "Bob.log" (activity-directory))))
+                               (not (probe-file (merge-pathnames "Bob/" (activity-directory)))))
                           (list before (kept)))
                    (check "their invite and their session in memory stay, and deleting left no line of the admin's"
                           (and bob (eq (gethash "invited" bob) t)
@@ -3478,8 +3500,9 @@ visitor's, and the invite and the session in memory stay."
              (setf *admins* t)
              (check "and t admits whoever the gate does"
                     (eql 200 (first (fetch "x" "/stratum/api/admin")))))
-        (setf *gate* old-gate *activity-directory* old-dir *prompt-log-directory* old-prompts
+        (setf *gate* old-gate *prompt-log-directory* old-prompts
               *admins* old-admins)
+        (configure-activity-log! :directory old-dir)
         (bt:with-lock-held (*sessions-lock*) (remhash id *sessions*))
         (when (probe-file roster) (delete-file roster))
         (dolist (tree (list dir prompts))

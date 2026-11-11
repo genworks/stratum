@@ -47,11 +47,11 @@ results (300 of them read whole took five seconds)."
   "WHO's kept pictures, newest first, each (:file :time :door :bytes):
 :file as the activity log names it, under the log's directory, and only
 while the file is there."
-  (when (and who *activity-directory*)
+  (when (and who (activity-directory))
     (let ((uploads '()))
       (dolist (line (activity-lines who) uploads)
         (let ((file (getf line :upload)))
-          (when (and file (probe-file (merge-pathnames file *activity-directory*)))
+          (when (and file (probe-file (merge-pathnames file (activity-directory))))
             (push (list :file file :time (getf line :time)
                         :door (subseq (getf line :door) (1+ (or (position #\/ (getf line :door) :from-end t) -1)))
                         :bytes (getf line :bytes))
@@ -62,7 +62,7 @@ while the file is there."
 an error: nothing else under the log can be named here."
   (unless (find file (visitor-uploads who) :key (lambda (u) (getf u :file)) :test #'equal)
     (error "That is not one of your pictures."))
-  (merge-pathnames file *activity-directory*))
+  (merge-pathnames file (activity-directory)))
 
 (defun upload-preview (path)
   "A small PNG of the picture at PATH, a JPEG or a PNG; nil for anything
@@ -89,15 +89,12 @@ else, or what will not decode."
 the pictures they opened, and their prompts in the prompt log.  What
 was removed, as (:activity t-or-nil :uploads n :prompts n)."
   (let ((uploads 0) (prompts 0) (activity nil))
-    (when *activity-directory*
-      (let ((file (probe-file (merge-pathnames (format nil "~a.log" (visitor-file-name who))
-                                               *activity-directory*)))
-            (dir (probe-file (merge-pathnames (format nil "~a/" (visitor-file-name who))
-                                              *activity-directory*))))
-        (when file (delete-file file) (setf activity t))
-        (when dir
-          (setf uploads (length (uiop:directory-files dir)))
-          (uiop:delete-directory-tree (uiop:ensure-directory-pathname dir) :validate t))))
+    (when (activity-directory)
+      (setf activity (and (probe-file (merge-pathnames (format nil "~a.log" (visitor-file-name who))
+                                                       (activity-directory)))
+                          t)
+            ;; with the log's lock, so no line is being written as its file goes
+            uploads (getf (visitor-log:delete-visitor! *activity* who) :uploads)))
     (dolist (turn (visitor-turns who))
       (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
       (incf prompts))
@@ -151,7 +148,7 @@ n :oldest name :newest name :left n), or :would-delete with DRY-RUN."
 (defun my-uploads-json (who)
   (json-string
    (json-object "who" who
-                "kept" (json-bool (and who *activity-directory*))
+                "kept" (json-bool (and who (activity-directory)))
                 ;; a vector, so that none is [] and not null
                 "uploads" (map 'vector (lambda (u)
                                          (json-object "file" (getf u :file) "time" (getf u :time)

@@ -479,7 +479,9 @@ change counts (strokes, filters, layers, selections, the Generate
 dialog, prompts) and so do visits to the page and downloads; the
 page's own fetches of what it shows do not.  Each picture a visitor
 opens or places is kept as they sent it, under `<name>/`, and its line
-names the file.  `(stratum:activity-report)` sums each visitor up, and
+names the file.  The log is Gendl's `visitor-log`, the one other
+applications behind an invite gate keep theirs with; a log Stratum kept
+before it used that reads as it did.  `(stratum:activity-report)` sums each visitor up, and
 `(stratum:forget-visitor! "name")` deletes everything kept of one
 visitor, their prompts in the prompt log included.  A visitor can do
 the same for themselves: File > My Uploads lists the pictures kept of
@@ -550,9 +552,8 @@ visitor who is not an admin, `/stratum/admin` and its doors under
 `/stratum/api/admin` answer 404 like any path never published (someone
 with no invite gets the gate's refusal, as everywhere else). The page's
 look and the pieces its script is built from come from Gendl's
-`visitor-log`, which other applications' admin pages share;
-`dev.lisp` loads that file from a Gendl checkout when the image does
-not carry it. A list of
+`visitor-log` too; `dev.lisp` loads that file from a Gendl checkout
+when the image does not carry it. A list of
 names needs the invite gate, since the names are the invites'; `t`
 admits whoever the gate does, for a room on one's own machine.
 

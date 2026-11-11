@@ -40,17 +40,6 @@ unless it asks for more.")
            (member (invitee req) *admins* :test #'equal)
            t)))
 
-(defun query-part (query name)
-  "The value of NAME in QUERY, a query string as the activity log keeps
-it, or nil."
-  (when query
-    (let ((prefix (format nil "~a=" name)))
-      (dolist (pair (uiop:split-string query :separator "&"))
-        (when (and (> (length pair) (length prefix))
-                   (string= prefix pair :end2 (length prefix)))
-          (let ((value (subseq pair (length prefix))))
-            (return (or (ignore-errors (net.aserve:uridecode-string value)) value))))))))
-
 (defun line-kind (line)
   "What a line of the activity log was: :visit, the page asked for;
 :download; :upload, a picture opened or placed; :asked, a prompt sent;
@@ -250,12 +239,10 @@ up, and the sessions in memory: a JSON object for the admin page."
           (let ((key (visitor-file-name (getf invite :name))))
             (note key :name (getf invite :name))
             (note key :invite invite))))
-      (when *activity-directory*
-        (dolist (file (directory (merge-pathnames "*.log" *activity-directory*)))
-          (let* ((key (pathname-name file))
-                 (lines (activity-lines key)))
-            (note key :lines lines)
-            (note key :name (getf (first lines) :who) :unless-set t))))
+      (dolist (key (visitor-log:visitor-keys *activity*))
+        (let ((lines (activity-lines key)))
+          (note key :lines lines)
+          (note key :name (getf (first lines) :who) :unless-set t)))
       (dolist (turn turns)
         (let ((key (visitor-file-name (getf turn :who))))
           (note key :turns (cons turn (getf (gethash key visitors) :turns)))
@@ -304,7 +291,7 @@ up, and the sessions in memory: a JSON object for the admin page."
                                             (lisp-implementation-version))
                              "heapUsed" (heap-used-fraction)
                              "gate" (json-bool (invite-gate?))
-                             "activityLog" (json-bool *activity-directory*)
+                             "activityLog" (json-bool (activity-directory))
                              "promptLog" (json-bool *prompt-log-directory*)
                              "promptsKept" (length turns)
                              "promptLimit" *prompt-log-turns*
@@ -407,7 +394,7 @@ its listed name, or an error."
   (unless (and (stringp key) (stringp file)
                (find file (visitor-uploads key) :key (lambda (upload) (getf upload :file)) :test #'equal))
     (error "There is no such picture."))
-  (merge-pathnames file *activity-directory*))
+  (merge-pathnames file (activity-directory)))
 
 ;;; What is kept, deleted.
 
@@ -441,22 +428,14 @@ an error unless it is one of the visitor's whose file is KEY."
 their activity file, the pictures they opened, and their prompts in the
 prompt log.  Their invite stays, and so does a session of theirs in
 memory.  What went, as (:lines n :uploads n :prompts n)."
-  (let ((lines 0) (uploads 0) (prompts 0))
-    (when *activity-directory*
-      ;; with the log's lock, so no line is being written as its file goes
-      (bt:with-lock-held (*activity-lock*)
-        (let ((file (probe-file (merge-pathnames (format nil "~a.log" key) *activity-directory*)))
-              (pictures (probe-file (merge-pathnames (format nil "~a/" key) *activity-directory*))))
-          (when file
-            (setf lines (length (activity-lines key)))
-            (delete-file file))
-          (when pictures
-            (setf uploads (length (uiop:directory-files pictures)))
-            (uiop:delete-directory-tree (uiop:ensure-directory-pathname pictures) :validate t)))))
+  ;; the log deletes under its own lock, so no line is being written as
+  ;; its file goes
+  (let ((gone (visitor-log:delete-visitor! *activity* key))
+        (prompts 0))
     (dolist (turn (kept-turns key))
       (uiop:delete-directory-tree (uiop:ensure-directory-pathname turn) :validate t)
       (incf prompts))
-    (list :lines lines :uploads uploads :prompts prompts)))
+    (list :lines (getf gone :lines) :uploads (getf gone :uploads) :prompts prompts)))
 
 ;;; The doors.
 

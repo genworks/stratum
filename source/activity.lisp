@@ -19,190 +19,102 @@
 ;; pictures is the operator's decision, and something the visitors
 ;; should be told.  No invite token is written anywhere.
 ;;
+;; The log itself is Gendl's visitor-log (gwl/source/visitor-log.lisp),
+;; one for Stratum, as invite.lisp holds Stratum's gate: what is here
+;; says which requests are worth a line and what an upload's first
+;; bytes name, and gives the log's functions Stratum's own names.  A
+;; log this file wrote before it stood on visitor-log reads as it did:
+;; the lines and the files beside them are the same.
+;;
 
-(defvar *activity-directory* nil
-  "Where the activity log goes (configure-activity-log!), or nil for none,
-the default.")
-
-(defparameter *activity-body-characters* 4000
-  "How much of a request's body a line keeps: a stroke's points can run
-to many times this.")
-
-(defparameter *activity-reads* '("/stratum" "/stratum/" "/stratum/api/export.png"
-                                 "/stratum/api/save" "/stratum/api/save.ora")
-  "The GET doors worth a line: a visit to the page and a download.  The
-other GETs are the page fetching what it shows, many to each change.")
-
-(defvar *activity-lock* (bt:make-lock "stratum activity")
-  "Held while a line is written, so lines from two requests do not mix.")
+(defvar *activity*
+  (visitor-log:make-visitor-log
+   ;; The GET doors worth a line: a visit to the page and a download.
+   ;; The other GETs are the page fetching what it shows, many to each
+   ;; change.
+   :reads '("/stratum" "/stratum/" "/stratum/api/export.png"
+            "/stratum/api/save" "/stratum/api/save.ora")
+   ;; How much of a request's body a line keeps: a stroke's points can
+   ;; run to many times this.
+   :body-characters 4000
+   ;; An OpenRaster file is a zip; Stratum's own begins STRATUM1.  What
+   ;; is neither these nor a JPEG or a PNG is the page's own packing,
+   ;; "bin": the line's query says how to read it.
+   :upload-types '(("ora" 80 75 3 4)
+                   ("stratum" 83 84 82 65 84 85 77 49)))
+  "Stratum's activity log, off until configure-activity-log! gives it a
+directory.")
 
 (defun configure-activity-log! (&key (directory nil directory?))
   "Keep the activity log under DIRECTORY, made if need be and closed to
 everyone but its owner, or none with nil.  The directory."
   (when directory?
-    (let ((path (and directory (uiop:ensure-directory-pathname directory))))
-      (when path
-        (ensure-directories-exist path)
-        #+unix (uiop:run-program (list "chmod" "700" (uiop:native-namestring path))
-                                 :ignore-error-status t))
-      (setf *activity-directory* path)))
-  *activity-directory*)
+    (visitor-log:open-log! *activity* directory))
+  (activity-directory))
+
+(defun activity-directory ()
+  "Where the activity log goes, or nil when none is kept."
+  (visitor-log:visitor-log-directory *activity*))
 
 (defun invitee (req)
   "The name on REQ's invite; nil with the gate open."
-  (second (find-invite (invite-gate:request-token *gate* req))))
+  (visitor-log:invitee *gate* req))
 
 (defun visitor-file-name (who)
   "WHO, an invite's name or nil, as a file name: letters, digits, - and _
 as they are, anything else _, and \"open-gate\" for nil."
-  (if who
-      (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_))) c #\_)) who)
-      "open-gate"))
+  (visitor-log:visitor-file-name who))
 
 (defun utc-stamp (&optional (time (get-universal-time)))
-  (multiple-value-bind (second minute hour day month year) (decode-universal-time time 0)
-    (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0dZ" year month day hour minute second)))
+  (visitor-log:utc-stamp time))
 
-(defun query-without-invite (req)
-  "REQ's query string with any invite token taken out."
-  (let ((query (net.uri:uri-query (net.aserve:request-uri req))))
-    (and query
-         (let ((kept (remove-if (lambda (pair) (string-equal "invite=" pair :end2 (min 7 (length pair))))
-                                (uiop:split-string query :separator "&"))))
-           (and kept (format nil "~{~a~^&~}" kept))))))
-
-(defun read-body-text (req)
-  "The body a door already read, as text, or nil: never a read of its own,
-which could wait on a body nobody meant to read."
-  (let ((raw (net.aserve::request-request-body req)))
-    (when (and (stringp raw) (plusp (length raw)))
-      (let ((text (gwl:request-body-text req)))
-        (if (> (length text) *activity-body-characters*)
-            (format nil "~a ... (~d characters in all)" (subseq text 0 *activity-body-characters*)
-                    (length text))
-            text)))))
+(defun query-part (query name)
+  "The value of NAME in QUERY, a query string as a line keeps it, or nil."
+  (visitor-log:query-part query name))
 
 (defun upload-type (octets)
   "The file extension for an upload's OCTETS, by its first bytes."
-  (flet ((starts (&rest bytes)
-           (and (>= (length octets) (length bytes))
-                (every #'= bytes (subseq octets 0 (length bytes))))))
-    (cond ((starts #xff #xd8) "jpg")
-          ((starts 137 80 78 71) "png")
-          ((starts 80 75 3 4) "ora")
-          ((starts 83 84 82 65 84 85 77 49) "stratum")
-          ;; the page's own packing; the line's query says how to read it
-          (t "bin"))))
-
-(defun print-activity-line (line out)
-  "LINE, a plist, written to OUT as the activity log keeps one."
-  (with-standard-io-syntax
-    (let ((*print-readably* nil) (*package* (find-package :keyword)) (*print-case* :downcase))
-      (prin1 line out)
-      (terpri out))))
+  (visitor-log:upload-type *activity* octets))
 
 (defun note-activity! (req &key upload)
   "A line for REQ in its visitor's file, with UPLOAD, the octets of an
 opened or placed picture, kept beside it.  Nothing when the log is off
 or REQ is the page fetching what it shows.  A log that cannot be
 written must not cost anyone their request."
-  (when (and *activity-directory*
-             (or upload
-                 (not (eq (net.aserve:request-method req) :get))
-                 (member (net.uri:uri-path (net.aserve:request-uri req)) *activity-reads*
-                         :test #'equal)))
-    (handler-case
-        (let* ((who (invitee req))
-               (name (visitor-file-name who))
-               (time (get-universal-time))
-               (door (net.uri:uri-path (net.aserve:request-uri req)))
-               (kept (and upload
-                          (format nil "~a/~a-~a-~36r.~a" name (remove #\: (utc-stamp time))
-                                  (subseq door (1+ (or (position #\/ door :from-end t) -1)))
-                                  (random (expt 36 4) (make-random-state t))
-                                  (upload-type upload))))
-               (line (list :time (utc-stamp time) :who who
-                           :method (net.aserve:request-method req) :door door
-                           :query (query-without-invite req)
-                           :body (and (not upload) (read-body-text req))
-                           :upload kept :bytes (and upload (length upload)))))
-          (bt:with-lock-held (*activity-lock*)
-            (when kept
-              (let ((path (merge-pathnames kept *activity-directory*)))
-                (ensure-directories-exist path)
-                (with-open-file (out path :direction :output :element-type '(unsigned-byte 8)
-                                          :if-exists :supersede)
-                  (write-sequence upload out))))
-            (with-open-file (out (merge-pathnames (format nil "~a.log" name) *activity-directory*)
-                                 :direction :output :if-exists :append :if-does-not-exist :create
-                                 :external-format :utf-8)
-              (print-activity-line (loop for (key value) on line by #'cddr when value append (list key value))
-                                   out))))
-      (serious-condition (e)
-        (let ((*print-readably* nil))
-          (format *error-output* "~&[stratum] activity log: ~a~%" e))))))
+  (visitor-log:note! *activity* *gate* req :upload upload))
 
 (defun activity-lines (who)
   "The lines of WHO's activity file, oldest first, read with nothing
 evaluated."
-  (let ((file (and *activity-directory*
-                   (probe-file (merge-pathnames (format nil "~a.log" (visitor-file-name who))
-                                                *activity-directory*)))))
-    (when file
-      (with-open-file (in file :external-format :utf-8)
-        (with-standard-io-syntax
-          (let ((*read-eval* nil) (*package* (find-package :keyword)))
-            (loop for line = (read in nil in)
-                  until (eq line in)
-                  collect line)))))))
+  (visitor-log:lines *activity* who))
 
 (defun activity-line-mark (line)
   "A short word for LINE's content, the same while the line is: whoever
 names a line by where it stands in its file says this too, and so cannot
 take another for it once the file has changed."
-  (format nil "~36r" (sxhash (with-output-to-string (out) (print-activity-line line out)))))
+  (visitor-log:line-mark line))
 
 (defun delete-activity-line! (who index mark)
   "Line INDEX of WHO's activity file, counted from 0, taken out, and
 the picture kept with it deleted; an error unless the line there has
 MARK (activity-line-mark), as it will not once the file has been
-rewritten.  The file is written anew beside itself and put in its place
-whole; the last line gone, the file goes.  The line."
-  (bt:with-lock-held (*activity-lock*)
-    (let* ((lines (activity-lines who))
-           (line (and (integerp index) (<= 0 index) (nth index lines))))
-      (unless (and line (equal mark (activity-line-mark line)))
-        (error "That line is not where it was: the record has changed.  Refresh and try again."))
-      (let ((file (merge-pathnames (format nil "~a.log" (visitor-file-name who)) *activity-directory*))
-            (kept (append (subseq lines 0 index) (nthcdr (1+ index) lines)))
-            (upload (getf line :upload)))
-        (if kept
-            (let ((anew (merge-pathnames (format nil "~a.rewrite" (visitor-file-name who))
-                                         *activity-directory*)))
-              (with-open-file (out anew :direction :output :if-exists :supersede :external-format :utf-8)
-                (dolist (line kept) (print-activity-line line out)))
-              (uiop:rename-file-overwriting-target anew file))
-            (delete-file file))
-        (when (and upload (notany (lambda (line) (equal upload (getf line :upload))) kept))
-          (let ((picture (probe-file (merge-pathnames upload *activity-directory*))))
-            (when picture (delete-file picture))))
-        line))))
+rewritten.  The line."
+  (visitor-log:delete-line! *activity* who index mark))
 
 (defun activity-report ()
   "Each visitor in the activity log: (name :requests n :uploads n :first
 time :last time :doors ((door . count) ...)), most recent first."
-  (when *activity-directory*
-    (sort (loop for file in (directory (merge-pathnames "*.log" *activity-directory*))
-                for lines = (activity-lines (pathname-name file))
-                when lines
-                  collect (let ((doors '()))
-                            (dolist (line lines)
-                              (let ((cell (assoc (getf line :door) doors :test #'equal)))
-                                (if cell (incf (cdr cell)) (push (cons (getf line :door) 1) doors))))
-                            (list (or (getf (first lines) :who) (pathname-name file))
-                                  :requests (length lines)
-                                  :uploads (count-if (lambda (l) (getf l :upload)) lines)
-                                  :first (getf (first lines) :time)
-                                  :last (getf (car (last lines)) :time)
-                                  :doors (sort doors #'> :key #'cdr))))
-          #'string> :key (lambda (entry) (getf (cdr entry) :last)))))
+  (sort (loop for key in (visitor-log:visitor-keys *activity*)
+              for lines = (activity-lines key)
+              when lines
+                collect (let ((doors '()))
+                          (dolist (line lines)
+                            (let ((cell (assoc (getf line :door) doors :test #'equal)))
+                              (if cell (incf (cdr cell)) (push (cons (getf line :door) 1) doors))))
+                          (list (or (getf (first lines) :who) key)
+                                :requests (length lines)
+                                :uploads (count-if (lambda (l) (getf l :upload)) lines)
+                                :first (getf (first lines) :time)
+                                :last (getf (car (last lines)) :time)
+                                :doors (sort doors #'> :key #'cdr))))
+        #'string> :key (lambda (entry) (getf (cdr entry) :last))))

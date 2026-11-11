@@ -299,6 +299,16 @@ style sheet does the rest.
 `STRATUM.setPhone(true)` and `STRATUM.setSheet("tools")` do from the
 console what the width and the tabs do.
 
+### On a tablet
+
+A tablet is wider than the phone layout, so it gets the desk: the
+menus, the palette, the picture and the panel, with the row of buttons
+over the picture standing in for the keys. Where the pointer is a finger (`pointer:
+coarse`), the Prompt comes right after the status lines instead of
+after the layers, since held on its side the tool options and layers
+fill the screen before the Prompt would begin.
+`STRATUM.placePrompt(true)` or `(false)` does that from the console.
+
 ### The Lisp API and the prompt box
 
 Everything the editor does from its menus and tools is a function in
@@ -986,7 +996,9 @@ The self-test checks:
   and the options of the tool in hand, the menus as a drawer that the
   item run shuts; then two touch pointers spread to twice as far apart
   zoom the view to twice the scale while the stroke the first had begun
-  paints nothing; and the desk layout comes back as it was.
+  paints nothing; and the desk layout comes back as it was, with the
+  Prompt after the status lines for a tablet and after the layers for
+  a mouse.
 
 The panel's Benchmark button (or `STRATUM.bench(n, curves?)`) draws
 frames back to back with a pan step and a curve-point drag, and reports

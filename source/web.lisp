@@ -1093,6 +1093,8 @@ html, body { margin: 0; height: 100%; background: #1b1d21; color: #d8dbe0;
 .st-curve { display: block; margin-top: 6px; background: #17181b;
   border: 1px solid #3a3e45; cursor: crosshair; touch-action: none; }
 #stratum-prompt { border-top: 1px solid #33363c; margin-top: 10px; padding-top: 6px; }
+#stratum-panel.st-prompt-first #stratum-prompt { border-bottom: 1px solid #33363c; padding-bottom: 8px;
+  margin-bottom: 10px; }
 .st-prompt-box { width: 100%; box-sizing: border-box; background: #17181b; color: inherit;
   border: 1px solid #3a3e45; border-radius: 3px; padding: 4px 6px; font: inherit; resize: vertical; }
 .st-prompt-log { font-size: 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; }

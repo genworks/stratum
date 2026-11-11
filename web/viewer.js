@@ -5309,6 +5309,21 @@
               !body.classList.contains('st-phone') === !wasPhone &&
               (wasPhone || document.getElementById('stratum-tools').parentNode === document.getElementById('stratum-app')),
               { phone: S.phone });
+        // a tablet: the Prompt first, where a screen held sideways shows
+        // it; a mouse's desk: after the layers
+        // (names of their own: a var here is hoisted over the checks above)
+        var promptEl = document.getElementById('stratum-prompt');
+        function promptPlace() {
+          return { after: promptEl.previousElementSibling.id, marked: panel.classList.contains('st-prompt-first') };
+        }
+        S.placePrompt(true);
+        var onTablet = promptPlace();
+        S.placePrompt(false);
+        var onDesk = promptPlace();
+        S.placePrompt();
+        check('a tablet gets the Prompt right after the status lines, a mouse after the layers',
+              onTablet.after === 'stratum-status' && onTablet.marked && onDesk.after === 'stratum-layers' && !onDesk.marked,
+              { tablet: onTablet, desk: onDesk });
       });
     }).then(function () {
       return { ok: ok, doc: doc.name, steps: steps };
@@ -5924,6 +5939,21 @@
     refreshAssist();
   };
 
+  // A tablet is a desk whose pointer is a finger, and held on its side
+  // (1366 x 1024) the panel's tool options and layers fill the screen
+  // before the Prompt begins.  There the Prompt comes right after the
+  // status lines; a mouse's desk keeps it after the layers.  FIRST says
+  // which (true, false, or undefined: as the pointer and the width say);
+  // the phone's sheets show the Prompt alone, so its place is moot there.
+  S.placePrompt = function (first) {
+    var panel = document.getElementById('stratum-panel'), prompt = document.getElementById('stratum-prompt');
+    if (!panel || !prompt || !statusEl || !layersEl) return;
+    if (first === undefined) first = window.matchMedia('(pointer: coarse)').matches && !S.phone;
+    S.promptFirst = !!first;
+    panel.classList.toggle('st-prompt-first', S.promptFirst);
+    panel.insertBefore(prompt, (S.promptFirst ? statusEl : layersEl).nextSibling);
+  };
+
   // The height the style sheet lays the phone out in: what is left
   // above the keyboard, which 100vh and 100dvh both ignore.  A page
   // pinched larger keeps the layout it had.
@@ -6039,7 +6069,7 @@
       if (lastPointer === 'touch' && !S.touch) S.setTouch(true);
     }, true);
     var narrow = window.matchMedia('(max-width: 760px), (pointer: coarse) and (max-height: 500px)');
-    function fit() { S.setPhone(narrow.matches); }
+    function fit() { S.setPhone(narrow.matches); S.placePrompt(); }
     if (narrow.addEventListener) narrow.addEventListener('change', fit); else narrow.addListener(fit);
     if (window.matchMedia('(pointer: coarse)').matches) S.setTouch(true);
     fit();
@@ -6090,6 +6120,8 @@
       installTools();
       installMenubar();
       installPrompt();
+      // after the tool options, which go in after the status lines
+      S.placePrompt();
       return uploadPixels();
     }).then(function () {
       // whatever a failed open left waiting for a reload that never came

@@ -7,13 +7,13 @@
 # page is published.  Exits nonzero when any document fails.
 #
 #   tests/browser.sh                       # parity and demo
-#   BASE=http://engine-room:9090 tests/browser.sh parity stress
+#   BASE=http://localhost:9090 tests/browser.sh parity stress
 #
 # INVITE, when set, is an invite token for a server whose gate is on.
 # Every run works in the one session named by SESSION (selftest), so
 # repeated runs reuse their documents instead of filling the server's
 # heap with a fresh copy of each.
-BASE=${BASE:-http://engine-room:9090}
+BASE=${BASE:-http://localhost:9090}
 SESSION=${SESSION:-selftest}
 DIR=$(cd "$(dirname "$0")" && pwd)
 DOCS=("$@")

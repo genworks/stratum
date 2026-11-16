@@ -41,7 +41,17 @@ Curves use monotone cubic interpolation (Fritsch–Carlson). The table
 functions are *dual* (`source/dual.lisp`): each is an ordinary Lisp
 function, and the same form is translated by Parenscript into
 `/stratum/dual.js`. So the browser builds a table while a point or a
-slider is dragged exactly as the server does, equal to the last bit.
+slider is dragged from the same definition as the server. A curves
+table, built from `+ - * /`, `sqrt` and comparisons, is equal to the
+server's to the last bit. A levels table is not quite: its gamma is
+`expt`, which is `Math.pow` in the browser, and pow need not match the
+server's libm in the last bit (one unit in the last place in some
+entries, depending on the browser's engine and the platform). The
+self-test holds levels tables within 1e-12 of the server's, under a
+millionth of one level of the 8-bit picture. A product or sum nested
+to the right of another, `(* a (* b c))`, is flattened before either
+side sees it, because Parenscript would print it as `a * b * c` and
+group it differently.
 
 Compositing happens in linear light on premultiplied color, following
 the W3C Compositing and Blending formulas (normal, multiply, screen,
@@ -255,10 +265,10 @@ crop or resize. The other modes on the menu are shown and disabled.
 
 ## Running it
 
-In a Gendl image (an SBCL or CCL room):
+In a Gendl image (an SBCL or CCL room), from your checkout:
 
 ```lisp
-(load "/projects/gw/stratum/dev.lisp")
+(load "/path/to/stratum/dev.lisp")
 ```
 
 Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
@@ -266,6 +276,11 @@ Then browse `/stratum/` on that image's HTTP port: `?doc=demo` (1920 ×
 `?doc=stress` (3840 × 2160, twenty layers). Drag to pan, use the wheel
 to zoom and double-click to fit. In a curves editor, drag a point, click
 empty space to add a point, or double-click a point to remove it.
+
+A host that must set the invite gate before any door opens binds
+`cl-user::*stratum-publish*` to nil first; loading then publishes
+nothing, and the host calls `(stratum:publish-stratum!)` itself once
+`(stratum:configure-gate! :invites-file ...)` has run.
 
 ### On a phone
 
@@ -765,7 +780,7 @@ change, and the plan, the programs and the layer panel follow.
 The Lisp half, in any Gendl image with Stratum loaded:
 
 ```lisp
-(load "/projects/gw/stratum/tests/run.lisp")
+(load "/path/to/stratum/tests/run.lisp")
 (stratum::run-tests)   ; => T when every check passed
 ```
 
@@ -907,14 +922,17 @@ The browser half runs `STRATUM.selfTest()` in headless Chromium
 (SwiftShader) against a published image, for each document named:
 
 ```sh
-BASE=http://engine-room:9090 tests/browser.sh parity demo
+BASE=http://localhost:9090 tests/browser.sh parity demo
 ```
+
+`BASE` is the address of the server where Stratum is published.
 
 The self-test checks:
 - `parity()`: the document rendered at 1:1 with `texelFetch`, read back
   and compared pixel by pixel with `/stratum/api/cpu`, within one level;
-- `lutCheck()`: the curve tables built in the browser equal the
-  server's;
+- `lutCheck()`: the curves tables built in the browser equal the
+  server's to the last bit, and the levels tables are within
+  `STRATUM.levelsTolerance` (1e-12) of them;
 - a blend-mode edit and its undo, each of which must rebuild the
   program exactly once and leave parity intact;
 - a rectangle re-upload, which must leave parity intact;

@@ -15,10 +15,15 @@
 ;;;
 ;;; then browse /stratum/ on that image's HTTP port (?doc=demo,
 ;;; ?doc=parity, ?doc=stress).  zpng, salza2 and chipz come from the
-;;; genworks/quicklisp checkout when the image does not carry them.
+;;; genworks/quicklisp checkout when the image does not carry them.  A
+;;; host that must set the invite gate before the doors open binds
+;;; cl-user::*stratum-publish* to nil first and publishes itself.
 ;;;
 
 (in-package :cl-user)
+
+(defvar *stratum-publish* t
+  "Whether loading this file publishes the doors.")
 
 (let ((software #p"/projects/gw/quicklisp/dists/quicklisp/software/"))
   (dolist (pattern '("zpng-*/" "salza2-*/" "chipz-*/"))
@@ -63,4 +68,5 @@
 
 (asdf:load-system :stratum)
 
-(funcall (intern "PUBLISH-STRATUM!" :stratum))
+(when *stratum-publish*
+  (funcall (intern "PUBLISH-STRATUM!" :stratum)))

@@ -133,6 +133,35 @@ to alter the pictures."
   (check "fewer than two points is the identity curve"
          (equal (normalize-points '((0.3 0.3))) *identity-curve*)))
 
+(defun tree-count (x tree)
+  "How many times X occurs in TREE, by EQUAL."
+  (cond ((equal x tree) 1)
+        ((consp tree) (+ (tree-count x (car tree)) (tree-count x (cdr tree))))
+        (t 0)))
+
+(defun test-dual-grouping ()
+  (check "a right-nested product or sum is flattened, at every depth, and the left one kept"
+         (and (equal (normalize-dual '(* a (* b (* c d)))) '(* a b c d))
+              (equal (normalize-dual '(+ a (+ b c))) '(+ a b c))
+              (equal (normalize-dual '(* (* a b) c)) '(* (* a b) c))
+              (equal (normalize-dual '(let* ((x (* a (* b c)))) (- x (* c (* d e)))))
+                     '(let* ((x (* a b c))) (- x (* c d e))))))
+  (let* ((expansion (macroexpand-1 '(define-dual-function test-nested-product (a b c) (* a (* b c)))))
+         (defun-form (find 'defun (cdr expansion) :key (lambda (f) (and (consp f) (car f))))))
+    (check "a dual function's Lisp body and its Parenscript form both get the flattened body"
+           (and (= 2 (tree-count '(* a b c) expansion))
+                (zerop (tree-count '(* a (* b c)) expansion)))
+           expansion)
+    (check "so its Lisp side groups (* a (* b c)) from the left, as a * b * c does in the browser"
+           (and defun-form
+                (= (funcall (compile nil `(lambda (a b c) ,@(cdddr defun-form))) 0.1d0 0.2d0 0.3d0)
+                   (* (* 0.1d0 0.2d0) 0.3d0))
+                (/= (* (* 0.1d0 0.2d0) 0.3d0) (* 0.1d0 (* 0.2d0 0.3d0))))
+           defun-form))
+  (check "every dual function's body is already flat, so the tables and strokes are as before"
+         (every (lambda (entry) (equal (normalize-dual (cdr entry)) (cdr entry))) *dual-functions*)
+         (mapcar #'car *dual-functions*)))
+
 (defun test-adjustments ()
   (let ((identity (levels-lut 0d0 1d0 1d0 0d0 1d0 256)))
     (check "neutral levels are the identity table"
@@ -4880,7 +4909,7 @@ and comes back again on redo; the undo list before it stays good."
 (defun run-tests ()
   "Run every check; print one line each; T when all passed."
   (setf *checks* nil)
-  (dolist (test '(test-rebuilds test-layer-types test-curves test-adjustments test-rect
+  (dolist (test '(test-rebuilds test-layer-types test-curves test-dual-grouping test-adjustments test-rect
                   test-brush test-clone test-heal test-history test-mode test-masks test-adjust test-selection test-wand test-modify-selection test-cut-out test-refine-selection test-select-subject test-floating test-transform test-resize test-rotate
                   test-file-format test-ora test-drawing test-filter test-gradient test-merge
                   test-layers test-files test-png test-sessions test-session-locks test-invite test-activity-log test-my-uploads test-notes test-admin test-uploads test-planes test-stamps test-api test-prompt test-looks test-prompt-undo test-spills test-prompt-log test-purge-prompt-log test-declined test-long-prompt test-generate test-generate-background test-generator-models test-generator-door test-generate-direct test-generate-references test-reference-pictures test-generate-turn test-fill-fade test-first-load test-selection-rects test-jpeg

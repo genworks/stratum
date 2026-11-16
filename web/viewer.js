@@ -3897,22 +3897,34 @@
              curves: !!point, canvas: [canvas.width, canvas.height], scale: view.scale };
   };
 
-  // The curve tables as the browser computes them (composedLut from
-  // dual.js, in float64) against the server's (the same Lisp source),
-  // row for row.
+  // How far a levels table may stand from the server's.  levelsLut calls
+  // Math.pow, which need not match the server's libm in the last bit
+  // (one unit in the last place, 1.1e-16 near 1, seen with node 18);
+  // everything else in the tables is + - * / sqrt and comparisons, so
+  // the curves tables must be equal.  1e-12 is thousands of units in the
+  // last place and still under a millionth of one level of the 8-bit
+  // picture.
+  S.levelsTolerance = 1e-12;
+
+  // The tables as the browser computes them (composedLut and levelsLut
+  // from dual.js, in float64) against the server's (the same Lisp
+  // source), row for row, the curves and the levels apart.
   S.lutCheck = function () {
     return fetchJSON(api('luts')).then(function (server) {
-      var max = 0, count = 0;
+      var kinds = { curves: { entries: 0, maxDiff: 0 }, levels: { entries: 0, maxDiff: 0 } };
       doc.layers.forEach(function (L) {
         if (L.lutRow === null || L.lutRow === undefined) return;
+        var tally = L.kind === 'levels' ? kinds.levels : kinds.curves;
         layerLuts(L).forEach(function (lut, k) {
           for (var i = 0; i < 256; i++) {
-            max = Math.max(max, Math.abs(lut[i] - server[(L.lutRow + k) * 256 + i]));
-            count++;
+            tally.maxDiff = Math.max(tally.maxDiff, Math.abs(lut[i] - server[(L.lutRow + k) * 256 + i]));
+            tally.entries++;
           }
         });
       });
-      return { entries: count, maxDiff: max };
+      return { entries: kinds.curves.entries + kinds.levels.entries,
+               maxDiff: Math.max(kinds.curves.maxDiff, kinds.levels.maxDiff),
+               curves: kinds.curves, levels: kinds.levels };
     });
   };
 
@@ -3931,7 +3943,9 @@
       check('parity', p.maxDiff <= 1, p);
       return S.lutCheck();
     }).then(function (l) {
-      check('curve tables', l.entries === 0 || l.maxDiff < 1e-9, l);
+      check('curve tables equal the server\'s to the last bit', l.curves.maxDiff === 0, l.curves);
+      check('levels tables within ' + S.levelsTolerance + ' of the server\'s (Math.pow)',
+            l.levels.maxDiff <= S.levelsTolerance, l.levels);
       doc.layers.forEach(function (x) { if (!L && x.kind === 'raster' && x.index > 0) L = x; });
       if (!L) return null;
       original = L.blend;
